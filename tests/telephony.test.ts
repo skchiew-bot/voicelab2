@@ -223,6 +223,7 @@ describe('the do-not-call gate comes before the provider', () => {
     expect(env.provider.calls).toHaveLength(0);
     expect(await events(res.json().callId)).toEqual(['dial.blocked']);
     expect((await callRow(res.json().callId)).status).toBe('blocked');
+    expect((await callRow(res.json().callId)).cost_status).toBe('not_applicable');
   });
 
   it('blocks a country nobody has declared, and a malformed number', async () => {
@@ -250,6 +251,10 @@ describe('when the provider refuses', () => {
     expect(res.json().error).toContain('[number]');
     const failed = (await env.pool.query(`SELECT id FROM calls WHERE status = 'failed' ORDER BY started_at DESC LIMIT 1`)).rows[0];
     expect(await events(failed.id)).toEqual(['dial.allowed', 'call.failed']);
+    // A call that never connected has nothing to price: that is not a pricing failure, and retrying must not invent a cost.
+    expect((await callRow(failed.id)).cost_status).toBe('not_applicable');
+    expect((await env.call(env.staffToken, 'POST', `/internal/calls/${failed.id}/cost/retry`)).json()).toEqual({ cost_status: 'not_applicable' });
+    expect((await env.pool.query('SELECT count(*)::int AS n FROM call_costs WHERE call_id = $1', [failed.id])).rows[0].n).toBe(0);
   });
 
   it('redacts anything number-shaped from provider text', () => {

@@ -61,3 +61,23 @@ label.check { display: flex; gap: .5rem; align-items: flex-start; font-size: .9r
 textarea { font: inherit; padding: .5rem .6rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); width: 100%; }
 textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .card-inner { display: flex; flex-direction: column; gap: .75rem; }
+ul.alerts { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: .5rem; }
+.phases { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: .75rem; }
+.phase { border: 1px solid var(--border); border-radius: 8px; padding: .75rem .9rem; }
+.phase header { display: flex; justify-content: space-between; gap: .5rem; align-items: baseline; }
+.phase h3 { margin: 0; font-size: 1rem; }
+.phase p { margin: .35rem 0; }
+progress { width: 8rem; vertical-align: middle; accent-color: var(--accent); }
+ul.criteria { list-style: none; padding-left: 0; display: flex; flex-direction: column; gap: .5rem; }
+details > summary { cursor: pointer; color: var(--accent); }
+.phases { align-items: start; }
+.badge { white-space: nowrap; }
+/* On a phone a wide table scrolls inside itself rather than widening the whole page. */
+@media (max-width: 700px) { table { display: block; max-width: 100%; overflow-x: auto; } }
+.code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85rem; }
+ul.outline { list-style: none; padding: 0; display: flex; flex-direction: column; gap: .6rem; }
+.outline .line { font-style: italic; }
+ol.transcript { list-style: none; padding: 0; display: flex; flex-direction: column; gap: .35rem; }
+ol.transcript li.caller { text-align: right; }
+ol.transcript li.note { color: var(--muted); font-style: italic; }
+td.actions { white-space: nowrap; }

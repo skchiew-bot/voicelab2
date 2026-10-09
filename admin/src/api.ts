@@ -68,3 +68,30 @@ export interface Reconciliation { id: number; source: string; outcome: string; o
 export interface CampaignCost { project_id: string | null; project: string | null; calls: number; total_usd: string; total_myr: string; credits_drawn: string; margin_usd: string }
 export interface CallEvent { id: number; type: string; occurred_at: string }
 export interface ReferenceRate { adapterKey: string; summary: string }
+
+export interface Alert { severity: 'high' | 'medium' | 'low'; code: string; message: string; link?: string }
+export interface ProviderHealth {
+  id: string; name: string; adapter: string; kind: string; status: string; credentialsCheckedAt: string | null;
+  ratesInForce: boolean; ratesConfirmed: boolean; calls24h: { total: number; completed: number; unanswered: number; failed: number }; lastCall: string | null;
+}
+export interface MoneyWindow { calls: number; cost_usd: string; cost_myr: string; credits_drawn: string; margin_usd: string }
+export interface Tower {
+  generatedAt: string; alerts: Alert[]; blocked24h: number; activeTotal: number; providers: ProviderHealth[];
+  activeCalls: { id: string; direction: string; status: string; started_at: string; provider_id: string }[];
+  funding: { provider_id: string; provider: string; currency: string; balance: string; entries: number }[];
+  money: { last24h: MoneyWindow; last7d: MoneyWindow };
+}
+export interface PhaseProgress {
+  id: string; name: string; status: 'done' | 'in_progress' | 'not_started'; summary: string; open: string[];
+  criteria: { text: string; state: 'met' | 'partly' | 'not_met'; proof: 'tests' | 'fakes' | 'live' | 'none'; note?: string }[];
+}
+export interface Progress { generatedAt: string; phases: PhaseProgress[]; crossCutting: PhaseProgress['criteria']; decisions: string[] }
+
+export interface WorkflowSummary { id: string; tenant_id: string; name: string; latest_version: string | null; staging_version: string | null; production_version: string | null }
+export interface WfIssue { code: string; nodeId?: string; message: string }
+export interface WfVersion { id: string; version: string; change: string; valid: boolean; issues: { errors: WfIssue[]; warnings: WfIssue[] }; note: string | null; created_at: string; definition: WorkflowDef }
+export interface WorkflowDef { start: string; variables?: string[]; nodes: Record<string, { type: string; speech?: string; text?: string | Record<string, string>; transitions?: { when?: unknown; to: string }[]; workflow?: string; target?: unknown; outcome?: string; integration?: string; label?: string }> }
+export interface WorkflowDetailData { id: string; tenant_id: string; name: string; live: { staging: string | null; production: string | null }; previous: { staging: string | null; production: string | null }; history: { id: number; environment: string; kind: string; version: string; created_at: string }[]; versions: WfVersion[] }
+export interface TemplateInfo { key: string; title: string; description: string; entry: string; workflows: { key: string; description: string }[] }
+export interface SimResult { batchId: string; total: number; passed: number; failed: number; clean: boolean; gateProblems?: string[]; results: { name: string; passed: boolean; outcome: string | null; failures: string[] }[] }
+export interface RunView { id: string; version: number; status: string; outcome: string | null; error: string | null; said: string[]; awaiting: { captureAs: string } | null }

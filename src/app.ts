@@ -17,6 +17,10 @@ import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from 
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
 import { addNumber, callKnown, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { registerWorkflowRoutes } from './routes/workflows.js';
+import type { HttpDeps } from './workflows/integrations.js';
+import { controlTower } from './store/control-tower.js';
+import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
 import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
 import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
 import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
@@ -35,6 +39,8 @@ const currency = z.string().length(3).transform((s) => s.toUpperCase());
 export interface Deps {
   /** Outbound HTTP for provider credential checks. Replaced in tests. */
   fetch?: Fetch;
+  /** How workflow integrations connect. Only tests change this; production always uses the guarded default. */
+  integrationHttp?: HttpDeps;
 }
 
 export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): FastifyInstance {
@@ -344,6 +350,18 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
       tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), callId: z.string().uuid(), country, to: z.string(),
     }).parse(req.body);
     return withActor(pool, s.actor, (c) => gateOutbound(c, dncKey, body));
+  });
+
+  registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+
+  // ------------------------------------------------- control tower
+  app.get('/internal/control-tower', async (req) => {
+    const s = await internal(req);
+    return withActor(pool, s.actor, (c) => controlTower(c, key, { publicBaseUrlSet: Boolean(callDeps.baseUrl) }));
+  });
+  app.get('/internal/progress', async (req) => {
+    await internal(req);
+    return { generatedAt: new Date().toISOString(), phases: PHASES, crossCutting: CROSS_CUTTING, decisions: DECISIONS };
   });
 
   // ------------------------------------------------ numbers and calls

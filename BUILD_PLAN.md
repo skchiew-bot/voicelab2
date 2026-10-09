@@ -99,7 +99,7 @@ Built and tested:
 - **Admin console** (`/admin/`, React single-page app served by the API): staff sign-in; add a provider from a form built from the adapter declaration; edit capabilities; add and confirm charging versions; record provider funding; add clients, projects, users and credits. Driven end to end in a real browser by `tests/admin-ui.test.ts`. Exit criterion 1 is now met through the UI.
 
 Not built yet:
-- Tenant switcher and the Control Tower shell.
+- A tenant switcher.
 - Redis and the job queue (nothing in Phase 0 needs them yet).
 - Finer roles and permissions beyond internal admin, tenant admin and tenant user.
 - The Docker install path has not been run end to end; its compose file validates, but it needs a real run.
@@ -175,6 +175,25 @@ Goal: the minimum workflow engine that stitching and modules can hang off.
 - First template: debt collection, tailored to Malaysia.
 
 *Deferred to later in the phase or after it: the prompt-to-workflow builder. It needs its own credit pricing, and that is never set below the provider's token cost.*
+
+**Status (in progress)**
+
+Built and tested:
+- **The definition and validator:** a workflow is plain JSON (never executed): `speak` nodes (fixed, hybrid or dynamic), `api` calls, `subflow`, `handoff` and `end`, with conditions in a small fixed language. The validator refuses a missing start, an edge to a node that does not exist, a node nothing leads to, a variable that is used but never set, malformed conditions, a fixed node with slots or a hybrid one without, and more. A saved version with problems is kept but can never be published.
+- **The engine:** runs a call as a resumable step function over plain data, so it can wait for the caller and continue later. Routing takes the first condition that holds; if none does, the call ends cleanly. Subflows run inside a workflow and return their outcome; a handoff passes the call with every variable and does not come back (to another workflow, or to a person with a reason). A missing variable stops the call before anything wrong is said; a loop is stopped by limits on steps per request, steps per call and integration calls per call. Phone numbers, in any form and however deeply nested, are refused in a call's variables and in what an integration returns.
+- **Understanding replies:** by phrase rules, whole words only, and a match inside a longer phrase of another intent is ignored, so "tidak boleh" (cannot) is not read as "boleh" (can). Several intents is "ambiguous", none is "unknown".
+- **Versions:** an edit inside a node is a minor version (1.0 to 1.1); a change to where the call can go (nodes, transitions, conditions, targets) is major (1.1 to 2.0). Versions are immutable, and two saves at once get different numbers.
+- **Staging, production and rollback:** a version must be valid, every workflow it hands over to must be live in the same environment and receive every variable it needs, and subflows may not loop. Production also needs the version live in staging and a clean list-based simulation of that exact version, in which every scenario states the outcome it expects (none expecting a failure) and every workflow it reaches is, in production, the version that was simulated. A new version of a workflow is refused if a workflow already live in that environment would break on it, and the same goes for a rollback. A rollback goes back one version at a time, however often it is used. A call pins the versions it can reach when it starts, so a deploy or rollback never changes one already under way. A reply claims its turn before anything runs, so two replies at once cannot both act (or both write to an integration); a reply can say which question it answers.
+- **List-based simulation:** many scripted callers through one version, judged against what each should do; integrations answer only from the scenario, so a simulation never touches a real system. Every scenario is stored as a run with its steps, ready for replay.
+- **Integrations:** a client's own system can be called mid-call. The address must be https with a real hostname; the connection refuses any hostname that resolves to a private, loopback, link-local or metadata address (checked at connect time, so a name that later points inward is refused too); redirects are never followed; replies are size- and time-limited. Values go into the path URL-encoded. The key is encrypted and never returned. A staging test call reads but never writes.
+- **Sensitive variables:** marked in the workflow, they are never spoken, given to a model, or sent to an integration, in any workflow of the call (checked before publishing and again while the call runs). They are never recorded in steps or shown in views. A sensitive answer is used to route the call and then forgotten. Values supplied at the start are held sealed (encrypted, bound to the call) while the call waits, and wiped when it ends; a call left waiting is ended and wiped by a sweep (`POST /internal/workflow-runs/sweep`, which must be scheduled by whoever runs the deployment: nothing calls it automatically yet).
+- **The Malaysian debt-collection template** (English and Bahasa Malaysia): greeting, identity check on the last four digits of the identity card number, balance, then a promise to pay, a payment plan, or a person.
+- **Console:** a Workflows list with template creation, and a workflow page with versions, publish and rollback buttons, a JSON editor with a problem check, an outline, simulation, and a test call.
+
+Not built yet:
+- **A real phone call through a workflow.** No speech recognition or voice provider is connected, so the engine takes the caller's words as text and live calls cannot yet hold a conversation. This is why the first exit criterion is only partly met.
+- **The prompt-to-workflow builder** (deferred above) and a **visual canvas**.
+- **A model for replies the phrase rules cannot match.** The template's wording is a draft: it needs review by whoever is responsible for compliance, and the Bahasa Malaysia by a native speaker, before real use.
 
 **Exit criteria**
 - The debt-collection template runs end to end in staging and then in production.
@@ -319,6 +338,15 @@ Goal: self-contained modules that each plug into the shared backbone. Each one c
 - A spike in QA scores or sentiment, or drift on a promoted node.
 
 Alerts are delivered inside the console first. Later they can also go to email, WhatsApp or Slack, chosen per alert type.
+
+### Control Tower status (version 1)
+
+The console now opens on the Control Tower (`#/tower`, `GET /internal/control-tower`, `GET /internal/progress`):
+- **Needs attention:** alerts derived from live state, each linking to where it is fixed: no MYR rate or client rate card; no public address for webhooks; call events a provider cannot verify (no Twilio Auth Token or Telnyx public key); credentials not checked; no rates in force, or rates not confirmed; no do-not-call position declared; calls that could not be priced, finished calls never priced, or that differ from the provider; calls stuck dialling or in progress for too long (provider events probably not arriving); credentials that cannot be decrypted; a provider failing at least half of its last 24 hours of finished calls (once it has at least five); a recorded funding balance that has run out on an active provider. Calls that never connected (a refused dial, a blocked number) have nothing to price and are never counted as pricing failures.
+- **Project progress:** every phase with its status, exit criteria (met, partly or not met, and how each was proven: tested, tested against fakes, or proven live), what is still open, and the open decisions. The data is `src/progress.ts`, maintained by hand, and a test ties it to this plan's phase names, exit-criteria text (including the Control Tower's and the one that applies to every phase) and decisions table so the two cannot drift. A criterion can only be marked proven live with a written "Live evidence:" note.
+- **Live calls, provider health, funding and cost and margin** (last 24 hours and 7 days, each call counted once).
+
+Not built yet: the change-log panel, alerts by email, WhatsApp or Slack, funding runway and burn rate (calls do not yet deduct from the recorded funding balance), and the stitching, deliverability, concurrency, journey and learning-loop panels, which wait for their phases.
 
 ### Control Tower Exit Criteria (Overall)
 

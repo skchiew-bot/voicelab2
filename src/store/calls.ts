@@ -70,9 +70,10 @@ export async function placeOutboundCall(d: CallDeps, actorId: string, input: Pla
 
     const decision = await gateOutbound(c, d.dncKey, { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, to: input.to });
     await c.query(
-      `INSERT INTO calls (id, tenant_id, project_id, provider_id, direction, status, country)
-       VALUES ($1,$2,$3,$4,'outbound',$5,$6)`,
-      [callId, input.tenantId, input.projectId ?? null, input.providerId, decision.allowed ? 'dialing' : 'blocked', input.country],
+      `INSERT INTO calls (id, tenant_id, project_id, provider_id, direction, status, country, cost_status)
+       VALUES ($1,$2,$3,$4,'outbound',$5,$6,$7)`,
+      // A blocked call never connects, so it has nothing to price.
+      [callId, input.tenantId, input.projectId ?? null, input.providerId, decision.allowed ? 'dialing' : 'blocked', input.country, decision.allowed ? 'pending' : 'not_applicable'],
     );
     await audit(c, actorId, 'call.outbound', 'call', callId, { allowed: decision.allowed, country: input.country });
     return { provider, decision };
@@ -100,7 +101,7 @@ export async function placeOutboundCall(d: CallDeps, actorId: string, input: Pla
   } catch (err) {
     const reason = redactNumbers((err as Error).message);
     await asInternal(d, async (c) => {
-      await c.query(`UPDATE calls SET status = 'failed', ended_at = now(), end_reason = 'provider_error', cost_status = 'failed', cost_error = 'never connected' WHERE id = $1`, [callId]);
+      await c.query(`UPDATE calls SET status = 'failed', ended_at = now(), end_reason = 'provider_error', cost_status = 'not_applicable' WHERE id = $1`, [callId]);
       await recordEvent(c, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'call.failed', payload: { reason } });
     });
     throw new AppError(502, reason);
@@ -144,12 +145,13 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
 }
 
 /** Price a finished call and store the result. Failing to price never loses the call or fails the webhook. */
-export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance'> {
+export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'not_applicable'> {
   const call = (await c.query('SELECT * FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
   if (!call) throw new AppError(404, 'Call not found.');
   if (!call.ended_at) throw new AppError(409, 'The call has not ended yet.');
   // Already priced and possibly checked: pricing again must not wipe a reconciled or variance flag.
-  if (['recorded', 'reconciled', 'variance'].includes(call.cost_status)) return call.cost_status;
+  // A call that never connected has nothing to price, and re-pricing must not invent a cost for it.
+  if (['recorded', 'reconciled', 'variance', 'not_applicable'].includes(call.cost_status)) return call.cost_status;
   try {
     await recordCallCost(c, actorId, {
       callId, tenantId: call.tenant_id, projectId: call.project_id ?? undefined, direction: call.direction,

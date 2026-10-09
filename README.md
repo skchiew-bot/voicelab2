@@ -39,7 +39,7 @@ Register the numbers you own with `POST /internal/numbers`; an inbound call is r
 
 ## Admin console
 
-Staff sign in with an API token. Screens: Providers, Clients, Rates (FX and the client rate card), Numbers, Do not call, and Calls (cost by campaign, each call's timeline and cost lines, reconciliation and re-pricing). Providers: add one from a form built from the adapter's declared settings, set capabilities, add charging versions, confirm rates, record funding. Clients: add a client, grant credits, add projects, create users (their token is shown once).
+Staff sign in with an API token. The console opens on the **Control Tower** (what needs attention, project progress, live calls, provider health, funding, cost and margin). Other screens: Workflows, Providers, Clients, Rates (FX and the client rate card), Numbers, Do not call, and Calls (cost by campaign, each call's timeline and cost lines, reconciliation and re-pricing). Providers: add one from a form built from the adapter's declared settings, set capabilities, add charging versions, confirm rates, record funding. Clients: add a client, grant credits, add projects, create users (their token is shown once).
 
 ## API (Phase 0)
 
@@ -78,3 +78,13 @@ All requests send `Authorization: Bearer <token>`. `/internal/*` is Daythree sta
 | `POST /internal/calls/:callId/reconcile` | Check a call's cost against the provider (`provider_api`, Twilio only) or against figures you enter (`manual`, the provider's price is required) |
 | `GET /internal/calls/:callId/reconciliations` | The checks made on a call |
 | `POST /internal/reconcile/run` | Check every finished, unchecked Twilio call. Call it on a schedule |
+| `GET /internal/control-tower` | Everything the Control Tower shows: alerts, live calls, provider health, funding, cost and margin |
+| `GET /internal/progress` | Project progress against the build plan |
+| `GET /internal/workflow-templates`, `POST /internal/tenants/:id/workflows/from-template` | Offered templates, and creating one for a client |
+| `POST /internal/tenants/:id/workflows`, `GET /internal/workflows`, `GET /internal/workflows/:id` | Create, list and read workflows |
+| `POST /internal/workflows/validate` | Check a draft definition without saving it |
+| `POST /internal/workflows/:id/versions` | Save a new version (minor for an edit inside a node, major for a change of shape) |
+| `POST /internal/workflows/:id/deploy`, `POST /internal/workflows/:id/rollback` | Put a version live in staging or production; go back one version |
+| `POST /internal/workflows/:id/simulate`, `GET /internal/simulations/:batchId` | List-based simulation in staging |
+| `POST /internal/workflows/:id/runs`, `POST /internal/workflow-runs/:runId/reply`, `GET /internal/workflow-runs/:runId` | Start a test or live call through a workflow, reply to it, and read its steps |
+| `POST /internal/tenants/:id/integrations`, `GET /internal/tenants/:id/integrations` | A client's own systems a workflow can call (the key is never returned) |

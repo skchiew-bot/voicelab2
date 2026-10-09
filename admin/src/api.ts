@@ -68,3 +68,21 @@ export interface Reconciliation { id: number; source: string; outcome: string; o
 export interface CampaignCost { project_id: string | null; project: string | null; calls: number; total_usd: string; total_myr: string; credits_drawn: string; margin_usd: string }
 export interface CallEvent { id: number; type: string; occurred_at: string }
 export interface ReferenceRate { adapterKey: string; summary: string }
+
+export interface Alert { severity: 'high' | 'medium' | 'low'; code: string; message: string; link?: string }
+export interface ProviderHealth {
+  id: string; name: string; adapter: string; kind: string; status: string; credentialsCheckedAt: string | null;
+  ratesInForce: boolean; ratesConfirmed: boolean; calls24h: { total: number; completed: number; unanswered: number; failed: number }; lastCall: string | null;
+}
+export interface MoneyWindow { calls: number; cost_usd: string; cost_myr: string; credits_drawn: string; margin_usd: string }
+export interface Tower {
+  generatedAt: string; alerts: Alert[]; blocked24h: number; providers: ProviderHealth[];
+  activeCalls: { id: string; direction: string; status: string; started_at: string; provider_id: string }[];
+  funding: { provider_id: string; provider: string; currency: string; balance: string; entries: number }[];
+  money: { last24h: MoneyWindow; last7d: MoneyWindow };
+}
+export interface PhaseProgress {
+  id: string; name: string; status: 'done' | 'in_progress' | 'not_started'; summary: string; open: string[];
+  criteria: { text: string; state: 'met' | 'partly' | 'not_met'; proof: 'tests' | 'fakes' | 'live' | 'none'; note?: string }[];
+}
+export interface Progress { generatedAt: string; phases: PhaseProgress[]; decisions: string[] }

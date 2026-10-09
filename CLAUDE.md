@@ -9,6 +9,7 @@ Provider-agnostic voice orchestration platform. The blueprint is the source of t
 - **Before each PR:** tests and typecheck green, then an **independent Opus review**: a helper agent on Opus, given the diff and the invariants but not my conclusions, asked for bugs, invariant violations and missing tests. Treat its findings as claims to verify, fix the real ones, and list findings and outcomes in the PR description.
 - **The owner merges.** Never merge a PR unless told to in that message.
 - Be honest in PR descriptions about what was only tested against fakes.
+- **Keep `src/progress.ts` current**: when a phase's state or an exit criterion changes, update it in the same PR. It drives the Control Tower's progress view, and a test ties it to `BUILD_PLAN.md`. Never mark something met without proof, or proven live when it was only tested against fakes.
 
 ## Commands
 

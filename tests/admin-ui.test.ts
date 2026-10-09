@@ -36,6 +36,8 @@ const field = (scope: Page | Locator, label: string) => {
     .locator('input, select').first();
 };
 
+const goProviders = (page: Page) => page.getByRole('link', { name: 'Providers', exact: true }).click();
+
 async function signIn(page: Page, token: string) {
   await page.goto(base);
   await page.getByLabel('API token').fill(token);
@@ -43,6 +45,62 @@ async function signIn(page: Page, token: string) {
 }
 
 describe.skipIf(!run)('admin UI', () => {
+  it('opens on the Control Tower: what needs attention, honest project progress, and the live panels', async () => {
+    const page = await browser.newPage();
+    await signIn(page, env.staffToken);
+    await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
+
+    // A fresh installation: the two gaps every one has, each a link to where it is fixed.
+    const attention = page.getByLabel('Needs attention');
+    await expect(attention.getByRole('link', { name: /No MYR exchange rate/ })).toBeVisible();
+    await expect(attention).toContainText('no client rate card');
+    await attention.getByRole('link', { name: /No MYR exchange rate/ }).click();
+    await expect(page.getByRole('heading', { name: 'Rates', level: 1 })).toBeVisible();
+    await page.getByRole('link', { name: 'Control Tower', exact: true }).click();
+
+    // Progress: counts come from the data, and nothing is called done that is not.
+    const progress = page.getByLabel('Project progress');
+    await expect(progress).toContainText('0 of 9 done');
+    await expect(progress).toContainText('Nothing has yet been proven against the real Twilio');
+    const p0 = page.getByLabel('Phase 0');
+    await expect(p0).toContainText('In progress');
+    await expect(p0).toContainText('3 of 3 exit criteria met');
+    const p1 = page.getByLabel('Phase 1');
+    await expect(p1).toContainText('1 of 3 exit criteria met, 1 partly');
+    await p1.getByText('Details').click();
+    await expect(p1.getByText('Inbound and outbound test calls work on both Twilio and Telnyx.')).toBeVisible();
+    await expect(p1).toContainText('tested against fakes, not the real provider');
+    await expect(p1).toContainText('Still open');
+    await expect(page.getByLabel('Phase 4')).toContainText('Not started');
+    await expect(page.getByLabel('Control Tower', { exact: true }).first()).toBeVisible();
+    await progress.getByText('10 open decisions').click();
+    await expect(progress.getByText('Hosting region')).toBeVisible();
+
+    // Live panels, empty on a fresh installation, and plain about what they cannot show yet.
+    await expect(page.getByLabel('Live calls')).toContainText('No calls in progress');
+    await expect(page.getByLabel('Provider health')).toContainText('No providers yet');
+    await expect(page.getByLabel('Funding')).toContainText('No funding recorded yet');
+    await expect(page.getByLabel('Cost and margin')).toContainText('Last 24 hours');
+    await page.close();
+  });
+
+  it('updates as the platform is set up, and the alerts link to the fix', async () => {
+    const st = env.staffToken;
+    const prov = (await env.call(st, 'POST', '/internal/providers', {
+      adapterKey: 'telnyx', name: 'tx tower', params: { apiKey: 'k', webhookUrl: 'https://x.example/h' },
+    })).json().id;
+    const page = await browser.newPage();
+    await signIn(page, st);
+    const attention = page.getByLabel('Needs attention');
+    const link = attention.getByRole('link', { name: /tx tower: no webhook signing public key/ });
+    await expect(link).toBeVisible();
+    await expect(page.getByLabel('Provider health').getByRole('row', { name: /tx tower/ })).toContainText('none'); // no rates yet
+    await link.click();
+    await expect(page.getByRole('heading', { name: 'tx tower' })).toBeVisible();
+    expect(page.url()).toContain(prov);
+    await page.close();
+  });
+
   it('rejects a bad token and a client token', async () => {
     const page = await browser.newPage();
     await signIn(page, 'not-a-token');
@@ -55,7 +113,7 @@ describe.skipIf(!run)('admin UI', () => {
     await page.getByLabel('API token').fill(u.token);
     await page.getByRole('button', { name: 'Sign in' }).click();
     await expect.poll(() => dialog).toContain('Daythree staff');
-    await expect(page.getByRole('heading', { name: 'Providers' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toHaveCount(0);
     await page.close();
   });
 
@@ -64,6 +122,7 @@ describe.skipIf(!run)('admin UI', () => {
     await signIn(page, env.staffToken);
 
     // Providers: the form is built from the adapter declaration.
+    await goProviders(page);
     await expect(page.getByRole('heading', { name: 'Providers' })).toBeVisible();
     await page.getByLabel('Provider type').selectOption('twilio');
     await expect(page.locator('label.field', { hasText: 'Auth Token' })).toBeVisible();
@@ -158,6 +217,7 @@ describe.skipIf(!run)('admin UI', () => {
   it('shows a provider outage clearly and lets the operator save without checking', async () => {
     const page = await browser.newPage();
     await signIn(page, env.staffToken);
+    await goProviders(page);
     env.provider.state.respond = () => { throw new Error('getaddrinfo ENOTFOUND api.telnyx.com'); };
     await page.getByLabel('Provider type').selectOption('telnyx');
     const form = page.getByRole('form', { name: 'Add provider' });
@@ -323,12 +383,26 @@ describe.skipIf(!run)('admin UI', () => {
     await page.close();
   }, 60_000);
 
+  it('fits a phone screen on every page, with no sideways scrolling of the page', async () => {
+    const provider = (await env.pool.query('SELECT id FROM providers ORDER BY created_at LIMIT 1')).rows[0].id;
+    const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
+    await signIn(page, env.staffToken);
+    await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
+    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls']) {
+      await page.goto(`${base}#/${route}`);
+      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+      const width = await page.evaluate(() => document.documentElement.scrollWidth);
+      expect(width, `#/${route} is ${width}px wide on a 390px screen`).toBeLessThanOrEqual(390);
+    }
+    await page.close();
+  });
+
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();
     await signIn(page, env.staffToken);
-    await expect(page.getByRole('heading', { name: 'Providers' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
     await page.reload();
-    await expect(page.getByRole('heading', { name: 'Providers' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
     await page.close();
   });
 });

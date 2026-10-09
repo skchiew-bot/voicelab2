@@ -3,6 +3,7 @@ import { api, getToken, setToken } from './api';
 import { Errors, Field, useAction } from './ui';
 import { ProviderDetail } from './ProviderDetail';
 import { Calls } from './Calls';
+import { ControlTower } from './ControlTower';
 import { Compliance } from './Compliance';
 import { Numbers } from './Numbers';
 import { Providers } from './Providers';
@@ -10,9 +11,9 @@ import { Rates } from './Rates';
 import { Tenants } from './Tenants';
 
 function useHash() {
-  const [hash, setHash] = useState(location.hash || '#/providers');
+  const [hash, setHash] = useState(location.hash || '#/tower');
   useEffect(() => {
-    const on = () => setHash(location.hash || '#/providers');
+    const on = () => setHash(location.hash || '#/tower');
     addEventListener('hashchange', on);
     return () => removeEventListener('hashchange', on);
   }, []);
@@ -66,12 +67,13 @@ export function App() {
   if (!signedIn) return <Login onDone={() => setSignedIn(true)} />;
 
   const providerId = /^#\/providers\/([\w-]+)$/.exec(hash)?.[1];
-  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'providers';
+  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
 
   return (
     <div className="shell">
       <nav>
         <strong>Voice Lab</strong>
+        <a href="#/tower" aria-current={section === 'tower' ? 'page' : undefined}>Control Tower</a>
         <a href="#/providers" aria-current={section === 'providers' ? 'page' : undefined}>Providers</a>
         <a href="#/tenants" aria-current={section === 'tenants' ? 'page' : undefined}>Clients</a>
         <a href="#/rates" aria-current={section === 'rates' ? 'page' : undefined}>Rates</a>
@@ -87,7 +89,8 @@ export function App() {
           : section === 'numbers' ? <Numbers />
           : section === 'compliance' ? <Compliance />
           : section === 'calls' ? <Calls />
-          : providerId ? <ProviderDetail id={providerId} /> : <Providers />}
+          : section === 'providers' ? (providerId ? <ProviderDetail id={providerId} /> : <Providers />)
+          : <ControlTower />}
       </main>
     </div>
   );

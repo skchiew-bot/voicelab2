@@ -39,7 +39,7 @@ Register the numbers you own with `POST /internal/numbers`; an inbound call is r
 
 ## Admin console
 
-Staff sign in with an API token. Screens: Providers, Clients, Rates (FX and the client rate card), Numbers, Do not call, and Calls (cost by campaign, each call's timeline and cost lines, reconciliation and re-pricing). Providers: add one from a form built from the adapter's declared settings, set capabilities, add charging versions, confirm rates, record funding. Clients: add a client, grant credits, add projects, create users (their token is shown once).
+Staff sign in with an API token. The console opens on the **Control Tower** (what needs attention, project progress, live calls, provider health, funding, cost and margin). Other screens: Providers, Clients, Rates (FX and the client rate card), Numbers, Do not call, and Calls (cost by campaign, each call's timeline and cost lines, reconciliation and re-pricing). Providers: add one from a form built from the adapter's declared settings, set capabilities, add charging versions, confirm rates, record funding. Clients: add a client, grant credits, add projects, create users (their token is shown once).
 
 ## API (Phase 0)
 
@@ -78,3 +78,5 @@ All requests send `Authorization: Bearer <token>`. `/internal/*` is Daythree sta
 | `POST /internal/calls/:callId/reconcile` | Check a call's cost against the provider (`provider_api`, Twilio only) or against figures you enter (`manual`, the provider's price is required) |
 | `GET /internal/calls/:callId/reconciliations` | The checks made on a call |
 | `POST /internal/reconcile/run` | Check every finished, unchecked Twilio call. Call it on a schedule |
+| `GET /internal/control-tower` | Everything the Control Tower shows: alerts, live calls, provider health, funding, cost and margin |
+| `GET /internal/progress` | Project progress against the build plan |

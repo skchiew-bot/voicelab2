@@ -17,6 +17,8 @@ import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from 
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
 import { addNumber, callKnown, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { controlTower } from './store/control-tower.js';
+import { DECISIONS, PHASES } from './progress.js';
 import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
 import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
 import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
@@ -344,6 +346,16 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
       tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), callId: z.string().uuid(), country, to: z.string(),
     }).parse(req.body);
     return withActor(pool, s.actor, (c) => gateOutbound(c, dncKey, body));
+  });
+
+  // ------------------------------------------------- control tower
+  app.get('/internal/control-tower', async (req) => {
+    const s = await internal(req);
+    return withActor(pool, s.actor, (c) => controlTower(c, key, { publicBaseUrlSet: Boolean(callDeps.baseUrl) }));
+  });
+  app.get('/internal/progress', async (req) => {
+    await internal(req);
+    return { generatedAt: new Date().toISOString(), phases: PHASES, decisions: DECISIONS };
   });
 
   // ------------------------------------------------ numbers and calls

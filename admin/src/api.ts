@@ -116,3 +116,9 @@ export interface OutboundReport {
   rates: { contactPercent: number | null; answerPercent: number | null };
   bestCallbackTimes: { day: number; hour: number; time_zone: string; requests: number }[];
 }
+
+export interface HealthRow { provider_id: string; name: string; kind: string; status: string; state: 'healthy' | 'failed' | 'unfunded'; reason: string | null; since: string | null; ok_streak: number }
+export interface FailoverRow { id: number; scope: string; call_id: string | null; from_name: string | null; to_name: string | null; trigger: string; detail: Record<string, unknown>; at: string }
+export interface CapacityRow { providerId: string; name: string; active: number; ceiling: number | null }
+export interface FundingRow { providerId: string; provider: string; providerStatus: string; currency: string; balance: string; level: 'ok' | 'warn' | 'critical' | 'empty'; warnBelow: string | null; criticalBelow: string | null }
+export interface PolicyView { errorThreshold: number; errorWindowMs: number; latencyThresholdMs: number; latencyWindowMs: number; latencyMinSamples: number; deadAirMs: number; recoveryOkSamples: number; recoveryDwellMs: number }

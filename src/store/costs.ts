@@ -56,6 +56,12 @@ export interface CallCostInput {
   projectId?: string;
   direction: 'inbound' | 'outbound';
   occurredAt: Date;
+  /** What the client's credits are multiplied by (an overburst premium the client agreed to), if any. */
+  creditMultiplier?: string;
+  /** False for a call that was never served (a caller who gave up in the queue): provider cost is recorded, credits are not drawn. */
+  drawCredits?: boolean;
+  /** Seconds at the start of the call that are not billed to the client (time spent waiting in the queue). */
+  creditSkipSeconds?: number;
   /** One entry per provider that served part of the call. */
   usage: { providerId: string; usage: Usage }[];
 }
@@ -98,7 +104,7 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
       minimumChargeSeconds: version.minimum_charge_seconds,
       rounding: version.rounding,
     });
-    if (provider.kind === 'telephony' && billed !== null && creditSeconds === null) creditSeconds = billed;
+    if (provider.kind === 'telephony' && billed !== null && creditSeconds === null) creditSeconds = input.drawCredits === false ? null : Math.max(0, billed - Math.ceil(input.creditSkipSeconds ?? 0));
 
     const burst = item.usage.burst && version.burst_premium_multiplier ? version.burst_premium_multiplier : null;
     const comps = (await c.query(
@@ -136,7 +142,8 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
   if (card && creditSeconds !== null) {
     const perMinute = toScaled(input.direction === 'inbound' ? card.inbound_credits_per_minute : card.outbound_credits_per_minute);
     // Credits are kept to 4 decimal places (rounded half up), and margin uses the rounded figure.
-    credits = mulDiv(mulDiv(perMinute, BigInt(creditSeconds), 60n), 1n, 10_000n) * 10_000n;
+    const base = mulDiv(perMinute, BigInt(creditSeconds), 60n);
+    credits = mulDiv(input.creditMultiplier ? mulDiv(base, toScaled(input.creditMultiplier), SCALE) : base, 1n, 10_000n) * 10_000n;
     creditValueUsd = toScaled(card.credit_value_usd);
   }
   const marginUsd = mulDiv(credits, creditValueUsd, SCALE) - totalUsd;

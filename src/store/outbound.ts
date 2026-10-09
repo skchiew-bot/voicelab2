@@ -5,7 +5,7 @@ import { audit } from './audit.js';
 export const OUTCOMES = ['contacted', 'rejected', 'wrong_number', 'third_party'] as const;
 export type Outcome = (typeof OUTCOMES)[number];
 /** Calls that never reached the dialling stage: not attempts, and not the provider's doing. */
-const NOT_DIALLED = `('did_locked', 'all_locked_for_contact', 'no_numbers')`;
+const NOT_DIALLED = `('did_locked', 'all_locked_for_contact', 'no_numbers', 'providers_unhealthy')`;
 
 const validTimeZone = (tz: string) => { try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch { return false; } };
 

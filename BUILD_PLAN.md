@@ -253,6 +253,29 @@ Goal: degrade gracefully instead of failing.
 - Optional premium overburst for clients at a configurable premium.
 - **Funding-health monitor.** It alerts at configurable thresholds before a provider balance reaches zero.
 
+**Status (in progress)**
+
+Built and tested against fakes (no real provider has failed during a live call):
+- **Failover rules:** a provider is judged failed after N errors inside a window, N dead-air silences, or latency whose typical (median) value is over a threshold for enough replies; one bad reply never does it. A failed provider is trusted again only after a run of good attempts over a minimum time, and only attempts since it last changed state count, so it does not flip back on the first sign of life. Out of funding fails over at once and is not retried; a topped-up provider goes on probation. Every threshold is configurable (`resilience_policy`) and every switch is logged and shown in the console.
+- **Voice failover with handover:** a call tries its voice providers in the client's order. When one is failed over, the next plays a bridge message, is told where the flow is, what was collected and what each side said (never a sensitive value), and the interrupted line is replayed in full with its slot values. A provider that is still trusted is simply tried again. A call already moved stays on the secondary rather than bouncing back.
+- **Total failure:** a holding message, then a person if one is available, else a callback offer, else voicemail; a callback request is always recorded first unless the call went to a person, so the call is never left in silence, and a failing telephony leg cannot stop the record being made.
+- **Telephony failover:** a failed, unfunded or full provider is passed over by the DID check; a provider that fails to place a call is counted against it and the next provider is tried; with every provider unavailable the dial is refused plainly and no provider is contacted. Refusals are not counted as the provider failing.
+- **Concurrency ceilings:** taken from the rates' concurrency limit. A dial goes to the cheapest provider with room; if every provider is full it is held back with a retry time (nothing placed, no customer number kept), unless the client has agreed an overburst premium, in which case the call is marked, carries the provider's burst multiplier and the client's credits are multiplied by the agreed premium. A call within the ceiling carries no burst line. Dials arriving together cannot take the same last channel.
+- **Inbound entitlement:** a client's simultaneous inbound channels (plus extra channels). Beyond them a call waits (hold message, never hung up on), the longest-waiting call moves up when a channel frees, a caller who gives up is recorded as abandoned (the provider's time is costed, no credits drawn), and a caller who waits too long is hung up on and given a callback request. A caller who is served after waiting is billed credits only from when they were served, and a caller on hold counts against the provider's ceiling. A client with no entitlement set is not limited. Extra channels are charged to credits monthly, once per month.
+- **Funding-health monitor:** alert levels per provider and currency (warn and critical, chosen by an operator) feed the Control Tower; an empty balance fails the provider over.
+- **Console:** a Resilience screen (provider health and why, capacity, funding and alert levels, the failover rules, recent failovers). The Control Tower raises alerts for failed or unfunded providers, low funding, queued callers and held-back dials.
+
+Not built or not proven:
+- **No voice provider is connected to live calls**, so voice failover is exercised through a model of a provider, and the bridge and replay are not heard.
+- **An outbound dial held back is not queued here:** keeping a queue would mean keeping the customer's number. The dialler retries after the time it is given.
+- **A queued inbound caller hears a hold message;** nothing yet starts the workflow when their turn comes.
+- **Funding is not deducted as calls are costed**, so the monitor works from entered balances.
+- **Failures come from errors at dial time and reported samples,** not yet from provider webhooks or measured dead air on a live call.
+- **Nothing sends a failed provider traffic, so recovery needs probes.** `probeProviders` tries failed voice providers and must be run on a schedule by the deployment; a failed telephony provider has no probe yet and recovers only when samples are reported through the API. A recovered provider must show a run of good attempts spanning the minimum time.
+- **The held-back dials and the orphan events:** a dial held back for capacity leaves its gate and DID-check events in the event log under an id that never becomes a call.
+- **Hanging up a timed-out queued caller** uses a Twilio call-update request written from memory and unchecked against the live service.
+- Per-client voice routes, fallback plans and entitlements are set through the API; the console shows the result but does not edit them yet.
+
 **Exit criteria**
 - Chaos tests cover killing the provider, injecting latency and running the balance to zero. Each produces the expected failover with no dead drop.
 - Reaching a concurrency ceiling triggers queueing or rerouting, and no burst charge appears on the bill.

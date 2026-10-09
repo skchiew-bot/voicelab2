@@ -73,11 +73,21 @@ export const PHASES: PhaseProgress[] = [
     ],
   },
   {
-    id: '4', name: 'Resilience And Concurrency', status: 'not_started', summary: 'Degrade gracefully instead of failing.',
+    id: '4', name: 'Resilience And Concurrency', status: 'in_progress', summary: 'Degrade gracefully instead of failing. Failover rules with hysteresis, provider health, the fallback ladder, telephony failover, concurrency ceilings, inbound entitlements and the funding monitor are built and tested against fakes.',
     criteria: [
-      notMet('Chaos tests cover killing the provider, injecting latency and running the balance to zero. Each produces the expected failover with no dead drop.'),
-      notMet('Reaching a concurrency ceiling triggers queueing or rerouting, and no burst charge appears on the bill.'),
-    ], open: [],
+      { text: 'Chaos tests cover killing the provider, injecting latency and running the balance to zero. Each produces the expected failover with no dead drop.', state: 'partly', proof: 'fakes',
+        note: 'The tests kill a fake voice provider, inject latency and dead air, and run the balance to zero, and each fails over, plays the bridge, replays the interrupted line and ends in the fallback ladder when nothing works. The providers are stand-ins: no real provider has been failed during a live call, and nothing yet plays these lines on a phone call.' },
+      { text: 'Reaching a concurrency ceiling triggers queueing or rerouting, and no burst charge appears on the bill.', state: 'partly', proof: 'fakes',
+        note: "Outbound dials go to a provider with room or are held back with a retry time; inbound callers beyond a client's channels wait; calls inside the ceiling carry no burst line, tested against the cost records. The ceilings come from the rates entered, and have not been checked against what the real providers count or charge." },
+    ], open: [
+      'No voice provider is connected to live calls, so voice failover runs on a model of a provider and the bridge and replayed lines are not heard',
+      'An outbound dial held back is not queued here: the dialler keeps its list and retries after the time given (a queue would have to keep the customer\'s number)',
+      'A caller waiting in the inbound queue hears a hold message; nothing yet starts the workflow when their turn comes',
+      'Funding is still not deducted as calls are costed, so the monitor warns from entered balances only',
+      'Failures are detected from errors at dial time and from reported samples, not yet from provider webhooks',
+      'A failed provider recovers only through probes (`probeProviders` must be scheduled; a telephony provider has no probe yet)',
+      'Hanging up a timed-out queued caller on Twilio uses a request written from memory, unchecked against the live service',
+    ],
   },
   {
     id: '5', name: 'Journey, QA And Audit', status: 'not_started', summary: 'Every call can be reconstructed down to the node and the reason.',

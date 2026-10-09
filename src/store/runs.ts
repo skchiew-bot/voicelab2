@@ -341,3 +341,26 @@ export async function measureStitching(d: RunDeps, e: { workflowId: string; vers
     note: 'Measured on the scripted callers given, at the voice provider\'s rate in force. It prices synthesis only (not telephony), and says nothing about how the call sounds.',
   };
 }
+
+export interface HandoverPacket {
+  workflow: string; node: string | null; status: string;
+  /** Everything collected so far. Sensitive variables are never part of it. */
+  variables: Record<string, Json>;
+  transcript: { role: 'assistant' | 'caller'; text: string }[];
+  /** The last thing the call said in full, which the new provider replays if it was cut off. */
+  lastLine: string | null;
+}
+
+/**
+ * What a provider that takes over a call in progress needs: where the flow is, what has been collected, and what
+ * was said by each side. A sensitive answer was recorded as hidden, and sensitive values are not in the state.
+ */
+export async function handoverPacket(c: pg.PoolClient, runId: string): Promise<HandoverPacket> {
+  const run = await getRun(c, runId);
+  const state = (await c.query('SELECT state FROM workflow_runs WHERE id = $1', [runId])).rows[0].state as RunState;
+  const transcript = (run.steps as { type: string; payload: Record<string, Json> }[])
+    .filter((s) => s.type === 'say' || s.type === 'heard')
+    .map((s) => ({ role: s.type === 'say' ? 'assistant' as const : 'caller' as const, text: String(s.payload.text ?? '') }));
+  const lastLine = [...transcript].reverse().find((t) => t.role === 'assistant')?.text ?? null;
+  return { workflow: state.workflow, node: state.node ?? state.awaiting?.node ?? null, status: state.status, variables: state.vars, transcript, lastLine };
+}

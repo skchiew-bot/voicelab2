@@ -5,13 +5,15 @@ import { withActor } from '../db.js';
 import { AppError } from '../errors.js';
 import { decryptSecrets } from '../secrets.js';
 import { telnyxCommand, telnyxNextActions, telnyxPlaceCall, type TelnyxCreds } from '../telephony/telnyx.js';
-import { twilioPlaceCall, type TwilioCreds } from '../telephony/twilio.js';
-import { redactNumbers, type Action, type NormalizedEvent } from '../telephony/types.js';
+import { twilioHangup, twilioPlaceCall, type TwilioCreds } from '../telephony/twilio.js';
+import { ProviderRefused, redactNumbers, type Action, type NormalizedEvent } from '../telephony/types.js';
 import { audit } from './audit.js';
 import { recordCallCost } from './costs.js';
+import { getEntitlement, inboundAdmission, isFull, promoteQueued, providerLoad } from './concurrency.js';
 import { chooseDid, didLockedFor } from './dids.js';
 import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.js';
 import { recordEvent } from './events.js';
+import { healthMap, logFailover, recordSample } from './resilience.js';
 
 export interface CallDeps { pool: pg.Pool; key: Buffer; dncKey: Buffer; http: Fetch; baseUrl?: string; tolerancePct?: number }
 
@@ -51,11 +53,17 @@ export const listNumbers = async (c: pg.PoolClient) =>
 // --------------------------------------------------------------- outbound
 export interface PlaceInput { tenantId: string; projectId?: string; providerId?: string; from?: string; to: string; country: string }
 
+/** How long a held-back dial is told to wait before trying again. */
+export const RETRY_AFTER_SECONDS = 10;
+const MAX_DIAL_TRIES = 2;
+
 /**
- * Place an outbound call. The do-not-call gate runs first and the provider is never contacted for
- * a blocked number. Then the DID check picks the caller ID (or checks the one named): a DID that has ever failed for
- * this contact is never used for them again. The customer's number is passed to the provider and not kept; only a
- * keyed hash of it is, so the pool can remember which DIDs failed for whom.
+ * Place an outbound call. The do-not-call gate runs first and the provider is never contacted for a blocked number.
+ * Then the DID check picks the caller ID (or checks the one named): a DID that has ever failed for this contact is
+ * never used for them again, and a provider that is failed, out of funding or at its concurrency ceiling is passed
+ * over for one that can take the call. If every provider is full, the dial is held back (the caller retries) unless the
+ * client has agreed to pay a premium for overburst. If the chosen provider fails to place the call, the next one is
+ * tried. The customer's number is passed to the provider and not kept; only a keyed hash of it is.
  */
 export async function placeOutboundCall(d: CallDeps, actorId: string, input: PlaceInput) {
   if (!d.baseUrl) throw new AppError(503, 'PUBLIC_BASE_URL is not set, so providers cannot reach this server. Set it to place calls.');
@@ -65,11 +73,17 @@ export async function placeOutboundCall(d: CallDeps, actorId: string, input: Pla
   const toNumber = normalizeE164(input.to);
   const chash = toNumber ? contactHash(toNumber, contactKeyFrom(d.key)) : null;
 
-  const setup = await asInternal(d, async (c) => {
+  type Setup =
+    | { kind: 'blocked'; reason: string }
+    | { kind: 'refused'; reason: string; message: string; status: number }
+    | { kind: 'deferred' }
+    | { kind: 'go'; provider: ProviderRow; from: string; pooled: boolean };
+
+  const setup: Setup = await asInternal(d, async (c): Promise<Setup> => {
     if (input.providerId) {
-      const named = await loadProvider(c, input.providerId);
-      if (!named) throw new AppError(404, 'Provider not found.');
-      if (named.kind !== 'telephony' || named.status !== 'active') throw new AppError(400, 'That provider cannot place calls.');
+      const requested = await loadProvider(c, input.providerId);
+      if (!requested) throw new AppError(404, 'Provider not found.');
+      if (requested.kind !== 'telephony' || requested.status !== 'active') throw new AppError(400, 'That provider cannot place calls.');
     }
     let own: { id: string; e164: string; provider_id: string } | undefined;
     if (named) {
@@ -81,86 +95,150 @@ export async function placeOutboundCall(d: CallDeps, actorId: string, input: Pla
       own = rows[0];
     }
     const decision = await gateOutbound(c, d.dncKey, { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, to: input.to });
-    const insertCall = (providerId: string, status: string, fromId: string | null, reason?: string) => c.query(
-      `INSERT INTO calls (id, tenant_id, project_id, provider_id, direction, status, country, cost_status, from_number_id, contact_hash, end_reason, ended_at)
-       VALUES ($1,$2,$3,$4,'outbound',$5,$6,$7,$8,$9,$10, CASE WHEN $5 = 'dialing' THEN NULL ELSE now() END)`,
+    const anyTelephony = async () => (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' ORDER BY created_at LIMIT 1`)).rows[0]?.id as string | undefined;
+    const insertCall = (providerId: string, status: string, fromId: string | null, o: { reason?: string; burst?: boolean; creditMultiplier?: string | null } = {}) => c.query(
+      `INSERT INTO calls (id, tenant_id, project_id, provider_id, direction, status, country, cost_status, from_number_id, contact_hash, end_reason, ended_at, burst, credit_multiplier)
+       VALUES ($1,$2,$3,$4,'outbound',$5,$6,$7,$8,$9,$10, CASE WHEN $5 = 'dialing' THEN NULL ELSE now() END,$11,$12)`,
       // A call that never connects (blocked, no usable caller ID) has nothing to price.
-      [callId, input.tenantId, input.projectId ?? null, providerId, status, input.country, status === 'dialing' ? 'pending' : 'not_applicable', fromId, chash, reason ?? null]);
+      [callId, input.tenantId, input.projectId ?? null, providerId, status, input.country, status === 'dialing' ? 'pending' : 'not_applicable', fromId, chash, o.reason ?? null, o.burst ?? false, o.creditMultiplier ?? null]);
 
     if (!decision.allowed) {
-      const providerId = own?.provider_id ?? input.providerId ?? (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' ORDER BY created_at LIMIT 1`)).rows[0]?.id;
+      const providerId = own?.provider_id ?? input.providerId ?? await anyTelephony();
       if (!providerId) throw new AppError(400, 'No telephony provider is set up.');
       await insertCall(providerId, 'blocked', own?.id ?? null);
       await audit(c, actorId, 'call.outbound', 'call', callId, { allowed: false, country: input.country });
-      return { decision, refused: null, provider: null, from: '' };
+      return { kind: 'blocked', reason: decision.reason };
     }
-
-    // The DID check: after the do-not-call gate, before the provider is contacted.
-    let from = own?.e164 ?? '';
-    let fromId = own?.id ?? null; let providerId = own?.provider_id ?? input.providerId ?? null;
-    let refusal: { reason: string; message: string } | null = null;
     if (!chash) throw new AppError(400, 'The number to dial is not valid.'); // unreachable: the gate blocks an invalid number
+
+    // One dial at a time decides capacity, so two dials cannot both take the last free channel.
+    await c.query(`SELECT pg_advisory_xact_lock(hashtext('capacity'))`);
+    const telephony = (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' AND status = 'active' AND ($1::uuid IS NULL OR id = $1)`, [input.providerId ?? null])).rows.map((r) => r.id as string);
+    const health = await healthMap(c, telephony);
+    const unhealthy = new Set(telephony.filter((id) => (health.get(id) ?? 'healthy') !== 'healthy'));
+    const load = await providerLoad(c, telephony);
+    const full = new Set(telephony.filter((id) => isFull(load.get(id)!)));
+
+    let fromId = own?.id ?? null; let from = own?.e164 ?? ''; let providerId = own?.provider_id ?? null;
+    let burst = false; let creditMultiplier: string | null = null;
+    let refusal: { reason: string; message: string; status: number } | null = null;
+
     if (own) {
-      if (await didLockedFor(c, input.tenantId, own.id, chash)) refusal = { reason: 'did_locked', message: 'That caller ID has failed for this contact before and is locked away from them. Choose another, or let the pool choose.' };
+      if (await didLockedFor(c, input.tenantId, own.id, chash)) refusal = { reason: 'did_locked', message: 'That caller ID has failed for this contact before and is locked away from them. Choose another, or let the pool choose.', status: 409 };
+      else if (unhealthy.has(own.provider_id)) refusal = { reason: 'providers_unhealthy', message: 'That caller ID belongs to a provider that is currently failed or out of funding. Let the pool choose, so another provider can take the call.', status: 503 };
+      else if (full.has(own.provider_id)) {
+        const ent = await getEntitlement(c, input.tenantId);
+        if (ent?.overburst_multiplier) { burst = true; creditMultiplier = ent.overburst_multiplier; } else return await defer(c, 'at_capacity');
+      }
     } else {
-      const choice = await chooseDid(c, { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, contactHash: chash, providerId: input.providerId });
+      const base = { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, contactHash: chash, providerId: input.providerId, unhealthy };
+      let choice = await chooseDid(c, { ...base, full });
+      if (!choice.ok && choice.reason === 'at_capacity') {
+        const ent = await getEntitlement(c, input.tenantId);
+        if (!ent?.overburst_multiplier) return await defer(c, 'at_capacity');
+        choice = await chooseDid(c, base);                 // the client has agreed to the premium: use capacity beyond the ceiling
+        burst = true; creditMultiplier = ent.overburst_multiplier;
+      }
       if (choice.ok) { from = choice.e164; fromId = choice.phoneNumberId; providerId = choice.providerId; }
-      else refusal = { reason: choice.reason, message: choice.reason === 'all_locked_for_contact' ? 'Every number in the pool has failed for this contact before, so none can be used for them.' : 'There is no active number in this country for that client to dial from.' };
+      else refusal = {
+        reason: choice.reason, status: choice.reason === 'providers_unhealthy' ? 503 : 409,
+        message: choice.reason === 'all_locked_for_contact' ? 'Every number in the pool has failed for this contact before, so none can be used for them.'
+          : choice.reason === 'providers_unhealthy' ? 'Every provider with a number for this client is failed or out of funding, so the call cannot be placed.'
+          : 'There is no active number in this country for that client to dial from.',
+      };
     }
     if (refusal) {
-      const fallback = providerId ?? (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' ORDER BY created_at LIMIT 1`)).rows[0]?.id;
+      const fallback = providerId ?? await anyTelephony();
       if (!fallback) throw new AppError(400, 'No telephony provider is set up.');
-      await insertCall(fallback, 'failed', fromId, refusal.reason);
+      await insertCall(fallback, 'failed', fromId, { reason: refusal.reason });
       await recordEvent(c, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'call.failed', payload: { reason: refusal.reason } });
       await audit(c, actorId, 'call.outbound', 'call', callId, { allowed: true, refused: refusal.reason, country: input.country });
-      return { decision, refused: refusal, provider: null, from: '' };
+      return { kind: 'refused', ...refusal };
     }
     const provider = await loadProvider(c, providerId!);
     if (!provider) throw new AppError(404, 'Provider not found.');
     if (provider.kind !== 'telephony' || provider.status !== 'active') throw new AppError(400, 'That provider cannot place calls.');
     if (!['twilio', 'telnyx'].includes(provider.adapter_key)) throw new AppError(400, 'That provider has no call control.');
-    await insertCall(provider.id, 'dialing', fromId);
-    await audit(c, actorId, 'call.outbound', 'call', callId, { allowed: true, country: input.country, pooled: !own });
-    return { decision, refused: null, provider, from };
+    await insertCall(provider.id, 'dialing', fromId, { burst, creditMultiplier });
+    if (burst) await recordEvent(c, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'call.burst', payload: { providerId: provider.id, creditMultiplier } });
+    await audit(c, actorId, 'call.outbound', 'call', callId, { allowed: true, country: input.country, pooled: !own, burst });
+    return { kind: 'go', provider, from, pooled: !own };
+
+    async function defer(cc: pg.PoolClient, reason: string): Promise<Setup> {
+      // Nothing is placed and no call is recorded: the dialler keeps its list and tries again.
+      await logFailover(cc, { scope: 'telephony', tenantId: input.tenantId, callId, trigger: 'capacity', detail: { reason, retryAfterSeconds: RETRY_AFTER_SECONDS } });
+      await recordEvent(cc, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'dial.deferred', payload: { reason } });
+      return { kind: 'deferred' };
+    }
   });
 
-  if (setup.refused) throw new AppError(409, setup.refused.message, [setup.refused.reason]);
-  if (!setup.decision.allowed) return { callId, allowed: false as const, reason: setup.decision.reason, status: 'blocked' };
+  if (setup.kind === 'refused') throw new AppError(setup.status, setup.message, [setup.reason]);
+  if (setup.kind === 'blocked') return { callId, allowed: false as const, reason: setup.reason, status: 'blocked' };
+  if (setup.kind === 'deferred') return { callId, allowed: true as const, deferred: true as const, status: 'deferred', retryAfterSeconds: RETRY_AFTER_SECONDS };
 
   // Outside any transaction: the provider can be slow and must not hold a database connection.
   const base = d.baseUrl;
-  try {
-    const p = setup.provider!;
-    const from = setup.from;
-    const creds = credentials<TwilioCreds & TelnyxCreds>(p, d.key);
-    const placed = p.adapter_key === 'twilio'
-      ? await twilioPlaceCall(creds, d.http, {
-          to: input.to, from,
-          answerUrl: `${base}/webhooks/twilio/${p.id}/voice?callId=${callId}`,
-          statusUrl: `${base}/webhooks/twilio/${p.id}/status?callId=${callId}`,
-        })
-      : await telnyxPlaceCall(creds, d.http, { to: input.to, from, webhookUrl: `${base}/webhooks/telnyx/${p.id}`, callId });
-    await asInternal(d, async (c) => {
-      await c.query('UPDATE calls SET provider_call_id = $2 WHERE id = $1', [callId, placed.providerCallId]);
-      await recordEvent(c, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'call.dialing', payload: { country: input.country } });
-    });
-    return { callId, allowed: true as const, status: 'dialing' };
-  } catch (err) {
-    const reason = redactNumbers((err as Error).message);
-    await asInternal(d, async (c) => {
-      await c.query(`UPDATE calls SET status = 'failed', ended_at = now(), end_reason = 'provider_error', cost_status = 'not_applicable' WHERE id = $1`, [callId]);
-      await recordEvent(c, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'call.failed', payload: { reason } });
-    });
-    throw new AppError(502, reason);
+  let { provider: p, from } = setup;
+  const tried = new Set<string>();
+  for (let attempt = 1; ; attempt++) {
+    const started = Date.now();
+    try {
+      const creds = credentials<TwilioCreds & TelnyxCreds>(p, d.key);
+      const placed = p.adapter_key === 'twilio'
+        ? await twilioPlaceCall(creds, d.http, {
+            to: input.to, from,
+            answerUrl: `${base}/webhooks/twilio/${p.id}/voice?callId=${callId}`,
+            statusUrl: `${base}/webhooks/twilio/${p.id}/status?callId=${callId}`,
+          })
+        : await telnyxPlaceCall(creds, d.http, { to: input.to, from, webhookUrl: `${base}/webhooks/telnyx/${p.id}`, callId });
+      await asInternal(d, async (c) => {
+        await c.query('UPDATE calls SET provider_call_id = $2 WHERE id = $1', [callId, placed.providerCallId]);
+        await recordEvent(c, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'call.dialing', payload: { country: input.country } });
+        await recordSample(c, { providerId: p.id, kind: 'ok', latencyMs: Date.now() - started, callId, tenantId: input.tenantId });
+      });
+      return { callId, allowed: true as const, status: 'dialing' };
+    } catch (err) {
+      const reason = redactNumbers((err as Error).message);
+      tried.add(p.id);
+      // The provider failed to place the call. Count it against the provider, and try another if the pool chose this one.
+      const next = await asInternal(d, async (c) => {
+        await recordSample(c, { providerId: p.id, kind: 'error', callId, tenantId: input.tenantId });
+        // Only a definite "no" from the provider is tried elsewhere. A timeout or a reply we could not read may mean the
+        // call was placed, and a second call to the same person from another number would be worse than a failed one.
+        if (!(err instanceof ProviderRefused) || !setup.pooled || attempt >= MAX_DIAL_TRIES) return null;
+        await c.query(`SELECT pg_advisory_xact_lock(hashtext('capacity'))`);
+        const ids = (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' AND status = 'active'`)).rows.map((r) => r.id as string);
+        const health = await healthMap(c, ids);
+        const unhealthy = new Set(ids.filter((id) => (health.get(id) ?? 'healthy') !== 'healthy' || tried.has(id)));
+        const load = await providerLoad(c, ids);
+        const full = new Set(ids.filter((id) => isFull(load.get(id)!)));
+        const choice = await chooseDid(c, { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, contactHash: chash!, providerId: input.providerId, unhealthy, full });
+        if (!choice.ok) return null;
+        const provider = await loadProvider(c, choice.providerId);
+        if (!provider || !['twilio', 'telnyx'].includes(provider.adapter_key)) return null;
+        // The new provider has room (full ones were passed over), so any premium decided for the first one no longer applies.
+        await c.query('UPDATE calls SET provider_id = $2, from_number_id = $3, burst = false, credit_multiplier = NULL WHERE id = $1', [callId, choice.providerId, choice.phoneNumberId]);
+        await logFailover(c, { scope: 'telephony', tenantId: input.tenantId, callId, from: p.id, to: choice.providerId, trigger: 'provider_error', detail: { reason } });
+        await recordEvent(c, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'failover.telephony', payload: { from: p.id, to: choice.providerId } });
+        return { provider, from: choice.e164 };
+      });
+      if (next) { p = next.provider; from = next.from; continue; }
+      await asInternal(d, async (c) => {
+        await c.query(`UPDATE calls SET status = 'failed', ended_at = now(), end_reason = 'provider_error', cost_status = 'not_applicable' WHERE id = $1`, [callId]);
+        await recordEvent(c, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'call.failed', payload: { reason } });
+      });
+      throw new AppError(502, reason);
+    }
   }
 }
 
 // ---------------------------------------------------------------- webhooks
-const RANK: Record<string, number> = { dialing: 0, ringing: 1, in_progress: 2, completed: 3, unanswered: 3, failed: 3, blocked: 3 };
+const RANK: Record<string, number> = { queued: 0, dialing: 0, ringing: 1, in_progress: 2, completed: 3, unanswered: 3, failed: 3, blocked: 3 };
 
 interface CallRow {
   id: string; tenant_id: string; project_id: string | null; provider_id: string; direction: 'inbound' | 'outbound';
   status: string; started_at: Date; answered_at: Date | null; ended_at: Date | null; provider_call_id: string | null;
+  end_reason: string | null; cost_status: string;
 }
 
 async function findCall(c: pg.PoolClient, providerId: string, ev: NormalizedEvent, hint?: string): Promise<CallRow | null> {
@@ -182,12 +260,21 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
     return null;
   }
   const id = randomUUID();
+  // A client has a number of simultaneous inbound channels. Beyond them a call waits, or is taken at the premium the client agreed to.
+  await c.query(`SELECT pg_advisory_xact_lock(hashtext('capacity'))`);   // the same lock outbound dials use, so the two cannot both take the last channel
+  const adm = await inboundAdmission(c, n.tenant_id);
+  // Separately, the provider charges a premium for calls above its own concurrency limit; the call is marked so its cost says so.
+  const load = (await providerLoad(c, [providerId])).get(providerId)!;
+  const burst = isFull(load);
   const call = (await c.query(
-    `INSERT INTO calls (id, tenant_id, project_id, provider_id, provider_call_id, direction, status, country, started_at)
-     VALUES ($1,$2,$3,$4,$5,'inbound','ringing',$6,$7) RETURNING *`,
-    [id, n.tenant_id, n.project_id, providerId, ev.providerCallId, n.country, ev.occurredAt],
+    `INSERT INTO calls (id, tenant_id, project_id, provider_id, provider_call_id, direction, status, country, started_at, queued_at, burst, credit_multiplier)
+     VALUES ($1,$2,$3,$4,$5,'inbound',$6,$7,$8,$9,$10,$11) RETURNING *`,
+    [id, n.tenant_id, n.project_id, providerId, ev.providerCallId, adm.admit === 'queue' ? 'queued' : 'ringing', n.country, ev.occurredAt,
+      adm.admit === 'queue' ? ev.occurredAt : null, burst, adm.admit === 'premium' ? adm.creditMultiplier : null],
   )).rows[0];
   await recordEvent(c, { tenantId: n.tenant_id, projectId: n.project_id ?? undefined, callId: id, type: 'call.initiated', payload: { direction: 'inbound', country: n.country }, occurredAt: ev.occurredAt });
+  if (adm.admit === 'queue') await recordEvent(c, { tenantId: n.tenant_id, projectId: n.project_id ?? undefined, callId: id, type: 'call.queued', payload: { active: adm.active, channels: adm.channels }, occurredAt: ev.occurredAt });
+  if (adm.admit === 'premium') await recordEvent(c, { tenantId: n.tenant_id, projectId: n.project_id ?? undefined, callId: id, type: 'call.overburst', payload: { creditMultiplier: adm.creditMultiplier }, occurredAt: ev.occurredAt });
   return call;
 }
 
@@ -202,7 +289,12 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
   try {
     await recordCallCost(c, actorId, {
       callId, tenantId: call.tenant_id, projectId: call.project_id ?? undefined, direction: call.direction,
-      occurredAt: call.started_at, usage: [{ providerId: call.provider_id, usage: { seconds: Number(call.duration_seconds ?? 0) } }],
+      occurredAt: call.started_at, creditMultiplier: call.credit_multiplier ?? undefined,
+      // A caller who gave up in the queue was never served: the provider time is costed, no credits are drawn. A caller who
+      // waited and was then served pays credits only from the moment they were.
+      drawCredits: !call.no_credit,
+      creditSkipSeconds: call.credit_from && call.answered_at ? Math.max(0, (new Date(call.credit_from).getTime() - new Date(call.answered_at).getTime()) / 1000) : 0,
+      usage: [{ providerId: call.provider_id, usage: { seconds: Number(call.duration_seconds ?? 0), burst: call.burst } }],
     });
     await c.query(`UPDATE calls SET cost_status = 'recorded', cost_error = NULL WHERE id = $1`, [callId]);
     return 'recorded';
@@ -235,6 +327,7 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
   const log = (type: string, payload: Record<string, unknown> = {}) =>
     recordEvent(c, { tenantId: call!.tenant_id, projectId: call!.project_id ?? undefined, callId: call!.id, type, payload, occurredAt: ev.occurredAt });
   const moveTo = async (status: string) => {
+    if (call!.status === 'queued') return; // a caller waiting for a channel stays queued until a channel frees
     if ((RANK[status] ?? 0) > (RANK[call!.status] ?? 0)) {
       await c.query('UPDATE calls SET status = $2 WHERE id = $1', [call!.id, status]);
       call!.status = status;
@@ -248,24 +341,37 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
       call.answered_at = call.answered_at ?? ev.occurredAt;
       await moveTo('in_progress'); await log('call.answered'); break;
     case 'ended': {
-      if (call.ended_at) break; // already finished; a late duplicate must not reopen or re-price it
+      if (call.ended_at) {
+        // A caller who was timed out of the queue is hung up on afterwards: when the provider reports the end, the time
+        // they spent on the line is costed (provider side only; they were never served, so no credits).
+        if (call.end_reason === 'queue_timeout' && call.cost_status === 'pending') {
+          const held = ev.durationSeconds ?? (call.answered_at ? Math.max(0, (ev.occurredAt.getTime() - call.answered_at.getTime()) / 1000) : 0);
+          await c.query('UPDATE calls SET duration_seconds = $2 WHERE id = $1', [call.id, held]);
+          await log('call.ended', { status: call.status, reason: 'queue_timeout', durationSeconds: held });
+          await costCall(c, null, call.id);
+        }
+        break; // otherwise already finished; a late duplicate must not reopen or re-price it
+      }
+      const wasQueued = call.status === 'queued';   // hung up while waiting: never served, whatever the hold message cost
       const answered = call.answered_at !== null || (ev.durationSeconds ?? 0) > 0;
       const seconds = ev.durationSeconds
         ?? (call.answered_at ? Math.max(0, (ev.occurredAt.getTime() - call.answered_at.getTime()) / 1000) : 0);
-      const status = answered ? 'completed' : ev.endReason === 'failed' ? 'failed' : 'unanswered';
+      const status = wasQueued ? 'unanswered' : answered ? 'completed' : ev.endReason === 'failed' ? 'failed' : 'unanswered';
       await c.query(
-        `UPDATE calls SET status = $2, ended_at = $3, duration_seconds = $4, end_reason = $5 WHERE id = $1`,
-        [call.id, status, ev.occurredAt, seconds, ev.endReason ?? 'completed'],
+        `UPDATE calls SET status = $2, ended_at = $3, duration_seconds = $4, end_reason = $5, no_credit = $6 WHERE id = $1`,
+        [call.id, status, ev.occurredAt, seconds, wasQueued ? 'abandoned_in_queue' : ev.endReason ?? 'completed', wasQueued],
       );
       call.status = status;
       await log('call.ended', { status, reason: ev.endReason ?? 'completed', durationSeconds: seconds });
       await costCall(c, null, call.id);
+      // A channel has freed: whoever has waited longest moves up.
+      if (call.direction === 'inbound') await promoteQueued(c, call.tenant_id);
       break;
     }
     case 'speak_ended': await log('call.speak_ended'); break;
     case 'initiated': break; // inbound calls were logged when the row was created
   }
-  const actions = isTelnyx ? telnyxNextActions(ev, routed) : [];
+  const actions = isTelnyx ? telnyxNextActions(ev, routed, call.status === 'queued') : [];
   return { duplicate: false, actions };
 }
 
@@ -298,6 +404,11 @@ export const getCall = async (c: pg.PoolClient, callId: string) => {
 };
 
 /** Whether Voice Lab knows this provider call, used to decide between answering and rejecting a Twilio voice request. */
+/** Whether an inbound call is waiting for a free channel, so it should hear a hold message rather than be served. */
+export const callQueued = (d: CallDeps, providerId: string, providerCallId: string) =>
+  asInternal(d, async (c) =>
+    (await c.query(`SELECT 1 FROM calls WHERE provider_id = $1 AND provider_call_id = $2 AND status = 'queued'`, [providerId, providerCallId])).rowCount === 1);
+
 export const callKnown = (d: CallDeps, providerId: string, providerCallId: string) =>
   asInternal(d, async (c) =>
     (await c.query('SELECT 1 FROM calls WHERE provider_id = $1 AND provider_call_id = $2', [providerId, providerCallId])).rowCount === 1);
@@ -308,3 +419,21 @@ export const listCalls = async (c: pg.PoolClient, o: { limit: number; status?: s
             duration_seconds, end_reason, cost_status FROM calls
       WHERE ($1::text IS NULL OR status = $1) AND ($2::uuid IS NULL OR tenant_id = $2)
       ORDER BY started_at DESC LIMIT $3`, [o.status ?? null, o.tenantId ?? null, o.limit])).rows;
+
+/** Hang up calls that are still on the line (callers timed out of the queue). A failure is recorded, not fatal. */
+export async function hangUpCalls(d: CallDeps, calls: { providerId: string; providerCallId: string; callId: string; tenantId: string }[]) {
+  let hungUp = 0;
+  for (const k of calls) {
+    try {
+      const p = await asInternal(d, (c) => loadProvider(c, k.providerId));
+      if (!p) continue;
+      if (p.adapter_key === 'telnyx') await telnyxCommand(credentials<TelnyxCreds>(p, d.key), d.http, { type: 'telnyx', action: 'hangup', callControlId: k.providerCallId });
+      else if (p.adapter_key === 'twilio') await twilioHangup(credentials<TwilioCreds>(p, d.key), d.http, k.providerCallId);
+      else continue;
+      hungUp++;
+    } catch (err) {
+      await asInternal(d, (c) => recordEvent(c, { tenantId: k.tenantId, callId: k.callId, type: 'call.command_failed', payload: { action: 'hangup', reason: redactNumbers((err as Error).message) } }));
+    }
+  }
+  return hungUp;
+}

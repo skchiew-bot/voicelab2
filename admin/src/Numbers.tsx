@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { api, type PhoneNumber, type Provider, type Tenant } from './api';
+import { api, type PoolNumber, type Provider, type Tenant } from './api';
 import { Errors, Field, useAction, useLoad } from './ui';
 
 export function Numbers() {
-  const numbers = useLoad(() => api<PhoneNumber[]>('GET', '/internal/numbers'));
+  const numbers = useLoad(() => api<PoolNumber[]>('GET', '/internal/dids'));
   const providers = useLoad(() => api<Provider[]>('GET', '/internal/providers'));
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
   const [providerId, setProviderId] = useState('');
@@ -19,12 +19,12 @@ export function Numbers() {
   return (
     <>
       <h1>Numbers</h1>
-      <p className="muted">Numbers we own at a provider. An inbound call goes to the client that owns the number dialled, and an outbound call must use one of the client's own numbers as caller ID. Customers' numbers are never stored.</p>
+      <p className="muted">Numbers we own at a provider: the pool outbound calls are dialled from. An inbound call goes to the client that owns the number dialled. For an outbound call the pool picks the caller ID: never one that has failed for that contact before, then the cheapest provider's, then the one used least recently. Customers' numbers are never stored.</p>
       <Errors error={numbers.error ?? providers.error ?? tenants.error} />
       {numbers.data && (numbers.data.length === 0 ? <p className="muted">No numbers yet.</p> : (
         <table>
-          <thead><tr><th>Number</th><th>Provider</th><th>Client</th><th>Country</th><th>Label</th></tr></thead>
-          <tbody>{numbers.data.map((n) => <tr key={n.id}><td>{n.e164}</td><td>{pname(n.provider_id)}</td><td>{tname(n.tenant_id)}</td><td>{n.country}</td><td>{n.label}</td></tr>)}</tbody>
+          <thead><tr><th>Number</th><th>Provider</th><th>Client</th><th>Country</th><th>Label</th><th>Used</th><th>Last used</th><th>Failures</th><th>Contacts locked out</th></tr></thead>
+          <tbody>{numbers.data.map((n) => <tr key={n.id}><td>{n.e164}</td><td>{pname(n.provider_id)}</td><td>{tname(n.tenant_id)}</td><td>{n.country}</td><td>{n.label}</td><td>{n.use_count}</td><td>{n.last_used_at ? new Date(n.last_used_at).toLocaleString() : '—'}</td><td>{n.failures}</td><td>{n.contacts_locked}</td></tr>)}</tbody>
         </table>
       ))}
       <form className="card" aria-label="Add number" onSubmit={async (e) => {

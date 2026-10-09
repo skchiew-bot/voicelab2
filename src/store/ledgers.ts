@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { audit } from './audit.js';
+import { syncFunding } from './resilience.js';
 
 // Ledger 1: provider funding (internal only).
 export async function addFundingEntry(
@@ -13,6 +14,8 @@ export async function addFundingEntry(
     [e.providerId, e.kind, e.amount, e.currency, e.ref ?? null],
   );
   await audit(c, actorId, 'funding.add', 'provider', e.providerId, { kind: e.kind, amount: e.amount, currency: e.currency });
+  // An empty balance fails the provider over at once; a top-up puts it on probation.
+  await syncFunding(c, e.providerId, { topUp: e.kind === 'topup' });
   return rows[0];
 }
 

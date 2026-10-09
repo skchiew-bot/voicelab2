@@ -18,7 +18,7 @@ const id = z.string().uuid();
 const environment = z.enum(['staging', 'production']);
 const json = z.unknown();
 
-const scenario = z.object({
+export const scenario = z.object({
   name: z.string().min(1).max(200),
   variables: z.record(z.string(), json).default({}),
   replies: z.array(z.string().max(2000)).optional(),

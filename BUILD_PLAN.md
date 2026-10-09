@@ -216,6 +216,22 @@ Goal: cut cost without hurting the caller's experience.
   - rejected, wrong number, third party and unreachable outcomes
   - captured best callback times
 
+**Status (in progress)**
+
+Built and tested (against fakes; no audio has been played on a real call):
+- **Pre-recorded audio:** a client's recordings are stored per language and found by their exact words (not by name), so what is played is always what the workflow says. Only fixed words are recorded: a new take is a new version, and the old one is kept. The upload refuses a file whose first bytes are not the audio type it claims, and anything over 5 MB. The console has a Recordings screen (upload, list, play).
+- **Stitching plan:** every line a call speaks is planned as recorded and live parts. A fixed line is played whole if recorded. A hybrid line plays the recorded frame and speaks only the slot, and neighbouring live parts are joined into one request so the voice reads them as one phrase. A model-written line is always live. Sensitive variables are still refused. Each spoken line records how many characters are synthesised and how many played from a recording, in the call's steps and its totals; the count is by character, not byte.
+- **Measuring the saving:** the same scripted callers are played with and without the recordings, and the difference in synthesised characters is priced exactly at the voice provider's per-character rate. It also lists the fixed words still worth recording.
+- **DID pool and DID check:** before every dial (after the do-not-call gate, so a blocked number uses none), the check excludes any DID that has ever failed for this contact, picks the cheapest provider's numbers (a provider with no captured rate comes last), and uses the least recently used. If every number is locked for the contact, or the client has none, the call is refused and no provider is contacted; such calls are not counted as the provider failing. A named caller ID gets the same check. A failure is recorded against a call, locks that DID from that contact for good (rows cannot change), and the contact is known only by a keyed hash, so no customer number is kept.
+- **Outbound analytics:** attempts, contact rate and answer rate, who rejected, wrong numbers, third parties, no answer and unreachable, answered calls not yet classified (shown, not guessed), and the callback times people asked for, in their own time zone.
+
+Not built or not proven:
+- **Playing audio.** No voice provider or speech pipeline is connected to calls, so nothing plays a recording on the telephony leg. This phase decides what would be played and counts it. Whether the seams between a recording and live speech sound natural cannot be tested without people listening.
+- **Call cost records do not yet receive the synthesised-character count.** The count is in each run and the saving is measured from it, but a real call's cost record has no voice usage until a voice provider is connected to calls.
+- **DID failures are recorded by an operator or another system through the API.** Nothing yet detects a spam label or carrier block from provider events, because the exact signals each provider sends have not been checked against the live services.
+- **Outcomes are recorded through the API** and are not yet tied to the end outcome of a workflow run, since a call does not yet carry a workflow.
+- **The blind listening check and Customer Experience Council sign-off** need people.
+
 **Exit criteria**
 - The cost difference between a stitched and an unstitched version of the same flow is measured.
 - A blind listening check confirms there is no drop in caller experience (the Customer Experience Council signs off).
@@ -236,6 +252,29 @@ Goal: degrade gracefully instead of failing.
 - Inbound concurrency is a per-client entitlement. Extra channels are deducted from credits monthly.
 - Optional premium overburst for clients at a configurable premium.
 - **Funding-health monitor.** It alerts at configurable thresholds before a provider balance reaches zero.
+
+**Status (in progress)**
+
+Built and tested against fakes (no real provider has failed during a live call):
+- **Failover rules:** a provider is judged failed after N errors inside a window, N dead-air silences, or latency whose typical (median) value is over a threshold for enough replies; one bad reply never does it. A failed provider is trusted again only after a run of good attempts over a minimum time, and only attempts since it last changed state count, so it does not flip back on the first sign of life. Out of funding fails over at once and is not retried; a topped-up provider goes on probation. Every threshold is configurable (`resilience_policy`) and every switch is logged and shown in the console.
+- **Voice failover with handover:** a call tries its voice providers in the client's order. When one is failed over, the next plays a bridge message, is told where the flow is, what was collected and what each side said (never a sensitive value), and the interrupted line is replayed in full with its slot values. A provider that is still trusted is simply tried again. A call already moved stays on the secondary rather than bouncing back.
+- **Total failure:** a holding message, then a person if one is available, else a callback offer, else voicemail; a callback request is always recorded first unless the call went to a person, so the call is never left in silence, and a failing telephony leg cannot stop the record being made.
+- **Telephony failover:** a failed, unfunded or full provider is passed over by the DID check; a provider that fails to place a call is counted against it and the next provider is tried; with every provider unavailable the dial is refused plainly and no provider is contacted. Refusals are not counted as the provider failing.
+- **Concurrency ceilings:** taken from the rates' concurrency limit. A dial goes to the cheapest provider with room; if every provider is full it is held back with a retry time (nothing placed, no customer number kept), unless the client has agreed an overburst premium, in which case the call is marked, carries the provider's burst multiplier and the client's credits are multiplied by the agreed premium. A call within the ceiling carries no burst line. Dials arriving together cannot take the same last channel.
+- **Inbound entitlement:** a client's simultaneous inbound channels (plus extra channels). Beyond them a call waits (hold message, never hung up on), the longest-waiting call moves up when a channel frees, a caller who gives up is recorded as abandoned (the provider's time is costed, no credits drawn), and a caller who waits too long is hung up on and given a callback request. A caller who is served after waiting is billed credits only from when they were served, and a caller on hold counts against the provider's ceiling. A client with no entitlement set is not limited. Extra channels are charged to credits monthly, once per month.
+- **Funding-health monitor:** alert levels per provider and currency (warn and critical, chosen by an operator) feed the Control Tower; an empty balance fails the provider over.
+- **Console:** a Resilience screen (provider health and why, capacity, funding and alert levels, the failover rules, recent failovers). The Control Tower raises alerts for failed or unfunded providers, low funding, queued callers and held-back dials.
+
+Not built or not proven:
+- **No voice provider is connected to live calls**, so voice failover is exercised through a model of a provider, and the bridge and replay are not heard.
+- **An outbound dial held back is not queued here:** keeping a queue would mean keeping the customer's number. The dialler retries after the time it is given.
+- **A queued inbound caller hears a hold message;** nothing yet starts the workflow when their turn comes.
+- **Funding is not deducted as calls are costed**, so the monitor works from entered balances.
+- **Failures come from errors at dial time and reported samples,** not yet from provider webhooks or measured dead air on a live call.
+- **Nothing sends a failed provider traffic, so recovery needs probes.** `probeProviders` tries failed voice providers and must be run on a schedule by the deployment; a failed telephony provider has no probe yet and recovers only when samples are reported through the API. A recovered provider must show a run of good attempts spanning the minimum time.
+- **The held-back dials and the orphan events:** a dial held back for capacity leaves its gate and DID-check events in the event log under an id that never becomes a call.
+- **Hanging up a timed-out queued caller** uses a Twilio call-update request written from memory and unchecked against the live service.
+- Per-client voice routes, fallback plans and entitlements are set through the API; the console shows the result but does not edit them yet.
 
 **Exit criteria**
 - Chaos tests cover killing the provider, injecting latency and running the balance to zero. Each produces the expected failover with no dead drop.

@@ -16,7 +16,9 @@ import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
-import { addNumber, callKnown, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { addNumber, callKnown, callQueued, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { registerResilienceRoutes } from './routes/resilience.js';
+import { registerStitchingRoutes } from './routes/stitching.js';
 import { registerWorkflowRoutes } from './routes/workflows.js';
 import type { HttpDeps } from './workflows/integrations.js';
 import { controlTower } from './store/control-tower.js';
@@ -24,7 +26,7 @@ import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
 import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
 import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
 import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
-import { parseTwilio, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
+import { parseTwilio, twimlHold, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
 import { createProvider, getProvider, listProviders, preflight, recheckProvider, setCapability } from './store/providers.js';
 import { createProject, createTenant, createUser, listProjects, listTenants } from './store/tenants.js';
 
@@ -353,6 +355,8 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   });
 
   registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerResilienceRoutes(app, { pool, internal, callDeps });
+  registerStitchingRoutes(app, { pool, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
 
   // ------------------------------------------------- control tower
   app.get('/internal/control-tower', async (req) => {
@@ -380,10 +384,12 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   app.post('/internal/calls/outbound', async (req, reply) => {
     const s = await internal(req);
     const body = z.object({
-      tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), providerId: z.string().uuid(),
-      from: z.string(), to: z.string(), country,
+      tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), providerId: z.string().uuid().optional(),
+      from: z.string().optional(), to: z.string(), country,
     }).parse(req.body);
     const result = await placeOutboundCall(callDeps, s.userId, body);
+    // A dial held back for want of capacity is not an error to fix but a request to retry shortly.
+    if ('deferred' in result) return reply.status(429).header('retry-after', String(result.retryAfterSeconds)).send(result);
     return reply.status(result.allowed ? 201 : 200).send(result);
   });
   app.get('/internal/calls', async (req) => {
@@ -449,7 +455,8 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     if (ev) await processWebhook(callDeps, provider, ev, callId);
     if (!voice) return reply.status(204).send();
     const known = ev ? await callKnown(callDeps, provider.id, ev.providerCallId) : false;
-    return reply.type('text/xml').send(known ? twimlTestCall() : twimlReject());
+    const queued = known && ev ? await callQueued(callDeps, provider.id, ev.providerCallId) : false;
+    return reply.type('text/xml').send(known ? (queued ? twimlHold(`${callDeps.baseUrl}/webhooks/twilio/${provider.id}/voice${callId ? `?callId=${callId}` : ''}`) : twimlTestCall()) : twimlReject());
   };
   app.post('/webhooks/twilio/:providerId/status', twilioHook(false));
   app.post('/webhooks/twilio/:providerId/voice', twilioHook(true));

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, type RunView, type SimResult, type WfIssue, type WfVersion, type WorkflowDef, type WorkflowDetailData } from './api';
+import { Stitching } from './Stitching';
 import { Errors, Field, fmtDate, useAction, useLoad } from './ui';
 
 const preview = (t: string | Record<string, string> | undefined) => (t === undefined ? '' : typeof t === 'string' ? t : t.en ?? Object.values(t)[0] ?? '');
@@ -143,6 +144,7 @@ function Simulate({ workflowId, detail }: { workflowId: string; detail: Workflow
   }, [latest.id]);
 
   return (
+    <>
     <section className="card" aria-label="Simulation">
       <h2>Simulate</h2>
       <p className="muted">Run a list of scripted callers through a version, with nothing real touched. Production needs a simulation of the exact version in which every caller states its expected <code>outcome</code> and does what you expected. Each has a name, the variables it starts with, what the caller says in order, and what you expect (<code>outcome</code>, <code>says</code>, <code>doesNotSay</code>, <code>handoff</code>).</p>
@@ -175,6 +177,8 @@ function Simulate({ workflowId, detail }: { workflowId: string; detail: Workflow
         </>
       )}
     </section>
+    <Stitching workflowId={workflowId} scenariosText={text} versionId={versionId} />
+    </>
   );
 }
 

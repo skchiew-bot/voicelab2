@@ -1,5 +1,7 @@
 import type pg from 'pg';
 import { decryptSecrets } from '../secrets.js';
+import { fundingStatus } from './funding-monitor.js';
+import { healthMap } from './resilience.js';
 
 export type Severity = 'high' | 'medium' | 'low';
 export interface Alert { severity: Severity; code: string; message: string; link?: string }
@@ -32,7 +34,7 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
                                  count(*) FILTER (WHERE status = 'completed') AS completed,
                                  max(started_at) AS last_call
                             -- Finished calls only: calls still in flight (or stuck) say nothing about success or failure.
-                            FROM calls WHERE provider_id = p.id AND status IN ('completed', 'unanswered', 'failed')
+                            FROM calls WHERE provider_id = p.id AND status IN ('completed', 'unanswered', 'failed') AND coalesce(end_reason, '') NOT IN ('did_locked', 'all_locked_for_contact', 'no_numbers', 'providers_unhealthy')
                              AND started_at > now() - interval '24 hours') k ON true
       ORDER BY p.name`)).rows;
 
@@ -84,6 +86,7 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   if (problems.failed > 0) add('high', 'cost_failed', `${problems.failed} call${problems.failed === 1 ? '' : 's'} could not be priced.`, '#/calls');
   if (problems.variance > 0) add('medium', 'cost_variance', `${problems.variance} call${problems.variance === 1 ? '' : 's'} differ${problems.variance === 1 ? 's' : ''} from the provider's own figures.`, '#/calls');
 
+  const health = await healthMap(c);
   const providerViews = providers.map((p) => {
     const link = `#/providers/${p.id}`;
     if (p.status === 'active') {
@@ -106,6 +109,7 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
     return {
       id: p.id, name: p.name, adapter: p.adapter_key, kind: p.kind, status: p.status, credentialsCheckedAt: p.credentials_checked_at,
       ratesInForce: p.version_id !== null, ratesConfirmed: p.confirmed,
+      health: health.get(p.id) ?? 'healthy',
       calls24h: { total: p.total, completed: p.completed, unanswered: p.unanswered, failed: p.failed }, lastCall: p.last_call,
     };
   });
@@ -115,6 +119,24 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
     // A disabled provider is no longer in use, so an empty balance there is not news.
     if (f.status === 'active' && Number(f.balance) <= 0) add('high', 'funding_empty', `${f.provider}: the recorded funding balance is ${Number(f.balance)} ${f.currency}.`, `#/providers/${f.provider_id}`);
   }
+
+  // Failover and capacity: what the system is doing to keep calls alive, so a person hears about it too.
+  for (const p of providers) {
+    const state = health.get(p.id) ?? 'healthy';
+    if (p.status === 'active' && state !== 'healthy') {
+      const why = (await c.query('SELECT reason FROM provider_health WHERE provider_id = $1', [p.id])).rows[0]?.reason ?? '';
+      add('high', 'provider_unhealthy', `${p.name} is ${state === 'unfunded' ? 'out of funding' : 'failed over'}: calls are going to other providers. ${why}`.trim(), `#/providers/${p.id}`);
+    }
+  }
+  for (const f of await fundingStatus(c)) {
+    if (f.providerStatus !== 'active') continue;
+    if (f.level === 'critical') add('high', 'funding_critical', `${f.provider}: the funding balance (${Number(f.balance)} ${f.currency}) is below its critical level.`, `#/providers/${f.providerId}`);
+    else if (f.level === 'warn') add('medium', 'funding_low', `${f.provider}: the funding balance (${Number(f.balance)} ${f.currency}) is below its warning level.`, `#/providers/${f.providerId}`);
+  }
+  const queued = (await c.query(`SELECT count(*)::int AS n FROM calls WHERE status = 'queued'`)).rows[0].n as number;
+  if (queued > 0) add('medium', 'calls_queued', `${queued} inbound call${queued === 1 ? ' is' : 's are'} waiting for a free channel.`, '#/calls');
+  const deferred = (await c.query(`SELECT count(*)::int AS n FROM failover_events WHERE scope = 'telephony' AND trigger = 'capacity' AND at > now() - interval '1 hour'`)).rows[0].n as number;
+  if (deferred > 0) add('medium', 'dials_deferred', `${deferred} outbound dial${deferred === 1 ? ' was' : 's were'} held back in the last hour because every provider was at its concurrency limit.`, '#/numbers');
 
   alerts.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
   return {

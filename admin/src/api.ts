@@ -43,7 +43,7 @@ export interface Provider {
   id: string; adapter_key: string; kind: string; name: string; params: Record<string, unknown>;
   status: string; secrets_stored: boolean; credentials_checked_at: string | null; capabilities: Capability[];
 }
-export interface Component { component: string; unit: string; rate: string; currency: string; billing_line: string }
+export interface Component { component: string; unit: string; rate: string; currency: string; billing_line: string; direction: string }
 export interface ChargingVersion {
   id: string; version: number; effective_from: string; billing_increment_seconds: number;
   minimum_charge_seconds: number; rounding: string; concurrency_limit: number | null;
@@ -53,3 +53,18 @@ export interface ChargingVersion {
 export interface Tenant { id: string; name: string; created_at: string }
 export interface Project { id: string; name: string }
 export interface CreditSummary { balance: string; recent: { id: number; kind: string; credits: string; ref: string | null; created_at: string }[] }
+
+export interface FxRate { id: number; currency: string; per_usd: string; effective_from: string }
+export interface RateCard { id: number; effective_from: string; inbound_credits_per_minute: string; outbound_credits_per_minute: string; credit_value_usd: string }
+export interface PhoneNumber { id: string; provider_id: string; e164: string; tenant_id: string; project_id: string | null; country: string; label: string | null }
+export interface DncRegistry { country: string; requirement: 'registry' | 'none_required'; source: string; national_entries: number }
+export interface CallRow {
+  id: string; tenant_id: string; provider_id: string; direction: string; status: string; country: string | null;
+  started_at: string; ended_at: string | null; duration_seconds: string | null; end_reason: string | null; cost_status: string; cost_error?: string | null;
+}
+export interface CostLine { component: string; billing_line: string; unit: string; quantity: string; billed_seconds: number | null; rate: string; currency: string; amount: string; amount_usd: string }
+export interface CallCost { status: string; total_usd: string; total_myr: string; credits_drawn: string; margin_usd: string; lines: CostLine[] }
+export interface Reconciliation { id: number; source: string; outcome: string; our_cost_usd: string; reported_cost_usd: string | null; detail: string; created_at: string }
+export interface CampaignCost { project_id: string | null; project: string | null; calls: number; total_usd: string; total_myr: string; credits_drawn: string; margin_usd: string }
+export interface CallEvent { id: number; type: string; occurred_at: string }
+export interface ReferenceRate { adapterKey: string; summary: string }

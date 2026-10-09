@@ -12,7 +12,7 @@ import { recordCallCost } from './costs.js';
 import { gateOutbound, normalizeE164 } from './dnc.js';
 import { recordEvent } from './events.js';
 
-export interface CallDeps { pool: pg.Pool; key: Buffer; dncKey: Buffer; http: Fetch; baseUrl?: string }
+export interface CallDeps { pool: pg.Pool; key: Buffer; dncKey: Buffer; http: Fetch; baseUrl?: string; tolerancePct?: number }
 
 export interface ProviderRow {
   id: string; adapter_key: string; kind: string; status: string; params: Record<string, unknown>; secret_params: Buffer;
@@ -144,10 +144,12 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
 }
 
 /** Price a finished call and store the result. Failing to price never loses the call or fails the webhook. */
-export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed'> {
-  const call = (await c.query('SELECT * FROM calls WHERE id = $1', [callId])).rows[0];
+export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance'> {
+  const call = (await c.query('SELECT * FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
   if (!call) throw new AppError(404, 'Call not found.');
   if (!call.ended_at) throw new AppError(409, 'The call has not ended yet.');
+  // Already priced and possibly checked: pricing again must not wipe a reconciled or variance flag.
+  if (['recorded', 'reconciled', 'variance'].includes(call.cost_status)) return call.cost_status;
   try {
     await recordCallCost(c, actorId, {
       callId, tenantId: call.tenant_id, projectId: call.project_id ?? undefined, direction: call.direction,
@@ -250,3 +252,10 @@ export const getCall = async (c: pg.PoolClient, callId: string) => {
 export const callKnown = (d: CallDeps, providerId: string, providerCallId: string) =>
   asInternal(d, async (c) =>
     (await c.query('SELECT 1 FROM calls WHERE provider_id = $1 AND provider_call_id = $2', [providerId, providerCallId])).rowCount === 1);
+
+export const listCalls = async (c: pg.PoolClient, o: { limit: number; status?: string; tenantId?: string }) =>
+  (await c.query(
+    `SELECT id, tenant_id, project_id, provider_id, direction, status, country, started_at, answered_at, ended_at,
+            duration_seconds, end_reason, cost_status FROM calls
+      WHERE ($1::text IS NULL OR status = $1) AND ($2::uuid IS NULL OR tenant_id = $2)
+      ORDER BY started_at DESC LIMIT $3`, [o.status ?? null, o.tenantId ?? null, o.limit])).rows;

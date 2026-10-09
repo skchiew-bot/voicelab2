@@ -75,14 +75,16 @@ export async function listProviders(c: pg.PoolClient) {
   return out;
 }
 
-async function withDetail(c: pg.PoolClient, row: Record<string, unknown>) {
+export interface ProviderView { id: string; adapter_key: string; kind: string; name: string; params: Record<string, unknown>; status: string; capabilities: unknown[] }
+
+async function withDetail(c: pg.PoolClient, row: Record<string, any>): Promise<ProviderView> {
   const id = row.id as string;
   const caps = await c.query(
     'SELECT capability, support, notes FROM provider_capabilities WHERE provider_id = $1 ORDER BY capability',
     [id],
   );
   // Secrets are reported only as present or not, never their values or length.
-  return { ...row, capabilities: caps.rows };
+  return { ...row, capabilities: caps.rows } as ProviderView;
 }
 
 export async function setCapability(

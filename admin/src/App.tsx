@@ -2,7 +2,11 @@ import { useEffect, useState } from 'react';
 import { api, getToken, setToken } from './api';
 import { Errors, Field, useAction } from './ui';
 import { ProviderDetail } from './ProviderDetail';
+import { Calls } from './Calls';
+import { Compliance } from './Compliance';
+import { Numbers } from './Numbers';
 import { Providers } from './Providers';
+import { Rates } from './Rates';
 import { Tenants } from './Tenants';
 
 function useHash() {
@@ -62,7 +66,7 @@ export function App() {
   if (!signedIn) return <Login onDone={() => setSignedIn(true)} />;
 
   const providerId = /^#\/providers\/([\w-]+)$/.exec(hash)?.[1];
-  const section = hash.startsWith('#/tenants') ? 'tenants' : 'providers';
+  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'providers';
 
   return (
     <div className="shell">
@@ -70,11 +74,20 @@ export function App() {
         <strong>Voice Lab</strong>
         <a href="#/providers" aria-current={section === 'providers' ? 'page' : undefined}>Providers</a>
         <a href="#/tenants" aria-current={section === 'tenants' ? 'page' : undefined}>Clients</a>
+        <a href="#/rates" aria-current={section === 'rates' ? 'page' : undefined}>Rates</a>
+        <a href="#/numbers" aria-current={section === 'numbers' ? 'page' : undefined}>Numbers</a>
+        <a href="#/compliance" aria-current={section === 'compliance' ? 'page' : undefined}>Do not call</a>
+        <a href="#/calls" aria-current={section === 'calls' ? 'page' : undefined}>Calls</a>
         <span className="spacer" />
         <button className="link" onClick={() => { setToken(null); setSignedIn(false); }}>Sign out</button>
       </nav>
       <main>
-        {section === 'tenants' ? <Tenants /> : providerId ? <ProviderDetail id={providerId} /> : <Providers />}
+        {section === 'tenants' ? <Tenants />
+          : section === 'rates' ? <Rates />
+          : section === 'numbers' ? <Numbers />
+          : section === 'compliance' ? <Compliance />
+          : section === 'calls' ? <Calls />
+          : providerId ? <ProviderDetail id={providerId} /> : <Providers />}
       </main>
     </div>
   );

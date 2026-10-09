@@ -78,3 +78,26 @@ const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 export const twimlTestCall = () =>
   `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${xml(TEST_CALL_MESSAGE)}</Say><Hangup/></Response>`;
 export const twimlReject = () => `<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>`;
+
+export type CallUsage = { state: 'pending' } | { state: 'ready'; seconds: number; cost: string; currency: string };
+
+/**
+ * What Twilio itself says a call lasted and cost. The price appears some time after the call ends, so
+ * "pending" means ask again later. Twilio reports charges as negative numbers; this returns the amount.
+ */
+export async function twilioFetchCallUsage(c: TwilioCreds, http: Fetch, callSid: string): Promise<CallUsage> {
+  let res: Response;
+  try {
+    res = await http(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(c.accountSid)}/Calls/${encodeURIComponent(callSid)}.json`, {
+      method: 'GET', headers: { authorization: twilioAuth(c) }, signal: AbortSignal.timeout(15_000),
+    });
+  } catch (err) {
+    throw new Error(`Could not reach Twilio: ${redactNumbers((err as Error).message)}`);
+  }
+  if (!res.ok) throw new Error(`Twilio would not return that call (HTTP ${res.status}).`);
+  const b = (await res.json().catch(() => null)) as { duration?: string | null; price?: string | null; price_unit?: string | null } | null;
+  if (!b || b.price === null || b.price === undefined || b.price === '' || b.duration === null || b.duration === undefined) return { state: 'pending' };
+  const cost = String(b.price).replace(/^-/, '');
+  if (!/^\d+(\.\d+)?$/.test(cost) || !/^\d+$/.test(String(b.duration))) throw new Error('Twilio returned a call record in a format Voice Lab does not recognise.');
+  return { state: 'ready', seconds: Number(b.duration), cost, currency: (b.price_unit ?? 'USD').toUpperCase() };
+}

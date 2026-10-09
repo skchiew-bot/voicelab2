@@ -2,9 +2,17 @@
 
 Provider-agnostic voice orchestration platform. The blueprint is the source of truth for what to build; `BUILD_PLAN.md` sets the order and the exit criteria for each phase.
 
+## Working agreement (standing instructions from the owner)
+
+- Build `BUILD_PLAN.md` phase by phase **without asking to continue**. Stop only for live credentials or a decision only the owner can make. Say what is unverified instead of stopping for it.
+- **One PR per phase**, on a branch named `claude/phase-<n>-<name>` (owner-approved; the designated session branch is also allowed). When a phase depends on an unmerged one, branch from it and set the PR's base to that branch; say so in the PR.
+- **Before each PR:** tests and typecheck green, then an **independent Opus review**: a helper agent on Opus, given the diff and the invariants but not my conclusions, asked for bugs, invariant violations and missing tests. Treat its findings as claims to verify, fix the real ones, and list findings and outcomes in the PR description.
+- **The owner merges.** Never merge a PR unless told to in that message.
+- Be honest in PR descriptions about what was only tested against fakes.
+
 ## Commands
 
-- `npm test` runs unit and database tests (needs local Postgres; each test file gets a throwaway database).
+- `npm test` runs unit and database tests (needs local Postgres; each test file gets a throwaway database). In the cloud container Postgres can be stopped after a restart: `pg_ctlcluster 16 main start`, and if every database test fails with ECONNREFUSED, that is why.
 - `npm run typecheck` checks the API and the admin UI. Run both before pushing.
 - `npm run build:admin` builds the admin UI (`admin/`, Vite + React) that the API serves at `/admin/`. `tests/admin-ui.test.ts` drives it in Chromium and is skipped where none is installed (`CHROMIUM_PATH`).
 - `npm run migrate` applies `migrations/*.sql`. Migrations are append-only: add a new file, never edit an applied one.
@@ -19,6 +27,7 @@ Provider-agnostic voice orchestration platform. The blueprint is the source of t
 - Webhooks are verified by signature before anything is read, and fail closed (no key, no verification, no processing). They are idempotent: a retried delivery changes nothing.
 - A finished call is priced once. Calls move forward only; a late or duplicate event must not reopen or re-price one.
 - Our own numbers (`phone_numbers`) are stored; customers' numbers are not. Scrub provider error text with `redactNumbers` before it is stored, logged or returned.
+- A call has one cost, counted once: a reconciled record replaces the estimate in every total (`campaignCosts` takes the latest per call). Reconciling never draws credits again.
 - Money is exact: use `src/money.ts` (BigInt, 1e-8) and `src/billing.ts`, never floating point. A call that cannot be priced is refused, not recorded with a guess.
 - Tests never call real provider APIs. Provider HTTP goes through the injected `fetch`; use `fakeProviderApi` in `tests/helpers.ts`. When a test's setup calls an endpoint, assert it succeeded.
 

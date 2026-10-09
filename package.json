@@ -9,21 +9,31 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p admin",
+    "build:admin": "vite build admin",
+    "dev:admin": "vite admin",
     "test": "vitest run",
     "migrate": "tsx src/cli.ts migrate",
     "bootstrap": "tsx src/cli.ts bootstrap"
   },
   "dependencies": {
+    "@fastify/static": "^10.1.5",
     "fastify": "^5.12.5",
     "pg": "^8.23.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@types/node": "^26.6.4",
     "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
+    "vite": "^8.3.4",
     "vitest": "^5.0.3"
   }
 }

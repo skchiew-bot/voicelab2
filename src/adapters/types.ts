@@ -28,6 +28,16 @@ export const CAPABILITIES = [
 ] as const;
 export type Capability = (typeof CAPABILITIES)[number];
 
+export type Fetch = typeof fetch;
+
+/**
+ * Result of asking the provider whether credentials work.
+ * rejected: the provider refused them. unreachable/unavailable: we could not tell.
+ */
+export type ValidationResult =
+  | { ok: true; info?: Record<string, string> }
+  | { ok: false; kind: 'rejected' | 'unreachable' | 'unavailable'; reason: string };
+
 export interface Adapter {
   key: string;
   kind: 'telephony' | 'voice';
@@ -38,6 +48,8 @@ export interface Adapter {
   defaultCapabilities: Record<Capability, Support>;
   /** Rules that span several parameters, e.g. "either an auth token or an API key pair". */
   crossValidate?(values: Record<string, string | number | boolean>): string | null;
+  /** Live, read-only check of the credentials against the provider. Receives secrets merged with plain values. */
+  validate?(values: Record<string, string | number | boolean>, http: Fetch): Promise<ValidationResult>;
 }
 
 export type ParamValues = Record<string, string | number | boolean>;

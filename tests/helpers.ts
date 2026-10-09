@@ -9,6 +9,27 @@ import { createUser } from '../src/store/tenants.js';
 // Server connection used to create a throwaway database per test file.
 const ADMIN_URL = process.env.TEST_ADMIN_DATABASE_URL ?? 'postgres://voicelab:voicelab@localhost:5432/postgres';
 
+/**
+ * Stands in for the providers' APIs: no test touches the real ones. By default every
+ * check succeeds; a test sets `respond` to simulate a rejection or an outage.
+ */
+export function fakeProviderApi() {
+  const calls: { url: string; method: string; headers: Record<string, string>; body: string }[] = [];
+  const state = {
+    calls,
+    respond: (_url: string, _init?: RequestInit): Response | Promise<Response> =>
+      new Response(JSON.stringify({ status: 'active', data: { balance: '12.34', currency: 'USD' } }), { status: 200 }),
+  };
+  const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({
+      url: String(input), method: init?.method ?? 'GET', body: String(init?.body ?? ''),
+      headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)),
+    });
+    return state.respond(String(input), init);
+  }) as typeof fetch;
+  return { ...state, state, fetch: fetchFn };
+}
+
 export async function setupDb() {
   const name = `voicelab_test_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
   const admin = new pg.Client({ connectionString: ADMIN_URL });
@@ -25,8 +46,10 @@ export async function setupDb() {
     DATABASE_URL: url.toString(),
     VOICELAB_SECRET_KEY: randomBytes(32).toString('base64'),
     PORT: 0,
+    PUBLIC_BASE_URL: 'https://voicelab.test',
   };
-  const app = buildApp(pool, config);
+  const provider = fakeProviderApi();
+  const app = buildApp(pool, config, { fetch: provider.fetch });
 
   const staff = await withActor(pool, { kind: 'internal' }, (c) =>
     createUser(c, null, { tenantId: null, email: 'staff@daythree.test', role: 'internal_admin' }));
@@ -44,5 +67,5 @@ export async function setupDb() {
   const call = (token: string, method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown) =>
     app.inject({ method, url, payload: payload as object, headers: { authorization: `Bearer ${token}` } });
 
-  return { pool, app, config, staffToken: staff.token, call, teardown };
+  return { pool, app, config, provider, staffToken: staff.token, call, teardown };
 }

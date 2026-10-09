@@ -128,6 +128,32 @@ Goal: real calls on real providers, with the true cost of every call known.
 - **Do-not-call pre-dial gate**, as a hard check per country. The blueprint lists it under Case Management. It is pulled forward here because no outbound call may be placed without it.
 - Reference rates entered as starting data and marked *unconfirmed* until each one is checked against the provider's current pricing page.
 
+**Status (in progress)**
+
+Built and tested. The provider APIs are unreachable from the build environment, so everything below is proven against fakes of their responses, not against the real services:
+- **Credential checks on save** for all four adapters. Twilio fetches the account over basic auth (token, or API key pair) and refuses an account that is not active. Telnyx uses the read-only balance endpoint. OpenAI lists models. ElevenLabs fetches the user. A rejection is told apart from an outage; "save without checking" exists for outages, is recorded in the audit log, and the credentials can be checked later, from the console or the API.
+- **Billing math** in exact integer arithmetic: increment, rounding (up, nearest, down) and minimum charge, with no floating point.
+- **Per-call cost record:** one line per billable component, each pointing at the exact charging version used, so a later rate change cannot alter it. Totals in USD and MYR using the FX rate in force at the time, credits drawn, margin, and the project tag. Re-sending a call returns the stored record and draws no credits twice. A call it cannot price (no rates, no FX rate) is refused, not recorded wrong.
+- **Credit meter** mirrors the provider's billing increment. Credits are zero until a rate card exists.
+- **FX rates and the client rate card** (versioned, append-only), and a per-campaign cost rollup.
+- **Call control for Twilio and Telnyx**, proven against fakes and signed test webhooks, not against the live services:
+  - Outbound calls: the do-not-call gate runs first and the provider is never contacted for a blocked number. The caller ID must be one of the client's own numbers on that provider. Our call id rides along (a URL parameter for Twilio, `client_state` for Telnyx), so an event can only match the call it belongs to.
+  - Inbound calls: routed to a client by the number dialled (`phone_numbers`); a number nobody owns is rejected and nothing about the caller is recorded.
+  - Webhooks are verified by signature and fail closed: Twilio HMAC-SHA1 over the full URL and parameters, which needs the Auth Token (an API key pair cannot verify); Telnyx Ed25519 over `timestamp|body` with a five-minute replay window, which needs the webhook public key. Retried deliveries are recognised and skipped.
+  - A call moves forward only (a late event cannot reopen or re-price it), is finished and priced exactly once even when callbacks race, and a pricing failure is recorded and retryable (`POST /internal/calls/:id/cost/retry`) instead of losing the call.
+  - Customer numbers exist in memory while a call is set up and are never stored, logged or audited; provider error text is scrubbed of anything number-shaped.
+  - Until Phase 2, every answered call plays a short test message and hangs up.
+- **Do-not-call gate**, failing closed: an unparseable number, or a country with no declared position, is blocked. Supports a national registry per country and each client's own opt-out list. Numbers are stored as keyed hashes. `gateOutbound` logs the decision to the call-event log without the number.
+
+Not built yet:
+- **Proof against the live services.** The Twilio and Telnyx request formats, status values and signature schemes were written from the providers' published behaviour, and their docs were not reachable while building, so they have not been checked against the real services. Exit criterion 1 (test calls on both) is not met until someone runs real test calls with live accounts, public URLs and `PUBLIC_BASE_URL` set.
+- **Talking to a caller.** The voice providers (OpenAI, ElevenLabs) are not connected to calls, so there is no voicebot yet. Do not point a real number at this: callers hear a test message and the call ends.
+- **A known gap in call control:** if the server stops in the instant between storing a Telnyx event and sending its reply command, that command is not re-sent (a retried event is skipped as a duplicate), so a call could sit unanswered.
+- **Reconciliation** against each provider's own usage data. Cost records are stored as `estimated`; nothing sets `reconciled` yet, so exit criterion 2 is only partly met.
+- **Feeding usage into the cost record.** The record accepts seconds, characters and tokens; no live call yet supplies them.
+- **Reference rates.** There is no seeded starting data. Operators enter rates in the console and mark them confirmed.
+- **Console screens** for FX, the rate card, do-not-call lists and cost views. These are API only for now.
+
 **Exit criteria**
 - Inbound and outbound test calls work on both Twilio and Telnyx.
 - Every test call produces a complete cost record, and the record reconciles with the provider's own usage data within an agreed tolerance.

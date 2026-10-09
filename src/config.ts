@@ -4,6 +4,8 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   VOICELAB_SECRET_KEY: z.string().min(1),
   PORT: z.coerce.number().int().positive().default(3000),
+  // The address providers use to reach this server, e.g. https://voicelab.example.com. Needed for calls.
+  PUBLIC_BASE_URL: z.string().url().optional(),
 });
 
 export type Config = z.infer<typeof schema>;

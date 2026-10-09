@@ -8,6 +8,7 @@ import { Compliance } from './Compliance';
 import { Numbers } from './Numbers';
 import { Outbound } from './Outbound';
 import { Recordings } from './Recordings';
+import { Resilience } from './Resilience';
 import { Providers } from './Providers';
 import { WorkflowDetail } from './WorkflowDetail';
 import { Workflows } from './Workflows';
@@ -72,7 +73,7 @@ export function App() {
 
   const providerId = /^#\/providers\/([\w-]+)$/.exec(hash)?.[1];
   const workflowId = /^#\/workflows\/([\w-]+)$/.exec(hash)?.[1];
-  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers', 'workflows', 'recordings', 'outbound'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
+  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers', 'workflows', 'recordings', 'outbound', 'resilience'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
 
   return (
     <div className="shell">
@@ -88,6 +89,7 @@ export function App() {
         <a href="#/compliance" aria-current={section === 'compliance' ? 'page' : undefined}>Do not call</a>
         <a href="#/calls" aria-current={section === 'calls' ? 'page' : undefined}>Calls</a>
         <a href="#/outbound" aria-current={section === 'outbound' ? 'page' : undefined}>Outbound</a>
+        <a href="#/resilience" aria-current={section === 'resilience' ? 'page' : undefined}>Resilience</a>
         <span className="spacer" />
         <button className="link" onClick={() => { setToken(null); setSignedIn(false); }}>Sign out</button>
       </nav>
@@ -97,6 +99,7 @@ export function App() {
           : section === 'numbers' ? <Numbers />
           : section === 'recordings' ? <Recordings />
           : section === 'outbound' ? <Outbound />
+          : section === 'resilience' ? <Resilience />
           : section === 'compliance' ? <Compliance />
           : section === 'calls' ? <Calls />
           : section === 'workflows' ? (workflowId ? <WorkflowDetail id={workflowId} /> : <Workflows />)

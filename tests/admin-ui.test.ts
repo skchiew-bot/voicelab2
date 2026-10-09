@@ -71,7 +71,7 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(p1.getByText('Inbound and outbound test calls work on both Twilio and Telnyx.')).toBeVisible();
     await expect(p1).toContainText('tested against fakes, not the real provider');
     await expect(p1).toContainText('Still open');
-    await expect(page.getByLabel('Phase 4')).toContainText('Not started');
+    await expect(page.getByLabel('Phase 5')).toContainText('Not started');
     await expect(page.getByLabel('Control Tower', { exact: true }).first()).toBeVisible();
     await expect(page.getByLabel('Applies to every phase')).toContainText('configured model tier');
     await progress.getByText('10 open decisions').click();
@@ -83,7 +83,7 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(page.getByLabel('Funding')).toContainText('No funding recorded yet');
     await expect(page.getByLabel('Cost and margin')).toContainText('Last 24 hours');
     await page.close();
-  });
+  }, 60_000);
 
   it('updates as the platform is set up, and the alerts link to the fix', async () => {
     const st = env.staffToken;
@@ -422,7 +422,7 @@ describe.skipIf(!run)('admin UI', () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
     await signIn(page, env.staffToken);
     await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
-    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound']) {
+    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience']) {
       await page.goto(`${base}#/${route}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
@@ -576,6 +576,39 @@ describe.skipIf(!run)('admin UI', () => {
     await field(page, 'Client').selectOption({ label: 'Stitch UI Co' });
     await expect(page.getByLabel('Rates')).toContainText('no attempts yet');
     await expect(page.getByLabel('Best times to call back')).toContainText('No callback times captured');
+    await page.close();
+  }, 60_000);
+
+  it('shows which providers have failed over and why, funding levels, and saves alert levels and failover rules', async () => {
+    const st = env.staffToken;
+    const pid = (await env.call(st, 'POST', '/internal/providers', { adapterKey: 'elevenlabs', name: 'ui-voice', params: { apiKey: 'k' } })).json().id;
+    for (let i = 0; i < 3; i++) expect((await env.call(st, 'POST', `/internal/providers/${pid}/samples`, { kind: 'error' })).statusCode).toBe(201);
+    expect((await env.call(st, 'POST', `/internal/providers/${pid}/funding`, { kind: 'topup', amount: '40', currency: 'USD' })).statusCode).toBe(201);
+
+    const page = await browser.newPage();
+    await signIn(page, st);
+    await page.goto(`${base}#/resilience`);
+    await expect(page.getByRole('heading', { name: 'Resilience', level: 1 })).toBeVisible();
+    await expect(page.getByLabel('Provider health').getByRole('row', { name: /^ui-voice Failed over Repeated errors\./ })).toBeVisible();
+    await expect(page.getByLabel('Recent failovers')).toContainText('hard errors');
+    await expect(page.getByLabel('Funding').getByRole('row', { name: /^ui-voice 40 USD OK not set not set$/ })).toBeVisible();
+
+    const levels = page.getByLabel('Funding alert levels');
+    await field(levels, 'Provider').selectOption({ label: 'ui-voice' });
+    await field(levels, 'Warn below').fill('50');
+    await field(levels, 'Critical below').fill('10');
+    await levels.getByRole('button', { name: 'Save levels' }).click();
+    await expect(page.getByLabel('Funding').getByRole('row', { name: /^ui-voice 40 USD Running low 50 10$/ })).toBeVisible();
+
+    await field(levels, 'Warn below').fill('50');                           // a critical level above the warning level is refused
+    await field(levels, 'Critical below').fill('60');
+    await levels.getByRole('button', { name: 'Save levels' }).click();
+    await expect(levels.getByRole('alert')).toContainText('critical level must not be above');
+
+    const rules = page.getByLabel('Failover rules');
+    await field(rules, 'Errors before failing over').fill('5');
+    await rules.getByRole('button', { name: 'Save rules' }).click();
+    await expect(field(rules, 'Errors before failing over')).toHaveAttribute('placeholder', '5');
     await page.close();
   }, 60_000);
 

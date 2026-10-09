@@ -56,6 +56,8 @@ export interface CallCostInput {
   projectId?: string;
   direction: 'inbound' | 'outbound';
   occurredAt: Date;
+  /** What the client's credits are multiplied by (an overburst premium the client agreed to), if any. */
+  creditMultiplier?: string;
   /** One entry per provider that served part of the call. */
   usage: { providerId: string; usage: Usage }[];
 }
@@ -136,7 +138,8 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
   if (card && creditSeconds !== null) {
     const perMinute = toScaled(input.direction === 'inbound' ? card.inbound_credits_per_minute : card.outbound_credits_per_minute);
     // Credits are kept to 4 decimal places (rounded half up), and margin uses the rounded figure.
-    credits = mulDiv(mulDiv(perMinute, BigInt(creditSeconds), 60n), 1n, 10_000n) * 10_000n;
+    const base = mulDiv(perMinute, BigInt(creditSeconds), 60n);
+    credits = mulDiv(input.creditMultiplier ? mulDiv(base, toScaled(input.creditMultiplier), SCALE) : base, 1n, 10_000n) * 10_000n;
     creditValueUsd = toScaled(card.credit_value_usd);
   }
   const marginUsd = mulDiv(credits, creditValueUsd, SCALE) - totalUsd;

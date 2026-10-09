@@ -28,7 +28,7 @@ async function outboundPerMinuteUsd(c: pg.PoolClient, providerId: string, at: Da
 
 export type DidChoice =
   | { ok: true; phoneNumberId: string; e164: string; providerId: string; priceKnown: boolean; perMinuteUsd: string | null; candidates: number; locked: number }
-  | { ok: false; reason: 'no_numbers' | 'all_locked_for_contact'; candidates: number; locked: number };
+  | { ok: false; reason: 'no_numbers' | 'all_locked_for_contact' | 'providers_unhealthy' | 'at_capacity'; candidates: number; locked: number };
 
 /**
  * The DID check, run before every dial. A DID that has ever failed for this contact is out for good. Of the rest,
@@ -37,7 +37,13 @@ export type DidChoice =
  */
 export async function chooseDid(
   c: pg.PoolClient,
-  e: { tenantId: string; projectId?: string; callId: string; country: string; contactHash: string; providerId?: string; at?: Date },
+  e: {
+    tenantId: string; projectId?: string; callId: string; country: string; contactHash: string; providerId?: string; at?: Date;
+    /** Providers judged failed or out of funding: never chosen. */
+    unhealthy?: ReadonlySet<string>;
+    /** Providers already at their concurrency ceiling: not chosen, so the call goes to one with room (or waits). */
+    full?: ReadonlySet<string>;
+  },
 ): Promise<DidChoice> {
   const at = e.at ?? new Date();
   // Two dials choosing at once must not both take the same number.
@@ -52,8 +58,10 @@ export async function chooseDid(
         AND ($3::uuid IS NULL OR n.provider_id = $3)`,
     [e.tenantId, e.country, e.providerId ?? null, e.contactHash])).rows as
     { id: string; e164: string; provider_id: string; last_used_at: Date | null; use_count: number; locked: boolean }[];
-  const eligible = pool.filter((n) => !n.locked);
-  const locked = pool.length - eligible.length;
+  const notLocked = pool.filter((n) => !n.locked);
+  const healthy = notLocked.filter((n) => !e.unhealthy?.has(n.provider_id));
+  const eligible = healthy.filter((n) => !e.full?.has(n.provider_id));
+  const locked = pool.length - notLocked.length;
   const finish = async (choice: DidChoice) => {
     await recordEvent(c, {
       tenantId: e.tenantId, projectId: e.projectId, callId: e.callId, type: choice.ok ? 'did.selected' : 'did.none_available',
@@ -63,7 +71,10 @@ export async function chooseDid(
     });
     return choice;
   };
-  if (eligible.length === 0) return finish({ ok: false, reason: pool.length === 0 ? 'no_numbers' : 'all_locked_for_contact', candidates: pool.length, locked });
+  if (eligible.length === 0) {
+    const reason = pool.length === 0 ? 'no_numbers' : notLocked.length === 0 ? 'all_locked_for_contact' : healthy.length === 0 ? 'providers_unhealthy' : 'at_capacity';
+    return finish({ ok: false, reason, candidates: pool.length, locked });
+  }
 
   const price = new Map<string, bigint | null>();
   for (const pid of new Set(eligible.map((n) => n.provider_id))) price.set(pid, await outboundPerMinuteUsd(c, pid, at));

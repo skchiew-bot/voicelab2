@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { redactNumbers, TEST_CALL_MESSAGE, type Fetch, type NormalizedEvent } from './types.js';
+import { redactNumbers, HOLD_MESSAGE, TEST_CALL_MESSAGE, type Fetch, type NormalizedEvent } from './types.js';
 
 const basic = (user: string, pass: string) => 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
 
@@ -77,6 +77,8 @@ export function parseTwilio(params: Record<string, string>, callIdHint?: string,
 const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 export const twimlTestCall = () =>
   `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${xml(TEST_CALL_MESSAGE)}</Say><Hangup/></Response>`;
+export const twimlHold = () =>
+  `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${xml(HOLD_MESSAGE)}</Say><Pause length="60"/></Response>`;
 export const twimlReject = () => `<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>`;
 
 export type CallUsage = { state: 'pending' } | { state: 'ready'; seconds: number; cost: string; currency: string };

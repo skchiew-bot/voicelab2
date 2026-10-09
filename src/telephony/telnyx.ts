@@ -1,5 +1,5 @@
 import { createPublicKey, verify } from 'node:crypto';
-import { redactNumbers, TEST_CALL_MESSAGE, type Action, type Fetch, type NormalizedEvent } from './types.js';
+import { redactNumbers, HOLD_MESSAGE, TEST_CALL_MESSAGE, type Action, type Fetch, type NormalizedEvent } from './types.js';
 
 const API = 'https://api.telnyx.com/v2';
 
@@ -95,14 +95,15 @@ export function parseTelnyx(body: any): NormalizedEvent | null {
 }
 
 /** What to do next on a Telnyx call. Telnyx is driven by commands, not by a TwiML reply. */
-export function telnyxNextActions(ev: NormalizedEvent, inboundRouted: boolean): Action[] {
+export function telnyxNextActions(ev: NormalizedEvent, inboundRouted: boolean, queued = false): Action[] {
   const id = ev.providerCallId;
   if (ev.kind === 'initiated' && ev.direction === 'inbound') {
     return [inboundRouted ? { type: 'telnyx', action: 'answer', callControlId: id } : { type: 'telnyx', action: 'reject', callControlId: id, body: { cause: 'CALL_REJECTED' } }];
   }
   if (ev.kind === 'answered') {
-    return [{ type: 'telnyx', action: 'speak', callControlId: id, body: { payload: TEST_CALL_MESSAGE, voice: 'female', language: 'en-US' } }];
+    return [{ type: 'telnyx', action: 'speak', callControlId: id, body: { payload: queued ? HOLD_MESSAGE : TEST_CALL_MESSAGE, voice: 'female', language: 'en-US' } }];
   }
+  if (ev.kind === 'speak_ended' && queued) return []; // a caller waiting for a channel is not hung up on
   if (ev.kind === 'speak_ended') return [{ type: 'telnyx', action: 'hangup', callControlId: id }];
   return [];
 }

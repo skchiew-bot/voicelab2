@@ -1,0 +1,253 @@
+[
+ {
+  "number": 1,
+  "title": "Add global model-selection requirement for token cost",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/1",
+  "created_at": "2026-10-09T10:35:03Z",
+  "merged_at": "2026-10-09T10:38:07Z",
+  "findings": []
+ },
+ {
+  "number": 2,
+  "title": "Record proposed technology stack in build plan",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/2",
+  "created_at": "2026-10-09T10:59:16Z",
+  "merged_at": "2026-10-09T11:19:23Z",
+  "findings": []
+ },
+ {
+  "number": 3,
+  "title": "Phase 0: foundations (tenants, providers, charging, ledgers, event log)",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/3",
+  "created_at": "2026-10-09T11:30:02Z",
+  "merged_at": "2026-10-09T11:32:14Z",
+  "findings": []
+ },
+ {
+  "number": 4,
+  "title": "Add admin console: providers, charging, funding, clients",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/4",
+  "created_at": "2026-10-09T11:40:35Z",
+  "merged_at": "2026-10-09T11:42:00Z",
+  "findings": []
+ },
+ {
+  "number": 5,
+  "title": "Phase 1: credential checks, cost records, do-not-call gate, and Twilio/Telnyx call control",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/5",
+  "created_at": "2026-10-09T12:38:12Z",
+  "merged_at": "2026-10-09T13:31:50Z",
+  "findings": []
+ },
+ {
+  "number": 6,
+  "title": "Phase 1 completion: reconciliation, direction-specific rates, reference rates, console screens",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/6",
+  "created_at": "2026-10-09T15:25:04Z",
+  "merged_at": "2026-10-09T21:36:59Z",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ]
+ },
+ {
+  "number": 7,
+  "title": "Control Tower v1: what needs attention, project progress, live panels",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/7",
+  "created_at": "2026-10-09T15:37:14Z",
+  "merged_at": "2026-10-09T21:37:09Z",
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ]
+ },
+ {
+  "number": 8,
+  "title": "Phase 2: Workflow Skeleton",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/8",
+  "created_at": "2026-10-09T20:06:14Z",
+  "merged_at": "2026-10-09T21:30:59Z",
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Med-high",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Med-low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   }
+  ]
+ },
+ {
+  "number": 9,
+  "title": "Phase 3: Stitching and outbound deliverability",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/9",
+  "created_at": "2026-10-09T21:56:35Z",
+  "merged_at": "2026-10-09T23:16:55Z",
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low-medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   }
+  ]
+ },
+ {
+  "number": 10,
+  "title": "Phase 4: Resilience and concurrency",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/10",
+  "created_at": "2026-10-09T22:28:01Z",
+  "merged_at": "2026-10-09T23:16:26Z",
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low-medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   }
+  ]
+ }
+]

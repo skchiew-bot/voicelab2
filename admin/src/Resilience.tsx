@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api, type CapacityRow, type FailoverRow, type FundingRow, type HealthRow, type PolicyView, type Provider } from './api';
-import { Errors, Field, fmtDate, useAction, useLoad } from './ui';
+import { Errors, Field, fmtDate, useAction, useLoad, fmtDecimal } from './ui';
 
 const STATE_TEXT: Record<HealthRow['state'], string> = { healthy: 'Healthy', failed: 'Failed over', unfunded: 'Out of funding' };
 const LEVEL_TEXT: Record<FundingRow['level'], string> = { ok: 'OK', warn: 'Running low', critical: 'Critical', empty: 'Empty' };
@@ -118,9 +118,9 @@ export function Resilience() {
             <thead><tr><th>Provider</th><th>Balance</th><th>Level</th><th>Warns below</th><th>Critical below</th></tr></thead>
             <tbody>{funding.data.map((f) => (
               <tr key={`${f.providerId}-${f.currency}`}>
-                <td>{f.provider}</td><td>{Number(f.balance)} {f.currency}</td>
+                <td>{f.provider}</td><td>{fmtDecimal(f.balance)} {f.currency}</td>
                 <td><span className={`badge ${f.level === 'ok' ? 'ok' : 'bad'}`}>{LEVEL_TEXT[f.level]}</span></td>
-                <td>{f.warnBelow === null ? 'not set' : Number(f.warnBelow)}</td><td>{f.criticalBelow === null ? 'not set' : Number(f.criticalBelow)}</td>
+                <td>{f.warnBelow === null ? 'not set' : fmtDecimal(f.warnBelow)}</td><td>{f.criticalBelow === null ? 'not set' : fmtDecimal(f.criticalBelow)}</td>
               </tr>
             ))}</tbody>
           </table>

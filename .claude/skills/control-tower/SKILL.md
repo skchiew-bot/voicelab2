@@ -1,43 +1,45 @@
 ---
 name: control-tower
-description: Check or build the Control Tower, Voice Lab's internal operations console. With no argument, report which Control Tower panels and alerts are due for the phases built so far, which exist, and what is missing. With "build <panel>" (for example "build funding"), build that panel end to end. Use when the user runs /control-tower or asks about Control Tower progress, panels or alerts.
-argument-hint: "[status | build <panel>]"
+description: The dev Control Tower. Shows the owner how Claude Code is building Voice Lab (sessions, commits, PRs, review findings, failed actions) and the lessons register that stops past mistakes from repeating. With no argument, refresh and publish the dashboard. With "lesson <what happened>", record a new lesson with a guard. With "check", review the current diff against every lesson. Use when the user runs /control-tower, asks what has been done or what went wrong, or wants a mistake recorded so it is not repeated.
+argument-hint: "[dashboard | lesson <what happened> | check]"
 ---
 
-# Control Tower
+# Dev Control Tower
 
-The Control Tower is defined in `BUILD_PLAN.md`, under "Control Tower Workstream". That section is the source of truth for the panels, their actions, the phase each one ships in, the alerts and the exit criteria. Read it on every run; do not work from memory of it. Each phase is done only when its Control Tower slice ships too (Phase Overview table).
+This is the owner's view of the **development** of Voice Lab. It is not the product's Control Tower (the operations console in `BUILD_PLAN.md`, `admin/src/ControlTower.tsx`). If a request could mean either, ask (lesson L-014).
 
-## Status (no argument, or `status`)
+Pieces:
+- `.claude/hooks/devlog.mjs`, wired in `.claude/settings.json`: logs each session's actions and failed actions to `devlog/activity/<date>-<session>.jsonl`. It records file paths and command descriptions only, never content, prompts, numbers or tokens.
+- `devlog/lessons.md`: the lessons register, loaded into every session from `CLAUDE.md`. `tests/devlog.test.ts` fails if a lesson loses a guard.
+- `devlog/prs.json`: each PR with its review findings (severity and whether fixed), extracted once per PR.
+- `scripts/devlog-report.mjs` and the template `devlog/dashboard.html`: they build the dashboard from all of the above with no model call.
 
-1. Read the Phase Overview table and each phase's **Status** block in `BUILD_PLAN.md` to see which phases are started.
-2. For every panel due in a started phase, check the code, not the plan's prose:
-   - an internal read endpoint in `src/app.ts` (under `/internal/`),
-   - a view in `admin/src/` reachable from `admin/src/App.tsx`,
-   - each listed action wired to an existing API, and audited,
-   - coverage in `tests/` (a database test for the data, `tests/admin-ui.test.ts` for the view).
-3. Do the same for the alerts due so far and for the Control Tower shell and tenant switcher (Phase 0).
-4. Report a table: panel, phase, built / partial / missing, and what is missing. Then say which of the four exit-criteria questions ("Are calls healthy? Are we funded? Are we making money on campaign X? Is anything about to break?") an operator can answer from one screen today.
+## Before anything else
 
-Make no code changes in status mode.
+Check the branch is current: `git fetch origin main && git rev-list --count HEAD..origin/main`. If it is behind, bring `main` in (merge; never rewrite someone else's history) before reporting anything (lesson L-013).
 
-## Build (`build <panel>`)
+## `dashboard` (default)
 
-Build one panel at a time, in this order:
+1. **Update `devlog/prs.json`.** List the repository's PRs with the GitHub tools (`list_pull_requests`, state `all`). For each PR that is missing from the file, or whose state or merge time changed, add or update its entry: `number`, `title`, `state`, `html_url`, `created_at`, `merged_at` and `findings`. Read `findings` from the PR body's "Independent review" table: one `{ "severity", "fixed" }` per row, using the severity as written (`"Unrated"` if there is none), and `fixed: false` when the outcome says it was left or not changed. Leave entries that have not changed alone.
+2. **Check new lessons.** For every PR or commit since the last run that fixed a bug or a review finding, make sure `devlog/lessons.md` has a lesson for it, or extend that lesson's **Seen** line and count. Use `lesson` mode below for each new one.
+3. **Build:** `node scripts/devlog-report.mjs --prs devlog/prs.json --html <scratchpad>/dev-control-tower.html`.
+4. **Publish** it with the Artifact tool as an update to the owner's existing dashboard, https://claude.ai/artifact/VbV5a77oLkWRr5KpKRcnaH (pass it as `url`; read it first, as the tool requires), so the owner keeps one link. If that link no longer works, look for "Voice Lab Dev Control Tower" with `action: list` before publishing a new one.
+5. **Commit and push** any changes to `devlog/` (lessons, PR data, this session's activity log).
+6. **Report** in a few lines: what needs attention (from the top of the dashboard), any new lessons, and the link.
 
-1. **Data.** Add or reuse an internal read query in `src/store/`. The Control Tower only reads from the call-event log, the ledgers and the registries. If the data is not recorded yet, the panel is blocked on its phase; say so rather than inventing a source.
-2. **API.** Add the endpoint under `/internal/` in `src/app.ts`, staff only, like the existing internal routes. Never expose it under `/client/`.
-3. **Actions.** An action (pause, drain, acknowledge, record a top-up, roll back) calls the same store function and approval rule as the existing API, and writes to the audit log with who and why (`src/store/audit.ts`). Actions marked "requires approval" in the plan must not take effect without one. Each action must show up in the change log panel once that exists.
-4. **View.** Add the panel to the admin console (`admin/src/`), using the shared components in `admin/src/ui.tsx` and the API client in `admin/src/api.ts`.
-5. **Tests.** Prove the query and the endpoint in a database test, and drive the view in `tests/admin-ui.test.ts`. If the panel touches cost, margin or funding, extend `tests/foundations.test.ts` (or add an equivalent) so a `voicelab_client` actor cannot read it.
-6. **Plan.** Update the phase's **Status** block in `BUILD_PLAN.md` to say the panel is built.
-7. Run `npm run typecheck`, `npm test` and `npm run build:admin` before committing.
+## `lesson <what happened>`
 
-## Rules that bite here
+1. Find the root cause and the class of mistake, not just the instance. If an existing lesson covers the class, extend its **Seen** line, raise its count ("N times"), and add a guard if the new case isn't covered.
+2. Otherwise add `### L-NNN: <the rule, as an instruction>` with **Seen** (with PR links), **Rule** and **Guards**.
+3. A guard is a test that fails if the mistake returns. Write it if it doesn't exist, then break the code on purpose and watch it fail (lesson L-010). A lesson about process, with no code to test, is guarded by the hook, skill or `CLAUDE.md` text that enforces it.
+4. Run `npx vitest run tests/devlog.test.ts`, then commit.
 
-- The Control Tower is internal only. Provider cost, FX, rate cards, margin, funding and do-not-call data never reach client-facing code or the client portal.
-- Money is exact: show amounts from `src/money.ts` / `src/billing.ts` values, formatted as strings, never recomputed in floating point in the browser.
-- Never show a customer phone number. Our own numbers (`phone_numbers`) may be shown; provider error text goes through `redactNumbers` first.
-- Show whether a cost record is estimated or reconciled once that state exists.
-- Live panels use server-sent events or WebSocket (see the stack table in `BUILD_PLAN.md`); polling is acceptable only as a stated stopgap.
-- Any model call a panel triggers follows the model-selection table in `CLAUDE.md`, with the model read from config and tokens logged.
+## `check`
+
+Read the current diff (`git diff origin/main...HEAD`) against every lesson's **Rule**. For each lesson the diff could break, either confirm it holds (name the line or test) or fix it. Report as a short list: lesson, holds or fixed, and where.
+
+## Rules
+
+- Never record prompt text, command text, command output, phone numbers, credentials or customer data in `devlog/`.
+- The dashboard is internal to the owner. Publish it privately and do not share it.
+- Keep `devlog/activity/` files append-only: never edit or delete another session's log.

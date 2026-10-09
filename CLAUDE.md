@@ -11,6 +11,17 @@ Provider-agnostic voice orchestration platform. The blueprint is the source of t
 - Be honest in PR descriptions about what was only tested against fakes.
 - **Keep `src/progress.ts` current**: when a phase's state or an exit criterion changes, update it in the same PR. It drives the Control Tower's progress view, and a test ties it to `BUILD_PLAN.md`. Never mark something met without proof, or proven live when it was only tested against fakes.
 
+## Dev Control Tower (how this project is built, for the owner)
+
+The owner watches how Claude Code builds Voice Lab through the **dev Control Tower** (`/control-tower`). It is separate from the product's Control Tower, the operations console in `BUILD_PLAN.md`. "Control Tower" alone means the product console; ask if a request could mean either.
+
+- Hooks in `.claude/settings.json` log each session's activity to `devlog/activity/` (what was done and what failed, never content or numbers). Commit that file with the session's work.
+- **Never repeat a lesson.** `devlog/lessons.md` (loaded below) lists every past mistake and its rule. Check new work against it.
+- **When you fix a bug, a review finding or a process mistake,** add a lesson or extend one's **Seen** line, with a guard: a test that fails if the mistake comes back. `tests/devlog.test.ts` checks every guard still exists.
+- List the lessons a PR adds or extends in its description.
+
+@devlog/lessons.md
+
 ## Commands
 
 - `npm test` runs unit and database tests (needs local Postgres; each test file gets a throwaway database). In the cloud container Postgres can be stopped after a restart: `pg_ctlcluster 16 main start`, and if every database test fails with ECONNREFUSED, that is why.

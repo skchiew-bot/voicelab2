@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api, type CreditSummary, type Project, type Tenant } from './api';
-import { Errors, Field, useAction, useLoad } from './ui';
+import { Errors, Field, fmtDecimal, useAction, useLoad } from './ui';
 
 function TenantPanel({ tenant }: { tenant: Tenant }) {
   const projects = useLoad(() => api<Project[]>('GET', `/internal/tenants/${tenant.id}/projects`), [tenant.id]);
@@ -21,7 +21,7 @@ function TenantPanel({ tenant }: { tenant: Tenant }) {
 
       <h3>Credits</h3>
       <Errors error={credits.error} />
-      {credits.data && <p><strong>{Number(credits.data.balance).toLocaleString()}</strong> credits</p>}
+      {credits.data && <p><strong>{fmtDecimal(credits.data.balance)}</strong> credits</p>}
       <form className="grid" aria-label={`Credits for ${tenant.name}`} onSubmit={async (e) => {
         e.preventDefault();
         if (await creditAction.run(() => api('POST', `/internal/tenants/${tenant.id}/credits`, { kind, credits: amount }))) { setAmount(''); credits.reload(); }

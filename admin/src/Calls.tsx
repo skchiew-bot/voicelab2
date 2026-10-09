@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api, type CallCost, type CallEvent, type CallRow, type CampaignCost, type Reconciliation } from './api';
-import { Errors, Field, fmtDate, useAction, useLoad } from './ui';
+import { Errors, Field, fmtDate, useAction, useLoad, fmtDecimal } from './ui';
 
 const COST_STATE: Record<string, { text: string; cls: string }> = {
   pending: { text: 'Not priced', cls: 'badge warn' }, recorded: { text: 'Estimated', cls: 'badge warn' },
@@ -28,7 +28,7 @@ function CallDetail({ call, onChanged }: { call: CallRow; onChanged: () => void 
   return (
     <section className="card" aria-label="Call detail">
       <h2>Call {call.id.slice(0, 8)}</h2>
-      <p className="muted">{call.direction} · {call.status}{call.end_reason ? ` (${call.end_reason})` : ''} · {call.country ?? '—'} · started {fmtDate(call.started_at)}{call.duration_seconds ? ` · ${Number(call.duration_seconds)}s` : ''}</p>
+      <p className="muted">{call.direction} · {call.status}{call.end_reason ? ` (${call.end_reason})` : ''} · {call.country ?? '—'} · started {fmtDate(call.started_at)}{call.duration_seconds ? ` · ${fmtDecimal(call.duration_seconds)}s` : ''}</p>
 
       <h3>Timeline</h3>
       <Errors error={events.error} />
@@ -39,11 +39,11 @@ function CallDetail({ call, onChanged }: { call: CallRow; onChanged: () => void 
       {cost.data ? (
         <>
           <p><span className={COST_STATE[cost.data.status === 'reconciled' ? 'reconciled' : call.cost_status]?.cls ?? 'badge'}>{cost.data.status === 'reconciled' ? 'Reconciled' : COST_STATE[call.cost_status]?.text ?? call.cost_status}</span>{' '}
-            <strong>{Number(cost.data.total_usd)} USD</strong> · {Number(cost.data.total_myr)} MYR · credits drawn {Number(cost.data.credits_drawn)} · margin {Number(cost.data.margin_usd)} USD</p>
+            <strong>{fmtDecimal(cost.data.total_usd)} USD</strong> · {fmtDecimal(cost.data.total_myr)} MYR · credits drawn {fmtDecimal(cost.data.credits_drawn)} · margin {fmtDecimal(cost.data.margin_usd)} USD</p>
           <table>
             <thead><tr><th>Component</th><th>Line</th><th>Quantity</th><th>Rate</th><th>Amount</th></tr></thead>
             <tbody>{cost.data.lines.map((l, i) => (
-              <tr key={i}><td>{l.component}</td><td>{l.billing_line}</td><td>{l.quantity}</td><td>{Number(l.rate)} {l.currency} {l.unit.replace('_', ' ')}</td><td>{Number(l.amount_usd)} USD</td></tr>
+              <tr key={i}><td>{l.component}</td><td>{l.billing_line}</td><td>{l.quantity}</td><td>{fmtDecimal(l.rate)} {l.currency} {l.unit.replace('_', ' ')}</td><td>{fmtDecimal(l.amount_usd)} USD</td></tr>
             ))}</tbody>
           </table>
         </>
@@ -102,7 +102,7 @@ export function Calls() {
           <table>
             <thead><tr><th>Campaign</th><th>Calls</th><th>Cost (USD)</th><th>Cost (MYR)</th><th>Credits drawn</th><th>Margin (USD)</th></tr></thead>
             <tbody>{campaigns.data.map((c) => (
-              <tr key={c.project_id ?? 'none'}><td>{c.project ?? 'No campaign'}</td><td>{c.calls}</td><td>{Number(c.total_usd)}</td><td>{Number(c.total_myr)}</td><td>{Number(c.credits_drawn)}</td><td>{Number(c.margin_usd)}</td></tr>
+              <tr key={c.project_id ?? 'none'}><td>{c.project ?? 'No campaign'}</td><td>{c.calls}</td><td>{fmtDecimal(c.total_usd)}</td><td>{fmtDecimal(c.total_myr)}</td><td>{fmtDecimal(c.credits_drawn)}</td><td>{fmtDecimal(c.margin_usd)}</td></tr>
             ))}</tbody>
           </table>
         ))}
@@ -115,7 +115,7 @@ export function Calls() {
           <tbody>{calls.data.map((c) => (
             <tr key={c.id}>
               <td>{fmtDate(c.started_at)}</td><td>{c.direction}</td><td>{c.status}</td>
-              <td>{c.duration_seconds ? `${Number(c.duration_seconds)}s` : '—'}</td>
+              <td>{c.duration_seconds ? `${fmtDecimal(c.duration_seconds)}s` : '—'}</td>
               <td><span className={COST_STATE[c.cost_status]?.cls ?? 'badge'}>{COST_STATE[c.cost_status]?.text ?? c.cost_status}</span></td>
               <td><button className="link" onClick={() => setOpen(c.id)}>Details</button></td>
             </tr>

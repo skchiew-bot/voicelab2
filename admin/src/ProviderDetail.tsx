@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api, type ChargingVersion, type Provider } from './api';
-import { Errors, Field, fmtDate, useAction, useLoad } from './ui';
+import { Errors, Field, fmtDate, fmtDecimal, useAction, useLoad } from './ui';
 
 const COMPONENTS = ['telephony_leg', 'stt', 'llm', 'tts', 'platform', 'concurrency', 'other'];
 const UNITS = ['per_minute', 'per_second', 'per_character', 'per_1k_characters', 'per_token', 'per_1k_tokens', 'per_1m_tokens', 'per_credit', 'flat'];
@@ -175,12 +175,12 @@ function Versions({ versions, onChanged }: { versions: ChargingVersion[]; onChan
           <p className="muted">
             Effective {fmtDate(v.effective_from)} · billed in {v.billing_increment_seconds}s blocks, minimum {v.minimum_charge_seconds}s, rounded {v.rounding}
             {v.concurrency_limit ? ` · ${v.concurrency_limit} concurrent` : ''}
-            {v.burst_premium_multiplier ? ` · burst ×${Number(v.burst_premium_multiplier)}` : ''}
+            {v.burst_premium_multiplier ? ` · burst ×${fmtDecimal(v.burst_premium_multiplier)}` : ''}
           </p>
           <table>
             <thead><tr><th>Component</th><th>Rate</th><th>Unit</th><th>Line</th><th>Applies to</th></tr></thead>
             <tbody>{v.components.map((c, i) => (
-              <tr key={i}><td>{c.component}</td><td>{Number(c.rate)} {c.currency}</td><td>{c.unit}</td><td>{c.billing_line}</td><td>{c.direction === 'any' ? 'any call' : `${c.direction} only`}</td></tr>
+              <tr key={i}><td>{c.component}</td><td>{fmtDecimal(c.rate)} {c.currency}</td><td>{c.unit}</td><td>{c.billing_line}</td><td>{c.direction === 'any' ? 'any call' : `${c.direction} only`}</td></tr>
             ))}</tbody>
           </table>
           {v.confirmed ? (
@@ -219,7 +219,7 @@ function Funding({ providerId }: { providerId: string }) {
       <Errors error={balances.error} />
       {balances.data && (balances.data.length === 0
         ? <p className="muted">No entries yet.</p>
-        : <ul>{balances.data.map((b) => <li key={b.currency}><strong>{Number(b.balance).toLocaleString()}</strong> {b.currency}</li>)}</ul>)}
+        : <ul>{balances.data.map((b) => <li key={b.currency}><strong>{fmtDecimal(b.balance)}</strong> {b.currency}</li>)}</ul>)}
       <form className="grid" onSubmit={submit} aria-label="Add funding entry">
         <Field label="Type">
           <select value={kind} onChange={(e) => setKind(e.target.value)}>

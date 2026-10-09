@@ -114,3 +114,11 @@ export async function gateOutbound(
   });
   return decision;
 }
+
+/**
+ * Who a call was dialled to, as a keyed hash that cannot be turned back into the number. It lets the DID pool
+ * remember which numbers failed for which contact without keeping the contact's number.
+ */
+export const contactKeyFrom = (masterKey: Buffer): Buffer =>
+  createHmac('sha256', masterKey).update('voicelab-contact-v1').digest();
+export const contactHash = (e164: string, key: Buffer): string => hashNumber(e164, key);

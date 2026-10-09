@@ -6,6 +6,8 @@ import { Calls } from './Calls';
 import { ControlTower } from './ControlTower';
 import { Compliance } from './Compliance';
 import { Numbers } from './Numbers';
+import { Outbound } from './Outbound';
+import { Recordings } from './Recordings';
 import { Providers } from './Providers';
 import { WorkflowDetail } from './WorkflowDetail';
 import { Workflows } from './Workflows';
@@ -70,7 +72,7 @@ export function App() {
 
   const providerId = /^#\/providers\/([\w-]+)$/.exec(hash)?.[1];
   const workflowId = /^#\/workflows\/([\w-]+)$/.exec(hash)?.[1];
-  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers', 'workflows'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
+  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers', 'workflows', 'recordings', 'outbound'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
 
   return (
     <div className="shell">
@@ -78,12 +80,14 @@ export function App() {
         <strong>Voice Lab</strong>
         <a href="#/tower" aria-current={section === 'tower' ? 'page' : undefined}>Control Tower</a>
         <a href="#/workflows" aria-current={section === 'workflows' ? 'page' : undefined}>Workflows</a>
+        <a href="#/recordings" aria-current={section === 'recordings' ? 'page' : undefined}>Recordings</a>
         <a href="#/providers" aria-current={section === 'providers' ? 'page' : undefined}>Providers</a>
         <a href="#/tenants" aria-current={section === 'tenants' ? 'page' : undefined}>Clients</a>
         <a href="#/rates" aria-current={section === 'rates' ? 'page' : undefined}>Rates</a>
         <a href="#/numbers" aria-current={section === 'numbers' ? 'page' : undefined}>Numbers</a>
         <a href="#/compliance" aria-current={section === 'compliance' ? 'page' : undefined}>Do not call</a>
         <a href="#/calls" aria-current={section === 'calls' ? 'page' : undefined}>Calls</a>
+        <a href="#/outbound" aria-current={section === 'outbound' ? 'page' : undefined}>Outbound</a>
         <span className="spacer" />
         <button className="link" onClick={() => { setToken(null); setSignedIn(false); }}>Sign out</button>
       </nav>
@@ -91,6 +95,8 @@ export function App() {
         {section === 'tenants' ? <Tenants />
           : section === 'rates' ? <Rates />
           : section === 'numbers' ? <Numbers />
+          : section === 'recordings' ? <Recordings />
+          : section === 'outbound' ? <Outbound />
           : section === 'compliance' ? <Compliance />
           : section === 'calls' ? <Calls />
           : section === 'workflows' ? (workflowId ? <WorkflowDetail id={workflowId} /> : <Workflows />)

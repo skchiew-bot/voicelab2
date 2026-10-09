@@ -17,6 +17,7 @@ import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from 
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
 import { addNumber, callKnown, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { registerStitchingRoutes } from './routes/stitching.js';
 import { registerWorkflowRoutes } from './routes/workflows.js';
 import type { HttpDeps } from './workflows/integrations.js';
 import { controlTower } from './store/control-tower.js';
@@ -353,6 +354,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   });
 
   registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerStitchingRoutes(app, { pool, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
 
   // ------------------------------------------------- control tower
   app.get('/internal/control-tower', async (req) => {
@@ -380,8 +382,8 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   app.post('/internal/calls/outbound', async (req, reply) => {
     const s = await internal(req);
     const body = z.object({
-      tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), providerId: z.string().uuid(),
-      from: z.string(), to: z.string(), country,
+      tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), providerId: z.string().uuid().optional(),
+      from: z.string().optional(), to: z.string(), country,
     }).parse(req.body);
     const result = await placeOutboundCall(callDeps, s.userId, body);
     return reply.status(result.allowed ? 201 : 200).send(result);

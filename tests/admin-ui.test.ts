@@ -422,7 +422,7 @@ describe.skipIf(!run)('admin UI', () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
     await signIn(page, env.staffToken);
     await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
-    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`]) {
+    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound']) {
       await page.goto(`${base}#/${route}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
@@ -535,6 +535,49 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(call.getByLabel('Transcript')).toContainText('The call ended: met');
     await page.close();
   }, 90_000);
+
+  it('records fixed words, shows what is still worth recording, and reads outbound results', async () => {
+    const st = env.staffToken;
+    const tenant = (await env.call(st, 'POST', '/internal/tenants', { name: 'Stitch UI Co' })).json().id;
+    const wf = (await env.call(st, 'POST', `/internal/tenants/${tenant}/workflows`, { name: 'stitch_ui', definition: {
+      start: 'a', variables: ['name'], nodes: { a: { type: 'speak', speech: 'hybrid', text: 'Hello {{name}}, welcome.', transitions: [{ to: 'z' }] }, z: { type: 'end', outcome: 'ok' } } } })).json().workflow.id;
+    const page = await browser.newPage();
+    await signIn(page, st);
+
+    // what is still worth recording
+    await page.goto(`${base}#/workflows/${wf}`);
+    const stitching = page.getByLabel('Stitching');
+    await expect(stitching).toContainText('0 recorded, 2 still to record');
+    await expect(stitching.getByRole('row', { name: /^, welcome\. en a$/ })).toBeVisible();
+
+    // record it from a file
+    await page.goto(`${base}#/recordings`);
+    await field(page, 'Client').selectOption({ label: 'Stitch UI Co' });
+    const wav = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WAVE'), Buffer.alloc(64, 1)]);
+    await field(page, 'Words spoken').fill(', welcome.');
+    await page.getByLabel(/^Audio file/).setInputFiles({ name: 'welcome.wav', mimeType: 'audio/wav', buffer: wav });
+    await field(page, 'Length \\(seconds\\)').fill('1.8');
+    await page.getByRole('button', { name: 'Save recording' }).click();
+    await expect(page.getByRole('row', { name: /^, welcome\. en 1 1\.8 s/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Play' })).toBeVisible();
+
+    // a file that is not audio is refused with a plain message
+    await field(page, 'Words spoken').fill('Not audio');
+    await page.getByLabel(/^Audio file/).setInputFiles({ name: 'x.wav', mimeType: 'audio/wav', buffer: Buffer.from('#!/bin/sh') });
+    await field(page, 'Length \\(seconds\\)').fill('1');
+    await page.getByRole('button', { name: 'Save recording' }).click();
+    await expect(page.getByRole('alert')).toContainText('does not look like audio/wav');
+
+    await page.goto(`${base}#/workflows/${wf}`);
+    await expect(page.getByLabel('Stitching')).toContainText('1 recorded, 1 still to record');
+
+    // outbound results, with nothing dialled yet
+    await page.goto(`${base}#/outbound`);
+    await field(page, 'Client').selectOption({ label: 'Stitch UI Co' });
+    await expect(page.getByLabel('Rates')).toContainText('no attempts yet');
+    await expect(page.getByLabel('Best times to call back')).toContainText('No callback times captured');
+    await page.close();
+  }, 60_000);
 
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();

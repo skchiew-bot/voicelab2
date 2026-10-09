@@ -57,12 +57,20 @@ export const PHASES: PhaseProgress[] = [
     ],
   },
   {
-    id: '3', name: 'Stitching And Outbound Deliverability', status: 'not_started', summary: "Cut cost without hurting the caller's experience.",
+    id: '3', name: 'Stitching And Outbound Deliverability', status: 'in_progress', summary: "Cut cost without hurting the caller's experience. Recordings, the stitching plan and its measured saving, the DID pool with its permanent failure lock, and outbound analytics are built and tested against fakes.",
     criteria: [
-      notMet('The cost difference between a stitched and an unstitched version of the same flow is measured.'),
-      notMet('A blind listening check confirms there is no drop in caller experience (the Customer Experience Council signs off).'),
-      notMet('The DID-lock rule has been verified against failure history.'),
-    ], open: [],
+      { text: 'The cost difference between a stitched and an unstitched version of the same flow is measured.', state: 'partly', proof: 'tests',
+        note: "The measuring is built and exact: the same scripted callers are played with and without recordings and the difference in synthesised characters is priced at the voice provider's rate. It has not been run on a real flow with real recordings and a confirmed rate, and it prices speech synthesis only." },
+      { text: 'A blind listening check confirms there is no drop in caller experience (the Customer Experience Council signs off).', state: 'not_met', proof: 'none',
+        note: 'Needs people listening to real stitched calls. No audio plays on a call yet, so there is nothing to listen to.' },
+      { text: 'The DID-lock rule has been verified against failure history.', state: 'partly', proof: 'tests',
+        note: 'The rule is tested against seeded failure history: a failed DID is never used again for that contact, the next provider is used when the cheap one is locked out, and a dial is refused without contacting a provider when nothing is left. There is no real failure history yet, and failures are recorded by an operator or the API, not detected from carrier signals.' },
+    ], open: [
+      'No audio is played on a call: no voice provider or speech pipeline is connected, so the seams between recordings and live speech are unheard',
+      "A call's cost record does not yet receive the synthesised-character count (the count is in each run)",
+      'DID failures are not detected automatically from provider or carrier events',
+      'Outcomes are recorded through the API and not yet tied to a workflow run',
+    ],
   },
   {
     id: '4', name: 'Resilience And Concurrency', status: 'not_started', summary: 'Degrade gracefully instead of failing.',

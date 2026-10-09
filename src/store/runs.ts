@@ -2,13 +2,18 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { withActor } from '../db.js';
 import { AppError } from '../errors.js';
+import { lineAmount, quantityFor, type Unit } from '../billing.js';
+import { fromScaled, mulDiv, SCALE } from '../money.js';
 import { decryptSecrets, encryptSecrets } from '../secrets.js';
 import { own, type Json, type WorkflowDefinition } from '../workflows/definition.js';
 import { PhoneInVariable, reply as engineReply, start as engineStart, type Deps, type RunState, type StepRecord } from '../workflows/engine.js';
 import { callIntegration, type HttpDeps } from '../workflows/integrations.js';
 import { referencesOf } from '../workflows/refs.js';
+import { chargingAt } from './charging.js';
+import { perUsd } from './costs.js';
 import { evaluateScenario, gateProblems, MAX_REPLIES, MAX_SCENARIOS, type Scenario, type ScenarioResult } from '../workflows/simulate.js';
 import { audit } from './audit.js';
+import { recordingIndex } from './recordings.js';
 import { getWorkflow, liveVersionId, type Environment } from './workflows.js';
 
 export interface RunDeps { pool: pg.Pool; key: Buffer; integrationHttp?: HttpDeps; speaker?: Deps['speaker'] }
@@ -109,7 +114,9 @@ function unseal(state: RunState, sealed: Buffer | null, key: Buffer, runId: stri
 }
 
 const saidIn = (records: StepRecord[]) => records.filter((r) => r.type === 'say').map((r) => String(r.payload.text));
-const view = (id: string, state: RunState, records: StepRecord[], version = 0) => ({
+const speechOf = (records: { type: string; payload: Record<string, Json> }[]) => records.filter((r) => r.type === 'say').reduce(
+  (t, r) => ({ synthChars: t.synthChars + Number(r.payload.synthChars ?? 0), recordedChars: t.recordedChars + Number(r.payload.recordedChars ?? 0) }), { synthChars: 0, recordedChars: 0 });
+const view = (id: string, state: RunState, records: StepRecord[], version = 0) => ({ speech: speechOf(records),
   id, version, status: state.status, outcome: state.outcome ?? null, error: state.error ?? null, said: saidIn(records), variables: Object.fromEntries(Object.entries(state.vars).filter(([k]) => !state.sensitive.includes(k))),
   awaiting: state.awaiting ? { captureAs: state.awaiting.captureAs } : null,
 });
@@ -121,9 +128,9 @@ export async function startRun(d: RunDeps, actorId: string | null, e: { workflow
   const ctx = await asInternal(d, async (c) => {
     const wf = await getWorkflow(c, e.workflowId);
     const resolved = await resolvePins(c, wf, e.environment);
-    return { wf, resolved, integrations: await integrationsFor(c, wf.tenant_id, d.key, e.environment, d.integrationHttp) };
+    return { wf, resolved, integrations: await integrationsFor(c, wf.tenant_id, d.key, e.environment, d.integrationHttp), recordings: await recordingIndex(c, wf.tenant_id) };
   });
-  const deps: Deps = { load: (n) => ctx.resolved.defs[n], integrations: ctx.integrations, speaker: d.speaker };
+  const deps: Deps = { load: (n) => ctx.resolved.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings };
   let out: { state: RunState; records: StepRecord[] };
   try { out = await engineStart(ctx.resolved.entryName, e.variables, deps); }
   catch (err) { if (err instanceof PhoneInVariable) throw new AppError(400, err.message); throw err; }
@@ -159,9 +166,9 @@ export async function replyRun(d: RunDeps, runId: string, text: string, expected
         WHERE id = $1 AND status = 'awaiting_reply' AND state_version = $2`, [runId, run.state_version]);
     if (claim.rowCount === 0) throw new AppError(409, 'This call moved on while your reply was arriving. Nothing was changed.');
     const defs = await loadPinned(c, run.pins);
-    return { run, defs, integrations: await integrationsFor(c, run.tenant_id, d.key, run.environment, d.integrationHttp) };
+    return { run, defs, integrations: await integrationsFor(c, run.tenant_id, d.key, run.environment, d.integrationHttp), recordings: await recordingIndex(c, run.tenant_id) };
   });
-  const deps: Deps = { load: (n) => ctx.defs[n], integrations: ctx.integrations, speaker: d.speaker };
+  const deps: Deps = { load: (n) => ctx.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings };
   let out: { state: RunState; records: StepRecord[] };
   try { out = await engineReply(unseal(ctx.run.state as RunState, ctx.run.sealed, d.key, runId), text, deps); }
   catch (err) {
@@ -214,13 +221,34 @@ export async function getRun(c: pg.PoolClient, runId: string) {
        FROM workflow_runs WHERE id = $1`, [runId])).rows[0];
   if (!run) throw new AppError(404, 'Run not found.');
   const steps = (await c.query('SELECT seq, type, workflow, node, payload, created_at FROM workflow_run_steps WHERE run_id = $1 ORDER BY seq', [runId])).rows;
-  return { ...run, variables: (run.state as RunState).vars, state: undefined, steps };
+  return { ...run, variables: (run.state as RunState).vars, state: undefined, speech: speechOf(steps), steps };
 }
 
 export const listRuns = async (c: pg.PoolClient, workflowId: string, limit = 50) =>
   (await c.query(
     `SELECT r.id, r.environment, r.kind, r.status, r.outcome, r.error, r.started_at, v.major || '.' || v.minor AS version
        FROM workflow_runs r JOIN workflow_versions v ON v.id = r.version_id WHERE r.workflow_id = $1 ORDER BY r.started_at DESC LIMIT $2`, [workflowId, limit])).rows;
+
+interface Played { scenario: Scenario; state: RunState; records: StepRecord[]; unused: number }
+
+/** Play one scripted caller through the pinned workflows. Nothing is stored and no real system is touched. */
+async function playScenario(resolved: Resolved, s: Scenario, speaker: Deps['speaker'], recordings: Deps['recordings']): Promise<Played> {
+  const deps: Deps = { load: (n) => resolved.defs[n], integrations: cannedIntegrations(s.integrations), speaker, recordings };
+  try {
+    let { state, records } = await engineStart(resolved.entryName, s.variables, deps);
+    const all = [...records]; const replies = [...(s.replies ?? [])];
+    while (state.status === 'awaiting_reply' && replies.length) {
+      const r = await engineReply(state, replies.shift()!, deps);
+      state = r.state; all.push(...r.records);
+    }
+    return { scenario: s, state, records: all, unused: replies.length };
+  } catch (err) {
+    if (!(err instanceof PhoneInVariable)) throw err;
+    // A scenario that carries a phone number is a failed scenario, not a failed simulation.
+    const state: RunState = { workflow: resolved.entryName, node: null, vars: {}, stack: [], status: 'ended', outcome: 'error', error: err.message, steps: 0, sensitive: [] };
+    return { scenario: s, state, records: [{ type: 'error', workflow: resolved.entryName, payload: { message: err.message } }], unused: 0 };
+  }
+}
 
 /**
  * Run a list of scripted callers through a version in staging. Nothing real is touched: integrations answer from
@@ -233,27 +261,11 @@ export async function simulate(d: RunDeps, actorId: string | null, e: { workflow
 
   const ctx = await asInternal(d, async (c) => {
     const wf = await getWorkflow(c, e.workflowId);
-    return { wf, resolved: await resolvePins(c, wf, 'staging', e.versionId) };
+    return { wf, resolved: await resolvePins(c, wf, 'staging', e.versionId), recordings: await recordingIndex(c, wf.tenant_id) };
   });
 
-  const runs: { scenario: Scenario; state: RunState; records: StepRecord[]; unused: number }[] = [];
-  for (const s of e.scenarios) {
-    const deps: Deps = { load: (n) => ctx.resolved.defs[n], integrations: cannedIntegrations(s.integrations), speaker: d.speaker };
-    try {
-      let { state, records } = await engineStart(ctx.resolved.entryName, s.variables, deps);
-      const all = [...records]; const replies = [...(s.replies ?? [])];
-      while (state.status === 'awaiting_reply' && replies.length) {
-        const r = await engineReply(state, replies.shift()!, deps);
-        state = r.state; all.push(...r.records);
-      }
-      runs.push({ scenario: s, state, records: all, unused: replies.length });
-    } catch (err) {
-      if (!(err instanceof PhoneInVariable)) throw err;
-      // A scenario that carries a phone number is a failed scenario, not a failed simulation.
-      const state: RunState = { workflow: ctx.resolved.entryName, node: null, vars: {}, stack: [], status: 'ended', outcome: 'error', error: err.message, steps: 0, sensitive: [] };
-      runs.push({ scenario: s, state, records: [{ type: 'error', workflow: ctx.resolved.entryName, payload: { message: err.message } }], unused: 0 });
-    }
-  }
+  const runs: Played[] = [];
+  for (const s of e.scenarios) runs.push(await playScenario(ctx.resolved, s, d.speaker, ctx.recordings));
 
   return asInternal(d, async (c) => {
     const results: ScenarioResult[] = runs.map((r) => evaluateScenario(r.scenario, { state: r.state, records: r.records, unusedReplies: r.unused }));
@@ -275,4 +287,50 @@ export async function simulate(d: RunDeps, actorId: string | null, e: { workflow
     }
     return { batchId: batch.id as string, versionId: ctx.resolved.entryVersionId, total: results.length, passed, failed: results.length - passed, clean: passed === results.length && problems.length === 0, gateProblems: problems, pins: ctx.resolved.pins, results };
   });
+}
+
+const sumSpeech = (played: Played[]) => played.reduce((t, p) => {
+  const s = speechOf(p.records);
+  return { synthChars: t.synthChars + s.synthChars, recordedChars: t.recordedChars + s.recordedChars };
+}, { synthChars: 0, recordedChars: 0 });
+
+/**
+ * What stitching saves on this version, measured by playing the same scripted callers twice: once with the client's
+ * recordings and once with none (every line spoken live). The difference in synthesised characters is priced at the
+ * voice provider's rate in force, exactly. Nothing is stored and no real system is touched.
+ */
+export async function measureStitching(d: RunDeps, e: { workflowId: string; versionId?: string; scenarios: Scenario[]; voiceProviderId: string; at?: Date }) {
+  if (e.scenarios.length === 0) throw new AppError(400, 'Give at least one scenario.');
+  if (e.scenarios.length > MAX_SCENARIOS) throw new AppError(400, `At most ${MAX_SCENARIOS} scenarios.`);
+  const at = e.at ?? new Date();
+  const ctx = await asInternal(d, async (c) => {
+    const wf = await getWorkflow(c, e.workflowId);
+    const provider = (await c.query('SELECT id, kind, name FROM providers WHERE id = $1', [e.voiceProviderId])).rows[0];
+    if (!provider || provider.kind !== 'voice') throw new AppError(400, 'Pick a voice provider: its character rate prices the difference.');
+    const version = await chargingAt(c, e.voiceProviderId, at);
+    if (!version) throw new AppError(409, `${provider.name} has no charging version in force. Capture its rates first.`);
+    const lines = version.components.filter((k: { component: string; unit: string }) => k.component === 'tts' && ['per_character', 'per_1k_characters'].includes(k.unit));
+    if (lines.length === 0) throw new AppError(409, `${provider.name} has no per-character speech rate, so the saving cannot be priced.`);
+    const confirmed = Boolean(version.confirmed);
+    const perUsds = new Map<string, bigint>();
+    for (const k of lines) perUsds.set(k.currency, await perUsd(c, k.currency, at));
+    return { wf, resolved: await resolvePins(c, wf, 'staging', e.versionId), recordings: await recordingIndex(c, wf.tenant_id), lines, perUsds, confirmed };
+  });
+  const stitched = sumSpeech(await Promise.all(e.scenarios.map((s) => playScenario(ctx.resolved, s, d.speaker, ctx.recordings))));
+  const unstitched = sumSpeech(await Promise.all(e.scenarios.map((s) => playScenario(ctx.resolved, s, d.speaker, undefined))));
+
+  const costUsd = (chars: number): bigint => ctx.lines.reduce((sum: bigint, k: { unit: Unit; rate: string; currency: string; billing_line: string }) => {
+    const q = quantityFor(k.unit, k.billing_line, { characters: chars }, null);
+    return q ? sum + mulDiv(lineAmount(k.rate, q), SCALE, ctx.perUsds.get(k.currency)!) : sum;
+  }, 0n);
+  const before = costUsd(unstitched.synthChars); const after = costUsd(stitched.synthChars);
+  const savedBp = before > 0n ? mulDiv(before - after, 10_000n, before) : 0n;
+  return {
+    scenarios: e.scenarios.length,
+    unstitched: { synthChars: unstitched.synthChars, costUsd: fromScaled(before) },
+    stitched: { synthChars: stitched.synthChars, recordedChars: stitched.recordedChars, costUsd: fromScaled(after) },
+    saved: { chars: unstitched.synthChars - stitched.synthChars, costUsd: fromScaled(before - after), percent: (Number(savedBp) / 100).toFixed(2) },
+    ratesConfirmed: ctx.confirmed,
+    note: 'Measured on the scripted callers given, at the voice provider\'s rate in force. It prices synthesis only (not telephony), and says nothing about how the call sounds.',
+  };
 }

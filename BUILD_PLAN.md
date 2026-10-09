@@ -216,6 +216,22 @@ Goal: cut cost without hurting the caller's experience.
   - rejected, wrong number, third party and unreachable outcomes
   - captured best callback times
 
+**Status (in progress)**
+
+Built and tested (against fakes; no audio has been played on a real call):
+- **Pre-recorded audio:** a client's recordings are stored per language and found by their exact words (not by name), so what is played is always what the workflow says. Only fixed words are recorded: a new take is a new version, and the old one is kept. The upload refuses a file whose first bytes are not the audio type it claims, and anything over 5 MB. The console has a Recordings screen (upload, list, play).
+- **Stitching plan:** every line a call speaks is planned as recorded and live parts. A fixed line is played whole if recorded. A hybrid line plays the recorded frame and speaks only the slot, and neighbouring live parts are joined into one request so the voice reads them as one phrase. A model-written line is always live. Sensitive variables are still refused. Each spoken line records how many characters are synthesised and how many played from a recording, in the call's steps and its totals; the count is by character, not byte.
+- **Measuring the saving:** the same scripted callers are played with and without the recordings, and the difference in synthesised characters is priced exactly at the voice provider's per-character rate. It also lists the fixed words still worth recording.
+- **DID pool and DID check:** before every dial (after the do-not-call gate, so a blocked number uses none), the check excludes any DID that has ever failed for this contact, picks the cheapest provider's numbers (a provider with no captured rate comes last), and uses the least recently used. If every number is locked for the contact, or the client has none, the call is refused and no provider is contacted; such calls are not counted as the provider failing. A named caller ID gets the same check. A failure is recorded against a call, locks that DID from that contact for good (rows cannot change), and the contact is known only by a keyed hash, so no customer number is kept.
+- **Outbound analytics:** attempts, contact rate and answer rate, who rejected, wrong numbers, third parties, no answer and unreachable, answered calls not yet classified (shown, not guessed), and the callback times people asked for, in their own time zone.
+
+Not built or not proven:
+- **Playing audio.** No voice provider or speech pipeline is connected to calls, so nothing plays a recording on the telephony leg. This phase decides what would be played and counts it. Whether the seams between a recording and live speech sound natural cannot be tested without people listening.
+- **Call cost records do not yet receive the synthesised-character count.** The count is in each run and the saving is measured from it, but a real call's cost record has no voice usage until a voice provider is connected to calls.
+- **DID failures are recorded by an operator or another system through the API.** Nothing yet detects a spam label or carrier block from provider events, because the exact signals each provider sends have not been checked against the live services.
+- **Outcomes are recorded through the API** and are not yet tied to the end outcome of a workflow run, since a call does not yet carry a workflow.
+- **The blind listening check and Customer Experience Council sign-off** need people.
+
 **Exit criteria**
 - The cost difference between a stitched and an unstitched version of the same flow is measured.
 - A blind listening check confirms there is no drop in caller experience (the Customer Experience Council signs off).

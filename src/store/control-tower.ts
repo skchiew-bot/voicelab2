@@ -32,7 +32,7 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
                                  count(*) FILTER (WHERE status = 'completed') AS completed,
                                  max(started_at) AS last_call
                             -- Finished calls only: calls still in flight (or stuck) say nothing about success or failure.
-                            FROM calls WHERE provider_id = p.id AND status IN ('completed', 'unanswered', 'failed')
+                            FROM calls WHERE provider_id = p.id AND status IN ('completed', 'unanswered', 'failed') AND coalesce(end_reason, '') NOT IN ('did_locked', 'all_locked_for_contact', 'no_numbers')
                              AND started_at > now() - interval '24 hours') k ON true
       ORDER BY p.name`)).rows;
 

@@ -2,6 +2,7 @@ import { redactNumbers } from '../telephony/types.js';
 import { evalCondition, type Vars } from './conditions.js';
 import { own, RESERVED_NAMES, SLOT_RE, type ApiNode, type Json, type SpeakNode, type WorkflowDefinition, type WorkflowNode } from './definition.js';
 import { interpretReply } from './interpret.js';
+import { planSpeech, synthOnly, type RecordingIndex, type SpeechPlan } from './stitch.js';
 import { MissingVariable, pickText, renderText, SensitiveVariable } from './render.js';
 
 /**
@@ -32,6 +33,8 @@ export interface Deps {
   /** The workflow definitions this call is pinned to, by name. */
   load(workflow: string): WorkflowDefinition | undefined;
   integrations?: { call(name: string, req: IntegrationCall): Promise<Json> };
+  /** Pre-recorded audio to play where the words match. Without one every line is spoken live (the unstitched baseline). */
+  recordings?: RecordingIndex;
   /** Writes a dynamic node's line. Without one, a dynamic node speaks its fallback text. */
   speaker?: { generate(node: SpeakNode, vars: Vars, lang: string | undefined): Promise<string> };
   /** Steps allowed in one request (one start or one reply). */
@@ -179,19 +182,32 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
       case 'speak': {
         const lang = typeof state.vars.lang === 'string' ? state.vars.lang : undefined;
         let line: string | undefined;
+        let plan: SpeechPlan | undefined;
         try {
           if (node.speech === 'dynamic') {
             const fallback = node.text !== undefined ? pickText(node.text, lang) : undefined;
             if (deps.speaker) line = await deps.speaker.generate(node, withoutSensitive(state), lang);
             else if (fallback !== undefined) line = renderText(fallback, state.vars, state.sensitive);
             else { fail(state, out, `"${id}" is dynamic and has no fallback text, and no model is connected to write its line.`, id); return; }
-          } else line = renderText(pickText(node.text ?? '', lang) ?? '', state.vars, state.sensitive);
+          } else {
+            const raw = node.text ?? '';
+            const template = pickText(raw, lang) ?? '';
+            line = renderText(template, state.vars, state.sensitive);
+            // A plain string is English; a language map says which language the chosen text is in.
+            const used = typeof raw === 'string' ? 'en' : lang !== undefined && own(raw, lang) ? lang : 'en';
+            plan = planSpeech(template, state.vars, state.sensitive, used, deps.recordings);
+          }
         } catch (e) {
           if (e instanceof SensitiveVariable) { fail(state, out, `"${id}" would use the sensitive variable "${e.variable}". Nothing was said.`, id); return; }
           if (e instanceof MissingVariable) { fail(state, out, `"${id}" needs the variable "${e.variable}", which is not set. Nothing was said.`, id); return; }
           fail(state, out, `Could not write the line for "${id}": ${redactNumbers((e as Error).message)}`, id); return;
         }
-        out.push({ type: 'say', workflow: wf, node: id, payload: { strategy: node.speech, text: line!, ...(lang ? { lang } : {}) } });
+        plan ??= synthOnly(line!); // a line a model wrote is always spoken live
+        out.push({ type: 'say', workflow: wf, node: id, payload: {
+          strategy: node.speech, text: line!, ...(lang ? { lang } : {}),
+          synthChars: plan.synthCharacters, recordedChars: plan.recordedCharacters,
+          segments: plan.segments.map((s): Json => (s.kind === 'recorded' ? { kind: 'recorded', chars: s.characters, recordingId: s.recordingId } : { kind: 'synth', chars: s.characters })),
+        } });
         if (node.listen) {
           state.status = 'awaiting_reply';
           state.awaiting = { node: id, captureAs: node.listen.captureAs, intents: node.listen.intents, sensitive: node.listen.sensitive };

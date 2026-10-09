@@ -9,7 +9,8 @@ import { twilioPlaceCall, type TwilioCreds } from '../telephony/twilio.js';
 import { redactNumbers, type Action, type NormalizedEvent } from '../telephony/types.js';
 import { audit } from './audit.js';
 import { recordCallCost } from './costs.js';
-import { gateOutbound, normalizeE164 } from './dnc.js';
+import { chooseDid, didLockedFor } from './dids.js';
+import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.js';
 import { recordEvent } from './events.js';
 
 export interface CallDeps { pool: pg.Pool; key: Buffer; dncKey: Buffer; http: Fetch; baseUrl?: string; tolerancePct?: number }
@@ -48,43 +49,84 @@ export const listNumbers = async (c: pg.PoolClient) =>
   (await c.query('SELECT id, provider_id, e164, tenant_id, project_id, country, label FROM phone_numbers ORDER BY e164')).rows;
 
 // --------------------------------------------------------------- outbound
-export interface PlaceInput { tenantId: string; projectId?: string; providerId: string; from: string; to: string; country: string }
+export interface PlaceInput { tenantId: string; projectId?: string; providerId?: string; from?: string; to: string; country: string }
 
 /**
  * Place an outbound call. The do-not-call gate runs first and the provider is never contacted for
- * a blocked number. The customer's number is passed to the provider and not kept.
+ * a blocked number. Then the DID check picks the caller ID (or checks the one named): a DID that has ever failed for
+ * this contact is never used for them again. The customer's number is passed to the provider and not kept; only a
+ * keyed hash of it is, so the pool can remember which DIDs failed for whom.
  */
 export async function placeOutboundCall(d: CallDeps, actorId: string, input: PlaceInput) {
   if (!d.baseUrl) throw new AppError(503, 'PUBLIC_BASE_URL is not set, so providers cannot reach this server. Set it to place calls.');
   const callId = randomUUID();
-  const from = normalizeE164(input.from);
-  if (!from) throw new AppError(400, '"from" must be in international format.');
+  const named = input.from === undefined ? null : normalizeE164(input.from);
+  if (input.from !== undefined && !named) throw new AppError(400, '"from" must be in international format.');
+  const toNumber = normalizeE164(input.to);
+  const chash = toNumber ? contactHash(toNumber, contactKeyFrom(d.key)) : null;
 
   const setup = await asInternal(d, async (c) => {
-    const provider = await loadProvider(c, input.providerId);
+    let own: { id: string; e164: string; provider_id: string } | undefined;
+    if (named) {
+      const rows = (await c.query(
+        `SELECT id, e164, provider_id FROM phone_numbers WHERE tenant_id = $1 AND e164 = $2 AND status = 'active' AND ($3::uuid IS NULL OR provider_id = $3)`,
+        [input.tenantId, named, input.providerId ?? null])).rows;
+      if (rows.length === 0) throw new AppError(400, 'The caller ID is not an active number registered to this client on that provider.');
+      if (rows.length > 1) throw new AppError(400, 'That number is registered with more than one provider. Say which provider to dial from.');
+      own = rows[0];
+    }
+    const decision = await gateOutbound(c, d.dncKey, { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, to: input.to });
+    const insertCall = (providerId: string, status: string, fromId: string | null, reason?: string) => c.query(
+      `INSERT INTO calls (id, tenant_id, project_id, provider_id, direction, status, country, cost_status, from_number_id, contact_hash, end_reason, ended_at)
+       VALUES ($1,$2,$3,$4,'outbound',$5,$6,$7,$8,$9,$10, CASE WHEN $5 = 'dialing' THEN NULL ELSE now() END)`,
+      // A call that never connects (blocked, no usable caller ID) has nothing to price.
+      [callId, input.tenantId, input.projectId ?? null, providerId, status, input.country, status === 'dialing' ? 'pending' : 'not_applicable', fromId, chash, reason ?? null]);
+
+    if (!decision.allowed) {
+      const providerId = own?.provider_id ?? input.providerId ?? (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' ORDER BY created_at LIMIT 1`)).rows[0]?.id;
+      if (!providerId) throw new AppError(400, 'No telephony provider is set up.');
+      await insertCall(providerId, 'blocked', own?.id ?? null);
+      await audit(c, actorId, 'call.outbound', 'call', callId, { allowed: false, country: input.country });
+      return { decision, refused: null, provider: null, from: '' };
+    }
+
+    // The DID check: after the do-not-call gate, before the provider is contacted.
+    let from = own?.e164 ?? '';
+    let fromId = own?.id ?? null; let providerId = own?.provider_id ?? input.providerId ?? null;
+    let refusal: { reason: string; message: string } | null = null;
+    if (!chash) throw new AppError(400, 'The number to dial is not valid.'); // unreachable: the gate blocks an invalid number
+    if (own) {
+      if (await didLockedFor(c, input.tenantId, own.id, chash)) refusal = { reason: 'did_locked', message: 'That caller ID has failed for this contact before and is locked away from them. Choose another, or let the pool choose.' };
+    } else {
+      const choice = await chooseDid(c, { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, contactHash: chash, providerId: input.providerId });
+      if (choice.ok) { from = choice.e164; fromId = choice.phoneNumberId; providerId = choice.providerId; }
+      else refusal = { reason: choice.reason, message: choice.reason === 'all_locked_for_contact' ? 'Every number in the pool has failed for this contact before, so none can be used for them.' : 'There is no active number in this country for that client to dial from.' };
+    }
+    if (refusal) {
+      const fallback = providerId ?? (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' ORDER BY created_at LIMIT 1`)).rows[0]?.id;
+      if (!fallback) throw new AppError(400, 'No telephony provider is set up.');
+      await insertCall(fallback, 'failed', fromId, refusal.reason);
+      await recordEvent(c, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'call.failed', payload: { reason: refusal.reason } });
+      await audit(c, actorId, 'call.outbound', 'call', callId, { allowed: true, refused: refusal.reason, country: input.country });
+      return { decision, refused: refusal, provider: null, from: '' };
+    }
+    const provider = await loadProvider(c, providerId!);
     if (!provider) throw new AppError(404, 'Provider not found.');
     if (provider.kind !== 'telephony' || provider.status !== 'active') throw new AppError(400, 'That provider cannot place calls.');
     if (!['twilio', 'telnyx'].includes(provider.adapter_key)) throw new AppError(400, 'That provider has no call control.');
-    const own = (await c.query('SELECT 1 FROM phone_numbers WHERE provider_id = $1 AND e164 = $2 AND tenant_id = $3', [input.providerId, from, input.tenantId])).rows[0];
-    if (!own) throw new AppError(400, 'The caller ID is not a number registered to this client on that provider.');
-
-    const decision = await gateOutbound(c, d.dncKey, { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, to: input.to });
-    await c.query(
-      `INSERT INTO calls (id, tenant_id, project_id, provider_id, direction, status, country, cost_status)
-       VALUES ($1,$2,$3,$4,'outbound',$5,$6,$7)`,
-      // A blocked call never connects, so it has nothing to price.
-      [callId, input.tenantId, input.projectId ?? null, input.providerId, decision.allowed ? 'dialing' : 'blocked', input.country, decision.allowed ? 'pending' : 'not_applicable'],
-    );
-    await audit(c, actorId, 'call.outbound', 'call', callId, { allowed: decision.allowed, country: input.country });
-    return { provider, decision };
+    await insertCall(provider.id, 'dialing', fromId);
+    await audit(c, actorId, 'call.outbound', 'call', callId, { allowed: true, country: input.country, pooled: !own });
+    return { decision, refused: null, provider, from };
   });
 
+  if (setup.refused) throw new AppError(409, setup.refused.message, [setup.refused.reason]);
   if (!setup.decision.allowed) return { callId, allowed: false as const, reason: setup.decision.reason, status: 'blocked' };
 
   // Outside any transaction: the provider can be slow and must not hold a database connection.
   const base = d.baseUrl;
   try {
-    const p = setup.provider;
+    const p = setup.provider!;
+    const from = setup.from;
     const creds = credentials<TwilioCreds & TelnyxCreds>(p, d.key);
     const placed = p.adapter_key === 'twilio'
       ? await twilioPlaceCall(creds, d.http, {

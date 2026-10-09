@@ -26,6 +26,30 @@ Token cost is a build requirement, not a Phase 6 detail. Every AI task in every 
 
 **Exit criteria (every phase):** each AI task the phase introduces has a configured model tier, a logged token count and a documented escalation rule.
 
+### Technology stack (proposed)
+
+**Status:** proposed, pending confirmation of hosting region, cloud provider and language (see Open Decisions). The aim is a stack small enough for a non-technical person to install.
+
+| Layer | Choice | Why |
+| --- | --- | --- |
+| Language | TypeScript everywhere | One language across call service, UI and adapters. Node handles many long-lived WebSocket media streams well. |
+| API and call service | Fastify plus WebSockets | Twilio TwiML and Telnyx event webhooks, and media streams. |
+| Database | PostgreSQL | Ledgers, rate versions, workflows and the call-event log need strong consistency and an audit trail. Row-level security enforces tenant isolation and the split between the two ledgers. |
+| Queues and live state | Redis, with BullMQ for jobs | Concurrency counters, call state, pub/sub for live panels, batch jobs (distillation, QA scoring, usage reconciliation). |
+| Control Tower and client portal | React (Next.js) | Live panels over WebSocket or server-sent events. Two separate apps over the same API, with separate permissions. |
+| Recordings and pre-recorded audio | S3-compatible object storage | Stitching audio, per-language recordings, call recordings. |
+| Secrets | Provider credentials encrypted at rest with a managed key | Credentials are keyed in through the UI and must never sit in plain text. |
+| Provider adapters | Typed adapter interface per provider | Each adapter declares its own parameter set; the UI builds its form from it. A new provider is a new adapter, not a UI change. |
+| Model configuration | Config table, per task | Implements the model-selection rule above; a change needs no deploy. |
+| Observability | OpenTelemetry (logs, traces, metrics) | Feeds the Control Tower provider-health panel. |
+| Deployment | Docker Compose with a guided installer | Fits the "non-technical person can stand it up" principle. Move to a managed container service if load requires it. |
+| Tests | Vitest plus a fake-provider simulator | Needed for the Phase 4 chaos tests. |
+
+Design rules:
+- **Postgres alone for the event log at first.** A partitioned table is enough for early volume. If call volume grows, move analytics to ClickHouse without changing how events are written.
+- **No microservices yet.** One deployable service with clear internal modules (adapters, workflow engine, metering, Control Tower API). Split only when load demands it.
+- **TypeScript over Python.** The per-turn AI work is API calls to providers, not local models, so TypeScript costs nothing and keeps one language.
+
 ## Phase Overview
 
 | Phase | Name | Depends on | Control Tower slice |
@@ -265,7 +289,9 @@ Alerts are delivered inside the console first. Later they can also go to email, 
 | Decision | Blocks | Owner |
 | --- | --- | --- |
 | Client rate card (per minute, and per feature) | Credits drawn and margin, from Phase 1 onward | TBD |
-| Tech stack and hosting | Phase 0 | TBD |
+| Confirm the proposed technology stack (see Global Requirements): language, plus any changes | Phase 0 | TBD |
+| Hosting region (Malaysian data-residency rules for call recordings and debtor data) | Phase 0: where Postgres and storage run | TBD |
+| Cloud provider | Phase 0 | TBD |
 | How each provider's usage is ingested (per-call API, webhook or invoice) and how long it lags | Accurate cost records in Phase 1 | TBD |
 | Failover thresholds: N errors, latency window, hysteresis | Phase 4 | TBD |
 | Frequency and confidence thresholds for promotion | Phase 6 | TBD |

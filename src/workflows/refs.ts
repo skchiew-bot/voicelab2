@@ -1,0 +1,63 @@
+import { ID_RE, type WorkflowDefinition } from './definition.js';
+import { slotsIn } from './render.js';
+
+export interface Reference { node: string; kind: 'subflow' | 'handoff'; workflow: string }
+
+/** The other workflows this one reaches, by name. */
+export function referencesOf(def: WorkflowDefinition): Reference[] {
+  const out: Reference[] = [];
+  for (const [id, n] of Object.entries(def.nodes)) {
+    if (n.type === 'subflow') out.push({ node: id, kind: 'subflow', workflow: n.workflow });
+    else if (n.type === 'handoff' && 'workflow' in n.target) out.push({ node: id, kind: 'handoff', workflow: n.target.workflow });
+  }
+  return out;
+}
+
+/** Every variable this workflow can have set at some point: supplied, built in, captured, stored from an API, or exported. */
+export function knownVariables(def: WorkflowDefinition): Set<string> {
+  const known = new Set<string>(['lang', ...(def.variables ?? [])]);
+  for (const [id, n] of Object.entries(def.nodes)) {
+    if (n.type === 'speak' && n.listen) { known.add(n.listen.captureAs); if (n.listen.intents) known.add(`${n.listen.captureAs}_intent`); }
+    if (n.type === 'api') Object.keys(n.store ?? {}).forEach((k) => known.add(k));
+    if (n.type === 'subflow') { known.add(`${id}_outcome`); (n.exports ?? []).forEach((k) => known.add(k)); }
+  }
+  return known;
+}
+
+export interface ReferenceIssue { code: 'unknown_workflow' | 'not_deployed' | 'subflow_cycle' | 'missing_context'; node?: string; message: string }
+
+/**
+ * Checks that need other workflows: does each target exist and is it live where this one is going, does the
+ * caller hand over every variable the target needs, and do subflows form a loop.
+ * `lookup` returns the definition live in the target environment, or 'absent' if no such workflow exists, or 'undeployed'.
+ */
+export function checkReferences(
+  name: string, def: WorkflowDefinition,
+  lookup: (workflow: string) => WorkflowDefinition | 'absent' | 'undeployed',
+): ReferenceIssue[] {
+  const issues: ReferenceIssue[] = [];
+  const known = knownVariables(def);
+  for (const r of referencesOf(def)) {
+    const target = lookup(r.workflow);
+    if (target === 'absent') { issues.push({ code: 'unknown_workflow', node: r.node, message: `"${r.node}" goes to the workflow "${r.workflow}", which does not exist.` }); continue; }
+    if (target === 'undeployed') { issues.push({ code: 'not_deployed', node: r.node, message: `"${r.node}" goes to "${r.workflow}", which is not deployed there yet. Deploy it first.` }); continue; }
+    const missing = (target.variables ?? []).filter((v) => !known.has(v));
+    if (missing.length) issues.push({ code: 'missing_context', node: r.node, message: `"${r.workflow}" needs ${missing.map((m) => `"${m}"`).join(', ')}, which "${name}" never has, so the call could not carry it over.` });
+  }
+  // Subflows nesting into each other without end cannot be allowed to run.
+  const seen = new Set<string>();
+  const walk = (wf: string, d: WorkflowDefinition, path: string[]): void => {
+    for (const r of referencesOf(d).filter((x) => x.kind === 'subflow')) {
+      if (path.includes(r.workflow)) { issues.push({ code: 'subflow_cycle', node: r.node, message: `Subflows loop: ${[...path, r.workflow].join(' → ')}.` }); continue; }
+      const t = lookup(r.workflow);
+      if (typeof t === 'string' || seen.has(`${wf}>${r.workflow}`)) continue;
+      seen.add(`${wf}>${r.workflow}`);
+      walk(r.workflow, t, [...path, r.workflow]);
+    }
+  };
+  walk(name, def, [name]);
+  return issues;
+}
+
+export const isWorkflowName = (s: string) => /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(s);
+export { ID_RE, slotsIn };

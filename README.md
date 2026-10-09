@@ -75,6 +75,6 @@ All requests send `Authorization: Bearer <token>`. `/internal/*` is Daythree sta
 | `POST /webhooks/twilio/:providerId/(voice\|status)`, `POST /webhooks/telnyx/:providerId` | Provider callbacks; no token, verified by signature |
 | `GET /internal/reference-rates`, `POST /internal/providers/:id/charging/reference` | The blueprint's starting rates, saved onto a provider as unconfirmed |
 | `GET /internal/calls` | Recent calls, filterable by status |
-| `POST /internal/calls/:callId/reconcile` | Check a call's cost against the provider (`provider_api`, Twilio only) or against figures you enter (`manual`) |
+| `POST /internal/calls/:callId/reconcile` | Check a call's cost against the provider (`provider_api`, Twilio only) or against figures you enter (`manual`, the provider's price is required) |
 | `GET /internal/calls/:callId/reconciliations` | The checks made on a call |
 | `POST /internal/reconcile/run` | Check every finished, unchecked Twilio call. Call it on a schedule |

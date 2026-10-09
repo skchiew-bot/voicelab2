@@ -12,7 +12,7 @@ import { recordEvent } from './events.js';
 
 export type ReconcileInput =
   | { source: 'provider_api' }
-  | { source: 'manual'; reportedSeconds?: number; reportedCost?: string; currency?: string };
+  | { source: 'manual'; reportedSeconds?: number; reportedCost: string; currency?: string };
 
 export type ReconcileResult =
   | { outcome: 'matched' | 'variance'; detail: string; alreadyReconciled?: false }
@@ -49,19 +49,26 @@ export async function reconcileCall(d: CallDeps, actorId: string | null, callId:
     if (provider!.adapter_key !== 'twilio') {
       throw new AppError(400, 'Only Twilio has an automatic usage check so far. Send the provider\'s figures with source "manual" instead.');
     }
+    if (!call.provider_call_id) throw new AppError(400, 'This call never got an id from the provider, so there is nothing to look up.');
     try {
       const u = await twilioFetchCallUsage(credentials<TwilioCreds>(provider!, d.key), d.http, call.provider_call_id);
       if (u.state === 'pending') return { outcome: 'pending', detail: 'Twilio has not published this call\'s price yet. Try again later.' };
       reportedSeconds = u.seconds; reportedCost = u.cost; currency = u.currency;
     } catch (err) { throw new AppError(502, redactNumbers((err as Error).message)); }
   } else {
-    if (input.reportedSeconds === undefined && input.reportedCost === undefined) {
-      throw new AppError(400, 'Give the duration, the cost, or both, as the provider reported them.');
+    // A duration alone cannot show the rate was right, so the provider's price is required.
+    if (input.reportedCost === undefined || input.reportedCost === '') {
+      throw new AppError(400, 'Give the cost the provider charged (and, if you have it, the duration).');
     }
     reportedSeconds = input.reportedSeconds; reportedCost = input.reportedCost; currency = (input.currency ?? 'USD').toUpperCase();
   }
 
-  return asInternal(d, async (c) => {
+  return asInternal(d, async (c): Promise<ReconcileResult> => {
+    // Two checks of one call must take turns. Whoever gets here second sees the first one's result.
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`reconcile:${callId}`]);
+    const done = (await c.query(
+      `SELECT detail FROM call_reconciliations WHERE call_id = $1 AND outcome = 'matched' ORDER BY id DESC LIMIT 1`, [callId])).rows[0];
+    if (done) return { outcome: 'matched', detail: done.detail, alreadyReconciled: true };
     const lines = (await c.query(
       `SELECT sum(amount_usd) AS usd FROM call_cost_lines WHERE call_cost_id = $1 AND provider_id = $2`, [ctx.costId, call.provider_id])).rows[0];
     const ourCostUsd = lines.usd ?? '0.00000000';
@@ -100,24 +107,34 @@ export async function reconcileCall(d: CallDeps, actorId: string | null, callId:
       type: verdict.matched ? 'call.cost_reconciled' : 'call.cost_variance', payload: { source: input.source, detail: verdict.detail },
     });
     await audit(c, actorId, 'call_cost.reconcile', 'call', callId, { outcome, source: input.source });
-    return { outcome, detail: verdict.detail } as ReconcileResult;
+    return { outcome, detail: verdict.detail };
   });
 }
 
-/** Check recently finished Twilio calls that have not been checked yet. Calls Twilio has not priced yet are left for next time. */
+const MAX_SWEEP_ATTEMPTS = 8;
+
+/**
+ * Check finished Twilio calls that have not been checked yet. Each try is recorded: calls tried longest
+ * ago go first, and a call that has been tried too often is left for a person, so calls Twilio will never
+ * price (it does not price calls that never connected) cannot crowd out newer ones.
+ */
 export async function reconcileSweep(d: CallDeps, actorId: string | null, o: { olderThanMinutes: number; limit: number }) {
   const due = await asInternal(d, async (c) =>
     (await c.query(
       `SELECT ca.id FROM calls ca JOIN providers p ON p.id = ca.provider_id
-        WHERE p.adapter_key = 'twilio' AND ca.cost_status = 'recorded' AND ca.ended_at < now() - ($1 || ' minutes')::interval
-          AND ca.provider_call_id IS NOT NULL
-        ORDER BY ca.ended_at LIMIT $2`, [o.olderThanMinutes, o.limit])).rows.map((r) => r.id as string));
+        WHERE p.adapter_key = 'twilio' AND ca.cost_status = 'recorded' AND ca.provider_call_id IS NOT NULL
+          AND ca.duration_seconds > 0 AND ca.reconcile_attempts < $3
+          AND ca.ended_at < now() - ($1 || ' minutes')::interval
+          AND (ca.reconcile_attempted_at IS NULL OR ca.reconcile_attempted_at < now() - ($1 || ' minutes')::interval)
+        ORDER BY ca.reconcile_attempted_at NULLS FIRST, ca.ended_at LIMIT $2`, [o.olderThanMinutes, o.limit, MAX_SWEEP_ATTEMPTS])).rows.map((r) => r.id as string));
   const tally = { checked: due.length, matched: 0, variance: 0, pending: 0, failed: 0 };
   for (const id of due) {
     try {
       const r = await reconcileCall(d, actorId, id, { source: 'provider_api' });
       tally[r.outcome] += 1;
     } catch { tally.failed += 1; }
+    await asInternal(d, (c) => c.query(
+      'UPDATE calls SET reconcile_attempts = reconcile_attempts + 1, reconcile_attempted_at = now() WHERE id = $1', [id]));
   }
   return tally;
 }

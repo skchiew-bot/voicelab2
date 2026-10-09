@@ -9,6 +9,11 @@ ALTER TABLE calls DROP CONSTRAINT calls_cost_status_check;
 ALTER TABLE calls ADD CONSTRAINT calls_cost_status_check
   CHECK (cost_status IN ('pending', 'recorded', 'failed', 'reconciled', 'variance'));
 
+-- The sweep records each try, so calls Twilio will never price cannot crowd out newer ones forever.
+ALTER TABLE calls
+  ADD COLUMN reconcile_attempts     integer NOT NULL DEFAULT 0,
+  ADD COLUMN reconcile_attempted_at timestamptz;
+
 -- Each check of a call's estimated cost against what the provider says it charged.
 CREATE TABLE call_reconciliations (
   id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

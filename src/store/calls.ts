@@ -144,10 +144,12 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
 }
 
 /** Price a finished call and store the result. Failing to price never loses the call or fails the webhook. */
-export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed'> {
-  const call = (await c.query('SELECT * FROM calls WHERE id = $1', [callId])).rows[0];
+export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance'> {
+  const call = (await c.query('SELECT * FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
   if (!call) throw new AppError(404, 'Call not found.');
   if (!call.ended_at) throw new AppError(409, 'The call has not ended yet.');
+  // Already priced and possibly checked: pricing again must not wipe a reconciled or variance flag.
+  if (['recorded', 'reconciled', 'variance'].includes(call.cost_status)) return call.cost_status;
   try {
     await recordCallCost(c, actorId, {
       callId, tenantId: call.tenant_id, projectId: call.project_id ?? undefined, direction: call.direction,

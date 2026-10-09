@@ -28,7 +28,8 @@ interface Session { userId: string; email: string; actor: Actor }
 
 const adminDist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'admin', 'dist');
 
-const money = z.string().regex(/^-?\d+(\.\d+)?$/, 'Use a decimal number as text, e.g. "12.50".');
+// At most what the database columns hold (10 digits before the point, 8 after), so a huge value is a clear 400, not a crash.
+const money = z.string().regex(/^-?\d{1,10}(\.\d{1,8})?$/, 'Use a decimal number as text, e.g. "12.50" (up to 10 digits before the point and 8 after).');
 const currency = z.string().length(3).transform((s) => s.toUpperCase());
 
 export interface Deps {
@@ -80,7 +81,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const pgCode = (err as { code?: string }).code;
     if (pgCode === '23505') return reply.status(409).send({ error: 'Already exists.' });
     if (pgCode === '23503') return reply.status(400).send({ error: 'Refers to something that does not exist.' });
-    if (pgCode === '23514') return reply.status(400).send({ error: 'A value is out of range.' });
+    if (pgCode === '23514' || pgCode === '22003') return reply.status(400).send({ error: 'A value is out of range.' });
     if ((err as { statusCode?: number }).statusCode === 400) return reply.status(400).send({ error: 'Invalid request.' });
     console.error(err);
     return reply.status(500).send({ error: 'Internal error.' });
@@ -380,7 +381,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
     const body = z.discriminatedUnion('source', [
       z.object({ source: z.literal('provider_api') }),
-      z.object({ source: z.literal('manual'), reportedSeconds: z.number().min(0).optional(), reportedCost: money.optional(), currency: currency.optional() }),
+      z.object({ source: z.literal('manual'), reportedSeconds: z.number().min(0).max(1_000_000).optional(), reportedCost: money, currency: currency.optional() }),
     ]).parse(req.body);
     return reconcileCall(callDeps, s.userId, callId, body);
   });

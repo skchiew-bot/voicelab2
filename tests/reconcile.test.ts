@@ -77,6 +77,7 @@ async function mkCall(o: { providerId: string; direction?: 'inbound' | 'outbound
 const twilioSays = (b: object) => { env.provider.state.respond = () => new Response(JSON.stringify(b), { status: 200 }); };
 const recon = (id: string, body: object) => env.call(env.staffToken, 'POST', `/internal/calls/${id}/reconcile`, body);
 const credits = async () => (await env.call(env.staffToken, 'GET', `/internal/tenants/${tenantId}/credits`)).json().balance as string;
+const callRow = async (id: string) => (await env.call(env.staffToken, 'GET', `/internal/calls/${id}`)).json();
 const rollup = async () => (await env.call(env.staffToken, 'GET', `/internal/costs/campaigns?tenantId=${tenantId}`)).json()[0];
 
 describe('the blueprint\'s reference rates', () => {
@@ -238,5 +239,123 @@ describe('listing calls and access', () => {
       expect((await env.call(user.token, m, u, m === 'POST' ? {} : undefined)).statusCode, u).toBe(403);
     }
     await expect(env.pool.query('UPDATE call_reconciliations SET outcome = $1', ['matched'])).rejects.toThrow(/append-only/);
+  });
+});
+
+// ---- findings from the independent review, each reproduced here before it was fixed
+describe('reconciling the same call at once', () => {
+  it('never errors and never leaves the call half reconciled', async () => {
+    for (let round = 0; round < 3; round++) {
+      const call = await mkCall({ providerId: twilioId, seconds: 61 });
+      const good = { source: 'manual', reportedSeconds: 61, reportedCost: '0.0280' };
+      const bad = { source: 'manual', reportedSeconds: 61, reportedCost: '9.0' };
+      const rs = await Promise.all([recon(call.id, good), recon(call.id, bad), recon(call.id, good), recon(call.id, good)]);
+      expect(rs.map((r) => r.statusCode), `round ${round}`).toEqual([200, 200, 200, 200]);
+      const reconciledRows = (await env.pool.query(`SELECT count(*)::int AS n FROM call_costs WHERE call_id = $1 AND status = 'reconciled'`, [call.id])).rows[0].n;
+      const status = (await callRow(call.id)).cost_status;
+      expect(reconciledRows).toBeLessThanOrEqual(1);
+      // The flag and the record must agree: reconciled exactly when a reconciled record exists.
+      expect(status === 'reconciled', `round ${round}: status ${status}, reconciled rows ${reconciledRows}`).toBe(reconciledRows === 1);
+    }
+  });
+});
+
+describe('retrying the cost of a call that was already checked', () => {
+  it('does not wipe the reconciled or variance flag', async () => {
+    const ok = await mkCall({ providerId: twilioId, seconds: 61 });
+    await recon(ok.id, { source: 'manual', reportedCost: '0.0280' });
+    expect((await env.call(env.staffToken, 'POST', `/internal/calls/${ok.id}/cost/retry`)).json()).toEqual({ cost_status: 'reconciled' });
+    expect((await callRow(ok.id)).cost_status).toBe('reconciled');
+
+    const off = await mkCall({ providerId: twilioId, seconds: 61 });
+    await recon(off.id, { source: 'manual', reportedCost: '5.0' });
+    expect((await env.call(env.staffToken, 'POST', `/internal/calls/${off.id}/cost/retry`)).json()).toEqual({ cost_status: 'variance' });
+    expect((await callRow(off.id)).cost_status).toBe('variance');
+  });
+});
+
+describe('the sweep', () => {
+  const stuck = async (n: number) => {
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(await mkCall({ providerId: twilioId, seconds: 61, sid: `CA_stuck_${randomUUID().slice(0, 6)}` }));
+    return out;
+  };
+  const answers = (stuckSids: Set<string>) => {
+    env.provider.state.respond = (url) => [...stuckSids].some((s) => url.includes(s))
+      ? new Response(JSON.stringify({ duration: '61', price: null }), { status: 200 })
+      : new Response(JSON.stringify({ duration: '61', price: '-0.0280', price_unit: 'USD' }), { status: 200 });
+  };
+
+  it('is not starved by old calls that Twilio will never price', async () => {
+    await env.pool.query(`UPDATE calls SET cost_status = 'reconciled' WHERE cost_status = 'recorded'`); // clear earlier tests' leftovers
+    const old = await stuck(3);
+    await new Promise((r) => setTimeout(r, 20));
+    const newer = await mkCall({ providerId: twilioId, seconds: 61 });
+    answers(new Set(old.map((c) => c.sid)));
+    const sweep = () => env.call(env.staffToken, 'POST', '/internal/reconcile/run', { olderThanMinutes: 0, limit: 2 });
+    await sweep(); await sweep();
+    expect((await callRow(newer.id)).cost_status).toBe('reconciled'); // reached, though it is newer than three stuck calls
+  });
+
+  it('gives up on a call after repeated tries, and skips calls that never connected', async () => {
+    await env.pool.query(`UPDATE calls SET cost_status = 'reconciled' WHERE cost_status = 'recorded'`);
+    const [capped] = await stuck(1);
+    await env.pool.query(`UPDATE calls SET reconcile_attempts = 8 WHERE id = $1`, [capped!.id]);
+    const silent = await mkCall({ providerId: twilioId, seconds: 0, sid: 'CA_zero' });
+    env.provider.calls.length = 0;
+    answers(new Set());
+    await env.call(env.staffToken, 'POST', '/internal/reconcile/run', { olderThanMinutes: 0, limit: 50 });
+    expect(env.provider.calls.some((c) => c.url.includes(capped!.sid))).toBe(false);
+    expect(env.provider.calls.some((c) => c.url.includes(silent.sid))).toBe(false);
+  });
+});
+
+describe('what counts as a check', () => {
+  it('needs the provider\'s price: a duration alone proves nothing about the rate', async () => {
+    const call = await mkCall({ providerId: twilioId, seconds: 61 });
+    const res = await recon(call.id, { source: 'manual', reportedSeconds: 61 });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.stringify(res.json())).toContain('reportedCost');
+    expect((await callRow(call.id)).cost_status).toBe('recorded');
+  });
+
+  it('cannot ask a provider about a call it never got an id for', async () => {
+    const id = randomUUID();
+    await env.pool.query(
+      `INSERT INTO calls (id, tenant_id, provider_id, direction, status, ended_at, duration_seconds, cost_status) VALUES ($1,$2,$3,'outbound','completed', now(), 5, 'recorded')`, [id, tenantId, twilioId]);
+    await env.call(env.staffToken, 'POST', `/internal/calls/${id}/cost`, { tenantId, direction: 'outbound', occurredAt: new Date().toISOString(), usage: [{ providerId: twilioId, usage: { seconds: 5 } }] });
+    const res = await recon(id, { source: 'provider_api' });
+    expect(res.statusCode).toBe(400);
+    expect(env.provider.calls.some((c) => c.url.includes('/Calls/null'))).toBe(false);
+  });
+});
+
+describe('numbers that do not fit', () => {
+  it('are refused with a clear error, not a server error', async () => {
+    const call = await mkCall({ providerId: twilioId, seconds: 61 });
+    expect((await recon(call.id, { source: 'manual', reportedSeconds: 1e9, reportedCost: '0.028' })).statusCode).toBe(400);
+    expect((await recon(call.id, { source: 'manual', reportedCost: '99999999999.5' })).statusCode).toBe(400);
+    expect((await env.call(env.staffToken, 'POST', '/internal/fx', { currency: 'EUR', perUsd: '123456789012', effectiveFrom: '2030-01-01T00:00:00Z' })).statusCode).toBe(400);
+  });
+});
+
+describe('a rate version that would charge a call twice', () => {
+  let day = 0; // each version must start later than the one before it
+  const version = (components: object[]) => env.call(env.staffToken, 'POST', `/internal/providers/${telnyxId}/charging`, {
+    effectiveFrom: new Date(Date.UTC(2040, 0, 1) + 86_400_000 * ++day).toISOString(), billingIncrementSeconds: 1, components,
+  });
+  const line = (direction: string, billingLine = 'main') => ({ component: 'telephony_leg', unit: 'per_minute', rate: '0.01', currency: 'USD', billingLine, direction });
+
+  it('is refused when one line applies to any call and also to a direction', async () => {
+    const res = await version([line('any'), line('outbound')]);
+    expect(res.statusCode).toBe(400);
+    expect(JSON.stringify(res.json())).toContain('twice');
+  });
+  it('is refused when a line is listed twice for the same direction', async () => {
+    expect((await version([line('outbound'), line('outbound')])).statusCode).toBe(400);
+  });
+  it('allows separate inbound and outbound rates, and separate billing lines', async () => {
+    expect((await version([line('inbound'), line('outbound')])).statusCode).toBe(201);
+    expect((await version([line('any', 'call'), line('any', 'sip trunk')])).statusCode).toBe(201);
   });
 });

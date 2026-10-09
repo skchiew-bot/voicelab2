@@ -71,12 +71,12 @@ function CallDetail({ call, onChanged }: { call: CallRow; onChanged: () => void 
           {cost.data && call.cost_status !== 'reconciled' && (
             <form className="grid" aria-label="Enter the provider's figures" onSubmit={(e) => {
               e.preventDefault();
-              reconcile({ source: 'manual', reportedSeconds: seconds ? Number(seconds) : undefined, reportedCost: reported || undefined, currency });
+              reconcile({ source: 'manual', reportedSeconds: seconds ? Number(seconds) : undefined, reportedCost: reported, currency });
             }}>
               <Field label="Provider's duration (seconds)"><input inputMode="decimal" value={seconds} onChange={(e) => setSeconds(e.target.value)} /></Field>
-              <Field label="Provider's cost"><input inputMode="decimal" value={reported} onChange={(e) => setReported(e.target.value)} /></Field>
+              <Field label="Provider's cost" help="Required: a duration alone cannot show the rate was right."><input inputMode="decimal" value={reported} onChange={(e) => setReported(e.target.value)} required /></Field>
               <Field label="Currency"><input maxLength={3} value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase())} /></Field>
-              <div><button type="submit" className="secondary" disabled={act.pending || (!seconds && !reported)}>Compare my figures</button></div>
+              <div><button type="submit" className="secondary" disabled={act.pending || !reported}>Compare my figures</button></div>
             </form>
           )}
         </>

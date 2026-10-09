@@ -6,6 +6,8 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   // The address providers use to reach this server, e.g. https://voicelab.example.com. Needed for calls.
   PUBLIC_BASE_URL: z.string().url().optional(),
+  // How far our estimated cost may differ from the provider's own figures and still count as reconciled.
+  RECONCILE_TOLERANCE_PCT: z.coerce.number().min(0).max(100).default(2),
 });
 
 export type Config = z.infer<typeof schema>;

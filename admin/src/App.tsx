@@ -2,13 +2,23 @@ import { useEffect, useState } from 'react';
 import { api, getToken, setToken } from './api';
 import { Errors, Field, useAction } from './ui';
 import { ProviderDetail } from './ProviderDetail';
+import { Calls } from './Calls';
+import { ControlTower } from './ControlTower';
+import { Compliance } from './Compliance';
+import { Numbers } from './Numbers';
+import { Outbound } from './Outbound';
+import { Recordings } from './Recordings';
+import { Resilience } from './Resilience';
 import { Providers } from './Providers';
+import { WorkflowDetail } from './WorkflowDetail';
+import { Workflows } from './Workflows';
+import { Rates } from './Rates';
 import { Tenants } from './Tenants';
 
 function useHash() {
-  const [hash, setHash] = useState(location.hash || '#/providers');
+  const [hash, setHash] = useState(location.hash || '#/tower');
   useEffect(() => {
-    const on = () => setHash(location.hash || '#/providers');
+    const on = () => setHash(location.hash || '#/tower');
     addEventListener('hashchange', on);
     return () => removeEventListener('hashchange', on);
   }, []);
@@ -62,19 +72,39 @@ export function App() {
   if (!signedIn) return <Login onDone={() => setSignedIn(true)} />;
 
   const providerId = /^#\/providers\/([\w-]+)$/.exec(hash)?.[1];
-  const section = hash.startsWith('#/tenants') ? 'tenants' : 'providers';
+  const workflowId = /^#\/workflows\/([\w-]+)$/.exec(hash)?.[1];
+  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers', 'workflows', 'recordings', 'outbound', 'resilience'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
 
   return (
     <div className="shell">
       <nav>
         <strong>Voice Lab</strong>
+        <a href="#/tower" aria-current={section === 'tower' ? 'page' : undefined}>Control Tower</a>
+        <a href="#/workflows" aria-current={section === 'workflows' ? 'page' : undefined}>Workflows</a>
+        <a href="#/recordings" aria-current={section === 'recordings' ? 'page' : undefined}>Recordings</a>
         <a href="#/providers" aria-current={section === 'providers' ? 'page' : undefined}>Providers</a>
         <a href="#/tenants" aria-current={section === 'tenants' ? 'page' : undefined}>Clients</a>
+        <a href="#/rates" aria-current={section === 'rates' ? 'page' : undefined}>Rates</a>
+        <a href="#/numbers" aria-current={section === 'numbers' ? 'page' : undefined}>Numbers</a>
+        <a href="#/compliance" aria-current={section === 'compliance' ? 'page' : undefined}>Do not call</a>
+        <a href="#/calls" aria-current={section === 'calls' ? 'page' : undefined}>Calls</a>
+        <a href="#/outbound" aria-current={section === 'outbound' ? 'page' : undefined}>Outbound</a>
+        <a href="#/resilience" aria-current={section === 'resilience' ? 'page' : undefined}>Resilience</a>
         <span className="spacer" />
         <button className="link" onClick={() => { setToken(null); setSignedIn(false); }}>Sign out</button>
       </nav>
       <main>
-        {section === 'tenants' ? <Tenants /> : providerId ? <ProviderDetail id={providerId} /> : <Providers />}
+        {section === 'tenants' ? <Tenants />
+          : section === 'rates' ? <Rates />
+          : section === 'numbers' ? <Numbers />
+          : section === 'recordings' ? <Recordings />
+          : section === 'outbound' ? <Outbound />
+          : section === 'resilience' ? <Resilience />
+          : section === 'compliance' ? <Compliance />
+          : section === 'calls' ? <Calls />
+          : section === 'workflows' ? (workflowId ? <WorkflowDetail id={workflowId} /> : <Workflows />)
+          : section === 'providers' ? (providerId ? <ProviderDetail id={providerId} /> : <Providers />)
+          : <ControlTower />}
       </main>
     </div>
   );

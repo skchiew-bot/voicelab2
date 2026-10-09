@@ -30,7 +30,7 @@ export function fakeProviderApi() {
   return { ...state, state, fetch: fetchFn };
 }
 
-export async function setupDb() {
+export async function setupDb(opts: { integrationHttp?: import('../src/workflows/integrations.js').HttpDeps } = {}) {
   const name = `voicelab_test_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
   const admin = new pg.Client({ connectionString: ADMIN_URL });
   await admin.connect();
@@ -47,9 +47,10 @@ export async function setupDb() {
     VOICELAB_SECRET_KEY: randomBytes(32).toString('base64'),
     PORT: 0,
     PUBLIC_BASE_URL: 'https://voicelab.test',
+    RECONCILE_TOLERANCE_PCT: 2,
   };
   const provider = fakeProviderApi();
-  const app = buildApp(pool, config, { fetch: provider.fetch });
+  const app = buildApp(pool, config, { fetch: provider.fetch, integrationHttp: opts.integrationHttp });
 
   const staff = await withActor(pool, { kind: 'internal' }, (c) =>
     createUser(c, null, { tenantId: null, email: 'staff@daythree.test', role: 'internal_admin' }));

@@ -33,6 +33,13 @@ export async function api<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?
   return data as T;
 }
 
+/** Fetch a file the API serves behind the token (audio), as a local URL the browser can play. */
+export async function apiObjectUrl(path: string): Promise<string> {
+  const res = await fetch(path, { headers: { authorization: `Bearer ${getToken() ?? ''}` } });
+  if (!res.ok) throw new ApiError(res.status, `Request failed (${res.status}).`);
+  return URL.createObjectURL(await res.blob());
+}
+
 export interface ParamDef { key: string; label: string; type: 'string' | 'secret' | 'url' | 'number' | 'boolean'; required: boolean; help?: string }
 export interface Adapter {
   key: string; kind: 'telephony' | 'voice'; displayName: string; docsUrl: string;
@@ -43,7 +50,7 @@ export interface Provider {
   id: string; adapter_key: string; kind: string; name: string; params: Record<string, unknown>;
   status: string; secrets_stored: boolean; credentials_checked_at: string | null; capabilities: Capability[];
 }
-export interface Component { component: string; unit: string; rate: string; currency: string; billing_line: string }
+export interface Component { component: string; unit: string; rate: string; currency: string; billing_line: string; direction: string }
 export interface ChargingVersion {
   id: string; version: number; effective_from: string; billing_increment_seconds: number;
   minimum_charge_seconds: number; rounding: string; concurrency_limit: number | null;
@@ -53,3 +60,65 @@ export interface ChargingVersion {
 export interface Tenant { id: string; name: string; created_at: string }
 export interface Project { id: string; name: string }
 export interface CreditSummary { balance: string; recent: { id: number; kind: string; credits: string; ref: string | null; created_at: string }[] }
+
+export interface FxRate { id: number; currency: string; per_usd: string; effective_from: string }
+export interface RateCard { id: number; effective_from: string; inbound_credits_per_minute: string; outbound_credits_per_minute: string; credit_value_usd: string }
+export interface PhoneNumber { id: string; provider_id: string; e164: string; tenant_id: string; project_id: string | null; country: string; label: string | null }
+export interface DncRegistry { country: string; requirement: 'registry' | 'none_required'; source: string; national_entries: number }
+export interface CallRow {
+  id: string; tenant_id: string; provider_id: string; direction: string; status: string; country: string | null;
+  started_at: string; ended_at: string | null; duration_seconds: string | null; end_reason: string | null; cost_status: string; cost_error?: string | null;
+}
+export interface CostLine { component: string; billing_line: string; unit: string; quantity: string; billed_seconds: number | null; rate: string; currency: string; amount: string; amount_usd: string }
+export interface CallCost { status: string; total_usd: string; total_myr: string; credits_drawn: string; margin_usd: string; lines: CostLine[] }
+export interface Reconciliation { id: number; source: string; outcome: string; our_cost_usd: string; reported_cost_usd: string | null; detail: string; created_at: string }
+export interface CampaignCost { project_id: string | null; project: string | null; calls: number; total_usd: string; total_myr: string; credits_drawn: string; margin_usd: string }
+export interface CallEvent { id: number; type: string; occurred_at: string }
+export interface ReferenceRate { adapterKey: string; summary: string }
+
+export interface Alert { severity: 'high' | 'medium' | 'low'; code: string; message: string; link?: string }
+export interface ProviderHealth {
+  id: string; name: string; adapter: string; kind: string; status: string; credentialsCheckedAt: string | null;
+  ratesInForce: boolean; ratesConfirmed: boolean; calls24h: { total: number; completed: number; unanswered: number; failed: number }; lastCall: string | null;
+}
+export interface MoneyWindow { calls: number; cost_usd: string; cost_myr: string; credits_drawn: string; margin_usd: string }
+export interface Tower {
+  generatedAt: string; alerts: Alert[]; blocked24h: number; activeTotal: number; providers: ProviderHealth[];
+  activeCalls: { id: string; direction: string; status: string; started_at: string; provider_id: string }[];
+  funding: { provider_id: string; provider: string; currency: string; balance: string; entries: number }[];
+  money: { last24h: MoneyWindow; last7d: MoneyWindow };
+}
+export interface PhaseProgress {
+  id: string; name: string; status: 'done' | 'in_progress' | 'not_started'; summary: string; open: string[];
+  criteria: { text: string; state: 'met' | 'partly' | 'not_met'; proof: 'tests' | 'fakes' | 'live' | 'none'; note?: string }[];
+}
+export interface Progress { generatedAt: string; phases: PhaseProgress[]; crossCutting: PhaseProgress['criteria']; decisions: string[] }
+
+export interface WorkflowSummary { id: string; tenant_id: string; name: string; latest_version: string | null; staging_version: string | null; production_version: string | null }
+export interface WfIssue { code: string; nodeId?: string; message: string }
+export interface WfVersion { id: string; version: string; change: string; valid: boolean; issues: { errors: WfIssue[]; warnings: WfIssue[] }; note: string | null; created_at: string; definition: WorkflowDef }
+export interface WorkflowDef { start: string; variables?: string[]; nodes: Record<string, { type: string; speech?: string; text?: string | Record<string, string>; transitions?: { when?: unknown; to: string }[]; workflow?: string; target?: unknown; outcome?: string; integration?: string; label?: string }> }
+export interface WorkflowDetailData { id: string; tenant_id: string; name: string; live: { staging: string | null; production: string | null }; previous: { staging: string | null; production: string | null }; history: { id: number; environment: string; kind: string; version: string; created_at: string }[]; versions: WfVersion[] }
+export interface TemplateInfo { key: string; title: string; description: string; entry: string; workflows: { key: string; description: string }[] }
+export interface SimResult { batchId: string; total: number; passed: number; failed: number; clean: boolean; gateProblems?: string[]; results: { name: string; passed: boolean; outcome: string | null; failures: string[] }[] }
+export interface RunView { id: string; version: number; status: string; outcome: string | null; error: string | null; said: string[]; awaiting: { captureAs: string } | null }
+
+export interface PoolNumber extends PhoneNumber { status: string; use_count: number; last_used_at: string | null; failures: number; contacts_locked: number }
+export interface Recording { id: string; language: string; text: string; version: number; label: string | null; content_type: string; duration_ms: number; created_at: string }
+export interface RecordingGaps { covered: number; missingCharacters: number; missing: { node: string; language: string; text: string; characters: number }[] }
+export interface StitchReport {
+  scenarios: number; unstitched: { synthChars: number; costUsd: string }; stitched: { synthChars: number; recordedChars: number; costUsd: string };
+  saved: { chars: number; costUsd: string; percent: string }; ratesConfirmed: boolean; note: string;
+}
+export interface OutboundReport {
+  period: { from: string; to: string }; notDialled: { blocked: number; noCallerId: number }; inFlight: number; attempts: number;
+  outcomes: { contacted: number; rejected: number; wrongNumber: number; thirdParty: number; unclassified: number; noAnswer: number; unreachable: number };
+  rates: { contactPercent: number | null; answerPercent: number | null };
+  bestCallbackTimes: { day: number; hour: number; time_zone: string; requests: number }[];
+}
+
+export interface HealthRow { provider_id: string; name: string; kind: string; status: string; state: 'healthy' | 'failed' | 'unfunded'; reason: string | null; since: string | null; ok_streak: number }
+export interface FailoverRow { id: number; scope: string; call_id: string | null; from_name: string | null; to_name: string | null; trigger: string; detail: Record<string, unknown>; at: string }
+export interface CapacityRow { providerId: string; name: string; active: number; ceiling: number | null }
+export interface FundingRow { providerId: string; provider: string; providerStatus: string; currency: string; balance: string; level: 'ok' | 'warn' | 'critical' | 'empty'; warnBelow: string | null; criticalBelow: string | null }
+export interface PolicyView { errorThreshold: number; errorWindowMs: number; latencyThresholdMs: number; latencyWindowMs: number; latencyMinSamples: number; deadAirMs: number; recoveryOkSamples: number; recoveryDwellMs: number }

@@ -33,8 +33,10 @@ const field = (scope: Page | Locator, label: string) => {
   const page = 'goto' in scope ? scope : scope.page(); // `has` is matched relative to each label, so build it from the page
   return scope.locator('label.field')
     .filter({ has: page.locator('span.label').filter({ hasText: new RegExp(`^${label}`) }) })
-    .locator('input, select').first();
+    .locator('input, select, textarea').first();
 };
+
+const goProviders = (page: Page) => page.getByRole('link', { name: 'Providers', exact: true }).click();
 
 async function signIn(page: Page, token: string) {
   await page.goto(base);
@@ -43,6 +45,93 @@ async function signIn(page: Page, token: string) {
 }
 
 describe.skipIf(!run)('admin UI', () => {
+  it('opens on the Control Tower: what needs attention, honest project progress, and the live panels', async () => {
+    const page = await browser.newPage();
+    await signIn(page, env.staffToken);
+    await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
+
+    // A fresh installation: the two gaps every one has, each a link to where it is fixed.
+    const attention = page.getByLabel('Needs attention');
+    await expect(attention.getByRole('link', { name: /No MYR exchange rate/ })).toBeVisible();
+    await expect(attention).toContainText('no client rate card');
+    await attention.getByRole('link', { name: /No MYR exchange rate/ }).click();
+    await expect(page.getByRole('heading', { name: 'Rates', level: 1 })).toBeVisible();
+    await page.getByRole('link', { name: 'Control Tower', exact: true }).click();
+
+    // Progress: counts come from the data, and nothing is called done that is not.
+    const progress = page.getByLabel('Project progress');
+    await expect(progress).toContainText('0 of 9 done');
+    await expect(progress).toContainText('Nothing has yet been proven against the real Twilio');
+    const p0 = page.getByLabel('Phase 0');
+    await expect(p0).toContainText('In progress');
+    await expect(p0).toContainText('3 of 3 exit criteria met');
+    const p1 = page.getByLabel('Phase 1');
+    await expect(p1).toContainText('1 of 3 exit criteria met, 1 partly');
+    await p1.getByText('Details').click();
+    await expect(p1.getByText('Inbound and outbound test calls work on both Twilio and Telnyx.')).toBeVisible();
+    await expect(p1).toContainText('tested against fakes, not the real provider');
+    await expect(p1).toContainText('Still open');
+    await expect(page.getByLabel('Phase 5')).toContainText('Not started');
+    await expect(page.getByLabel('Control Tower', { exact: true }).first()).toBeVisible();
+    await expect(page.getByLabel('Applies to every phase')).toContainText('configured model tier');
+    await progress.getByText('10 open decisions').click();
+    await expect(progress.getByText('Hosting region')).toBeVisible();
+
+    // Live panels, empty on a fresh installation, and plain about what they cannot show yet.
+    await expect(page.getByLabel('Live calls')).toContainText('No calls in progress');
+    await expect(page.getByLabel('Provider health')).toContainText('No providers yet');
+    await expect(page.getByLabel('Funding')).toContainText('No funding recorded yet');
+    await expect(page.getByLabel('Cost and margin')).toContainText('Last 24 hours');
+    await page.close();
+  }, 60_000);
+
+  it('updates as the platform is set up, and the alerts link to the fix', async () => {
+    const st = env.staffToken;
+    const prov = (await env.call(st, 'POST', '/internal/providers', {
+      adapterKey: 'telnyx', name: 'tx tower', params: { apiKey: 'k', webhookUrl: 'https://x.example/h' },
+    })).json().id;
+    const page = await browser.newPage();
+    await signIn(page, st);
+    const attention = page.getByLabel('Needs attention');
+    const link = attention.getByRole('link', { name: /tx tower: no webhook signing public key/ });
+    await expect(link).toBeVisible();
+    await expect(page.getByLabel('Provider health').getByRole('row', { name: /tx tower/ })).toContainText('none'); // no rates yet
+    await link.click();
+    await expect(page.getByRole('heading', { name: 'tx tower' })).toBeVisible();
+    expect(page.url()).toContain(prov);
+    await page.close();
+  });
+
+  it('says so when a refresh fails, instead of showing old numbers as current', async () => {
+    const page = await browser.newPage();
+    await signIn(page, env.staffToken);
+    await expect(page.getByLabel('Needs attention')).toBeVisible();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await page.route('**/internal/control-tower', (route) => route.abort());
+    await page.getByRole('button', { name: 'Refresh now' }).click();
+    await expect(page.getByRole('alert')).toContainText('may be out of date');
+    await expect(page.getByLabel('Needs attention')).toBeVisible(); // what was shown stays, but is no longer presented as current
+    await page.unroute('**/internal/control-tower');
+    await page.getByRole('button', { name: 'Refresh now' }).click();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await page.close();
+  });
+
+  it('says when it is showing only the newest of many live calls', async () => {
+    const st = env.staffToken;
+    const t = (await env.call(st, 'POST', '/internal/tenants', { name: 'Busy Co' })).json().id;
+    const prov = (await env.call(st, 'POST', '/internal/providers', { adapterKey: 'twilio', name: 'tw busy', params: { accountSid: 'ACb', authToken: 'x', twimlAppVoiceUrl: 'https://x.example/v' } })).json().id;
+    const { randomUUID } = await import('node:crypto');
+    for (let i = 0; i < 25; i++) {
+      await env.pool.query(`INSERT INTO calls (id, tenant_id, provider_id, direction, status) VALUES ($1,$2,$3,'inbound','in_progress')`, [randomUUID(), t, prov]);
+    }
+    const page = await browser.newPage();
+    await signIn(page, st);
+    await expect(page.getByLabel('Live calls')).toContainText('Showing the newest 20 of 25 calls in progress');
+    await env.pool.query(`DELETE FROM calls WHERE tenant_id = $1`, [t]);
+    await page.close();
+  });
+
   it('rejects a bad token and a client token', async () => {
     const page = await browser.newPage();
     await signIn(page, 'not-a-token');
@@ -55,7 +144,7 @@ describe.skipIf(!run)('admin UI', () => {
     await page.getByLabel('API token').fill(u.token);
     await page.getByRole('button', { name: 'Sign in' }).click();
     await expect.poll(() => dialog).toContain('Daythree staff');
-    await expect(page.getByRole('heading', { name: 'Providers' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toHaveCount(0);
     await page.close();
   });
 
@@ -64,6 +153,7 @@ describe.skipIf(!run)('admin UI', () => {
     await signIn(page, env.staffToken);
 
     // Providers: the form is built from the adapter declaration.
+    await goProviders(page);
     await expect(page.getByRole('heading', { name: 'Providers' })).toBeVisible();
     await page.getByLabel('Provider type').selectOption('twilio');
     await expect(page.locator('label.field', { hasText: 'Auth Token' })).toBeVisible();
@@ -158,6 +248,7 @@ describe.skipIf(!run)('admin UI', () => {
   it('shows a provider outage clearly and lets the operator save without checking', async () => {
     const page = await browser.newPage();
     await signIn(page, env.staffToken);
+    await goProviders(page);
     env.provider.state.respond = () => { throw new Error('getaddrinfo ENOTFOUND api.telnyx.com'); };
     await page.getByLabel('Provider type').selectOption('telnyx');
     const form = page.getByRole('form', { name: 'Add provider' });
@@ -179,12 +270,354 @@ describe.skipIf(!run)('admin UI', () => {
     await page.close();
   });
 
+  it('manages rates, numbers and do-not-call lists from forms, and says plainly what is missing', async () => {
+    const st = env.staffToken;
+    const t = (await env.call(st, 'POST', '/internal/tenants', { name: 'Screens Co' })).json().id;
+    const prov = (await env.call(st, 'POST', '/internal/providers', {
+      adapterKey: 'twilio', name: 'tw screens', params: { accountSid: 'AC7', authToken: 'tok', twimlAppVoiceUrl: 'https://x.example/v' },
+    })).json().id;
+    const page = await browser.newPage();
+    await signIn(page, st);
+
+    // Rates: warns until MYR and a rate card exist, then the warnings go away.
+    await page.getByRole('link', { name: 'Rates' }).click();
+    await expect(page.getByText('No MYR rate yet')).toBeVisible();
+    await expect(page.getByText('No rate card yet')).toBeVisible();
+    const fx = page.getByRole('form', { name: 'Add FX rate' });
+    await field(fx, 'Per 1 USD').fill('4.5');
+    await field(fx, 'Effective from').fill('2026-01-01T00:00');
+    await fx.getByRole('button', { name: 'Add rate' }).click();
+    await expect(page.getByText('No MYR rate yet')).toHaveCount(0);
+    await expect(page.getByRole('cell', { name: 'MYR' })).toBeVisible();
+    const card = page.getByRole('form', { name: 'Add rate card' });
+    await field(card, 'Inbound credits').fill('1');
+    await field(card, 'Outbound credits').fill('2');
+    await field(card, 'Value of one credit').fill('0.01');
+    await field(card, 'Effective from').fill('2026-01-01T00:00');
+    await card.getByRole('button', { name: 'Add rate card' }).click();
+    await expect(page.getByText('No rate card yet')).toHaveCount(0);
+
+    // Reference rates on a provider page: saved unconfirmed, with direction-specific lines.
+    await page.goto(`${base}#/providers/${prov}`);
+    const ref = page.getByRole('form', { name: 'Use reference rates' });
+    await expect(ref).toContainText('$0.014 per outbound minute');
+    await field(ref, 'Billing increment').fill('60');
+    await field(ref, 'Effective from').fill('2026-01-01T00:00');
+    await ref.getByRole('button', { name: 'Add reference rates' }).click();
+    await expect(page.getByRole('heading', { name: /Version 1/ })).toContainText('Unconfirmed');
+    await expect(page.getByRole('cell', { name: 'inbound only' })).toBeVisible();
+    await expect(page.getByRole('cell', { name: 'outbound only' })).toBeVisible();
+
+    // Numbers.
+    await page.getByRole('link', { name: 'Numbers' }).click();
+    const num = page.getByRole('form', { name: 'Add number' });
+    await num.getByLabel('Provider').selectOption({ label: 'tw screens' });
+    await field(num, 'Number').fill('+60312340000');
+    await num.getByLabel('Client').selectOption({ label: 'Screens Co' });
+    await num.getByRole('button', { name: 'Register number' }).click();
+    await expect(page.getByRole('cell', { name: '+60312340000' })).toBeVisible();
+
+    // Do not call: nothing is allowed until a country is declared.
+    await page.getByRole('link', { name: 'Do not call' }).click();
+    const chk = page.getByRole('form', { name: 'Check number' });
+    const runCheck = async (n: string) => {
+      await chk.getByLabel('Client').selectOption({ label: 'Screens Co' });
+      await field(chk, 'Country').fill('MY');
+      await field(chk, 'Number').fill(n);
+      await chk.getByRole('button', { name: 'Check' }).click();
+    };
+    await runCheck('+60187654321');
+    await expect(page.getByRole('alert')).toContainText('no do-not-call position has been declared');
+
+    const decl = page.getByRole('form', { name: 'Declare country' });
+    await field(decl, 'Country').fill('MY');
+    await field(decl, 'Source or note').fill('Registry file Oct 2026');
+    await decl.getByRole('button', { name: 'Declare' }).click();
+    await expect(page.getByRole('cell', { name: 'Registry in force' })).toBeVisible();
+
+    const load = page.getByRole('form', { name: 'Load numbers' });
+    await field(load, 'Country').fill('MY');
+    await load.getByLabel('Numbers').fill('+60187654321\nnot a number');
+    await load.getByRole('button', { name: 'Load numbers' }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'Added 1' })).toContainText('not valid 1');
+
+    await runCheck('+60 18-765 4321');
+    await expect(page.getByRole('alert')).toContainText('on the national registry');
+    await runCheck('+60111111111');
+    await expect(page.getByRole('status').filter({ hasText: 'Allowed' })).toBeVisible();
+    expect(await page.content()).not.toContain('87654321'); // the registry numbers are never shown back
+    await page.close();
+  }, 60_000);
+
+  it('shows calls with their costs, and lets an operator reconcile one or re-price a failed one', async () => {
+    const st = env.staffToken;
+    const t = (await env.call(st, 'POST', '/internal/tenants', { name: 'Calls Co' })).json().id;
+    const pj = (await env.call(st, 'POST', `/internal/tenants/${t}/projects`, { name: 'Autumn push' })).json().id;
+    const prov = (await env.call(st, 'POST', '/internal/providers', {
+      adapterKey: 'twilio', name: 'tw calls', params: { accountSid: 'AC8', authToken: 'tok', twimlAppVoiceUrl: 'https://x.example/v' },
+    })).json().id;
+    await env.call(st, 'POST', '/internal/fx', { currency: 'MYR', perUsd: '4.5', effectiveFrom: '2025-01-01T00:00:00Z' }).catch(() => undefined);
+    const mk = async (sid: string, status: string, priced: boolean) => {
+      const id = (await import('node:crypto')).randomUUID();
+      await env.pool.query(
+        `INSERT INTO calls (id, tenant_id, project_id, provider_id, provider_call_id, direction, status, country, started_at, answered_at, ended_at, duration_seconds, end_reason, cost_status)
+         VALUES ($1,$2,$3,$4,$5,'outbound',$6,'MY', now() - interval '3 hours', now() - interval '3 hours', now() - interval '2 hours', 61, 'completed', 'pending')`,
+        [id, t, pj, prov, sid, status]);
+      if (priced) {
+        await env.call(st, 'POST', `/internal/calls/${id}/cost`, { tenantId: t, projectId: pj, direction: 'outbound', occurredAt: new Date(Date.now() - 3 * 3_600_000).toISOString(), usage: [{ providerId: prov, usage: { seconds: 61 } }] });
+        await env.pool.query(`UPDATE calls SET cost_status = 'recorded' WHERE id = $1`, [id]);
+      } else {
+        await env.pool.query(`UPDATE calls SET cost_status = 'failed', cost_error = 'no charging version' WHERE id = $1`, [id]);
+      }
+      return id;
+    };
+    // The provider needs rates for the priced call.
+    await env.call(st, 'POST', `/internal/providers/${prov}/charging`, {
+      effectiveFrom: '2025-06-01T00:00:00Z', billingIncrementSeconds: 60,
+      components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.0140', currency: 'USD' }],
+    });
+    const good = await mk('CA_ui_good', 'completed', true);
+    await mk('CA_ui_failed', 'completed', false);
+
+    const page = await browser.newPage();
+    await signIn(page, st);
+    await page.getByRole('link', { name: 'Calls', exact: true }).click();
+    await expect(page.getByRole('cell', { name: 'Autumn push' })).toBeVisible();
+    await expect(page.getByText('Could not price')).toBeVisible();
+
+    // A call that was priced but not yet checked against the provider.
+    const row = page.locator('tr', { has: page.getByText('Estimated') }).first();
+    await row.getByRole('button', { name: 'Details' }).click();
+    const detail = page.getByLabel('Call detail');
+    await expect(detail).toContainText('0.028 USD'); // 61s billed as 2 minutes at 0.014
+    await expect(detail.getByText('telephony_leg')).toBeVisible();
+
+    env.provider.state.respond = () => new Response(JSON.stringify({ duration: '61', price: '-0.0500', price_unit: 'USD' }), { status: 200 });
+    await detail.getByRole('button', { name: /Check against the provider/ }).click();
+    await expect(detail.getByRole('status')).toContainText('variance');
+    await expect(detail.getByText('Differs from provider').first()).toBeVisible();
+
+    // The operator enters the provider's corrected figures by hand.
+    const manual = detail.getByRole('form', { name: "Enter the provider's figures" });
+    await field(manual, "Provider's cost").fill('0.028');
+    await manual.getByRole('button', { name: 'Compare my figures' }).click();
+    await expect(detail.getByRole('status')).toContainText('matched');
+    await expect(detail.getByText('Reconciled', { exact: true }).first()).toBeVisible();
+    expect((await env.call(st, 'GET', `/internal/calls/${good}`)).json().cost_status).toBe('reconciled');
+
+    // A call that could not be priced offers a re-price, which works once the cause is fixed.
+    await page.getByRole('row', { name: /Could not price/ }).getByRole('button', { name: 'Details' }).click();
+    const failed = page.getByLabel('Call detail');
+    await expect(failed.getByRole('alert')).toContainText('could not be priced');
+    await failed.getByRole('button', { name: 'Re-price' }).click();
+    await expect(page.getByText('Could not price')).toHaveCount(0);
+    await page.close();
+  }, 60_000);
+
+  it('fits a phone screen on every page, with no sideways scrolling of the page', async () => {
+    const provider = (await env.pool.query('SELECT id FROM providers ORDER BY created_at LIMIT 1')).rows[0].id;
+    const tenant = (await env.call(env.staffToken, 'POST', '/internal/tenants', { name: 'Phone Width Co' })).json().id;
+    const workflow = (await env.call(env.staffToken, 'POST', `/internal/tenants/${tenant}/workflows`, {
+      name: 'phone_width', definition: { start: 'a', nodes: { a: { type: 'speak', speech: 'fixed', text: 'Hello', transitions: [{ to: 'b' }] }, b: { type: 'end', outcome: 'x' } } } })).json().workflow.id;
+    const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
+    await signIn(page, env.staffToken);
+    await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
+    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience']) {
+      await page.goto(`${base}#/${route}`);
+      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+      const width = await page.evaluate(() => document.documentElement.scrollWidth);
+      expect(width, `#/${route} is ${width}px wide on a 390px screen`).toBeLessThanOrEqual(390);
+    }
+    await page.close();
+  }, 60_000);
+
+  it('creates the debt-collection template for a client from a form', async () => {
+    const t = (await env.call(env.staffToken, 'POST', '/internal/tenants', { name: 'UI Template Co' })).json().id;
+    const page = await browser.newPage();
+    await signIn(page, env.staffToken);
+    await page.getByRole('link', { name: 'Workflows', exact: true }).click();
+    const form = page.getByRole('form', { name: 'Start from a template' });
+    await field(form, 'Client').selectOption({ label: 'UI Template Co' });
+    await field(form, 'Template').selectOption({ label: 'Debt collection (Malaysia)' });
+    await expect(form).toContainText('Bahasa Malaysia');
+    await expect(form).toContainText('Creates: collections, verify_identity, partial_payment, human_transfer');
+    await form.getByRole('button', { name: 'Create from template' }).click();
+    await expect(form.getByRole('status')).toContainText('Created collections, verify_identity, partial_payment, human_transfer');
+    for (const name of ['collections', 'verify_identity', 'partial_payment', 'human_transfer']) {
+      await expect(page.getByRole('row', { name: new RegExp(`^${name} UI Template Co 1\\.0`) })).toBeVisible();
+    }
+    void t;
+    await page.close();
+  });
+
+  it('takes a workflow through editing, the publishing gates, a rollback and a test call, all from the console', async () => {
+    const st = env.staffToken;
+    const tenant = (await env.call(st, 'POST', '/internal/tenants', { name: 'UI Flow Co' })).json().id;
+    const def = (wording: string) => ({
+      start: 'ask', nodes: {
+        ask: { type: 'speak', speech: 'fixed', text: wording, listen: { captureAs: 'who' }, transitions: [{ to: 'meet' }] },
+        meet: { type: 'speak', speech: 'hybrid', text: 'Nice to meet you, {{who}}.', transitions: [{ to: 'end' }] },
+        end: { type: 'end', outcome: 'met' },
+      },
+    });
+    const wfId = (await env.call(st, 'POST', `/internal/tenants/${tenant}/workflows`, { name: 'greeter', definition: def('What is your name?') })).json().workflow.id;
+
+    const page = await browser.newPage();
+    await signIn(page, st);
+    await page.goto(`${base}#/workflows/${wfId}`);
+    await expect(page.getByRole('heading', { name: 'greeter', level: 1 })).toBeVisible();
+    const versions = page.getByLabel('Versions');
+    await expect(versions.getByRole('row', { name: /^1\.0 initial ready/ })).toBeVisible();
+    await expect(page.getByLabel('Outline')).toContainText('“What is your name?”');
+
+    // the gates, in order: production is refused before staging; then staging works
+    await versions.getByRole('button', { name: 'Put 1.0 in production' }).click();
+    await expect(versions.getByRole('alert')).toContainText('not live in staging');
+    await versions.getByRole('button', { name: 'Put 1.0 in staging' }).click();
+    await expect(versions.getByRole('status')).toContainText('Version 1.0 is now live in staging');
+    await versions.getByRole('button', { name: 'Put 1.0 in production' }).click();
+    await expect(versions.getByRole('alert')).toContainText('no clean simulation');
+
+    // a simulation: a failing script first, then a passing one
+    const sim = page.getByLabel('Simulation');
+    const runSim = async (scenarios: unknown) => { await field(sim, 'Scenarios').fill(JSON.stringify(scenarios)); await sim.getByRole('button', { name: 'Run simulation' }).click(); };
+    await runSim([{ name: 'wrong hope', variables: {}, replies: ['Wei'], expect: { outcome: 'refused' } }]);
+    await expect(sim.getByRole('alert')).toContainText('0 of 1 passed');
+    await expect(sim).toContainText('Expected the outcome "refused" but got "met"');
+    await runSim([{ name: 'meets', variables: {}, replies: ['Wei'], expect: { outcome: 'met', says: ['Nice to meet you, Wei'] } }]);
+    await expect(sim.getByRole('status')).toContainText('1 of 1 passed. This version can now go to production');
+    await versions.getByRole('button', { name: 'Put 1.0 in production' }).click();
+    await expect(versions.getByRole('status')).toContainText('live in production');
+
+    // a wording change is a minor version, and goes live the same way
+    const edit = page.locator('section[aria-label="Edit"]');
+    await field(edit, 'Definition').fill(JSON.stringify(def('Hello! What should I call you?'), null, 2));
+    await edit.getByRole('button', { name: 'Save as a new version' }).click();
+    await expect(edit.getByRole('status').filter({ hasText: 'Saved as version' })).toContainText('Saved as version 1.1 (minor change)');
+    await versions.getByRole('button', { name: 'Put 1.1 in staging' }).click();
+    await runSim([{ name: 'meets', variables: {}, replies: ['Wei'], expect: { outcome: 'met' } }]);
+    await expect(sim.getByRole('status')).toContainText('1 of 1 passed');
+    await versions.getByRole('button', { name: 'Put 1.1 in production' }).click();
+    await expect(versions.getByRole('status')).toContainText('Version 1.1 is now live in production');
+
+    // and can be rolled back
+    await versions.getByRole('button', { name: 'Roll production back to 1.0' }).click();
+    await expect(versions.getByRole('status')).toContainText('Production is back on version 1.0');
+    await expect(page.getByText('Live in production: 1.0')).toBeVisible();
+
+    // a dangling path is caught when checking, can be saved as work in progress, and cannot be published
+    const broken = def('What is your name?'); (broken.nodes.ask.transitions as { to: string }[])[0]!.to = 'nowhere';
+    await field(edit, 'Definition').fill(JSON.stringify(broken, null, 2));
+    await edit.getByRole('button', { name: 'Check for problems' }).click();
+    await expect(edit.getByRole('alert')).toContainText('3 problems to fix before this can be published');
+    await expect(edit.getByRole('alert')).toContainText('"nowhere", which does not exist');
+    await expect(edit.getByRole('alert')).toContainText('Nothing leads to "meet"'); // cutting the path also strands what came after it
+    await edit.getByRole('button', { name: 'Save as a new version' }).click();
+    await expect(edit.getByRole('status').filter({ hasText: 'Saved as version' })).toContainText('cannot be published yet');
+    await expect(versions.getByRole('row', { name: /^2\.0 major 3 problems/ })).toBeVisible();
+    await versions.getByRole('button', { name: 'Put 2.0 in staging' }).click();
+    await expect(versions.getByRole('alert')).toContainText('cannot be published');
+    await expect(versions.getByRole('alert')).toContainText('"nowhere", which does not exist');
+    await expect(page.getByText('Live in staging: 1.1')).toBeVisible(); // unchanged
+
+    // invalid JSON is said plainly
+    await field(edit, 'Definition').fill('{ not json');
+    await edit.getByRole('button', { name: 'Save as a new version' }).click();
+    await expect(edit.getByRole('alert')).toContainText('not valid JSON');
+
+    // a test call against what is live in staging
+    const call = page.getByLabel('Test call');
+    await call.getByRole('button', { name: 'Start the call' }).click();
+    await expect(call.getByLabel('Transcript')).toContainText('Hello! What should I call you?');
+    await field(call.getByRole('form', { name: 'Reply' }), 'What the caller says').fill('Aisha');
+    await call.getByRole('button', { name: 'Send' }).click();
+    await expect(call.getByLabel('Transcript')).toContainText('Nice to meet you, Aisha.');
+    await expect(call.getByLabel('Transcript')).toContainText('The call ended: met');
+    await page.close();
+  }, 90_000);
+
+  it('records fixed words, shows what is still worth recording, and reads outbound results', async () => {
+    const st = env.staffToken;
+    const tenant = (await env.call(st, 'POST', '/internal/tenants', { name: 'Stitch UI Co' })).json().id;
+    const wf = (await env.call(st, 'POST', `/internal/tenants/${tenant}/workflows`, { name: 'stitch_ui', definition: {
+      start: 'a', variables: ['name'], nodes: { a: { type: 'speak', speech: 'hybrid', text: 'Hello {{name}}, welcome.', transitions: [{ to: 'z' }] }, z: { type: 'end', outcome: 'ok' } } } })).json().workflow.id;
+    const page = await browser.newPage();
+    await signIn(page, st);
+
+    // what is still worth recording
+    await page.goto(`${base}#/workflows/${wf}`);
+    const stitching = page.getByLabel('Stitching');
+    await expect(stitching).toContainText('0 recorded, 2 still to record');
+    await expect(stitching.getByRole('row', { name: /^, welcome\. en a$/ })).toBeVisible();
+
+    // record it from a file
+    await page.goto(`${base}#/recordings`);
+    await field(page, 'Client').selectOption({ label: 'Stitch UI Co' });
+    const wav = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WAVE'), Buffer.alloc(64, 1)]);
+    await field(page, 'Words spoken').fill(', welcome.');
+    await page.getByLabel(/^Audio file/).setInputFiles({ name: 'welcome.wav', mimeType: 'audio/wav', buffer: wav });
+    await field(page, 'Length \\(seconds\\)').fill('1.8');
+    await page.getByRole('button', { name: 'Save recording' }).click();
+    await expect(page.getByRole('row', { name: /^, welcome\. en 1 1\.8 s/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Play' })).toBeVisible();
+
+    // a file that is not audio is refused with a plain message
+    await field(page, 'Words spoken').fill('Not audio');
+    await page.getByLabel(/^Audio file/).setInputFiles({ name: 'x.wav', mimeType: 'audio/wav', buffer: Buffer.from('#!/bin/sh') });
+    await field(page, 'Length \\(seconds\\)').fill('1');
+    await page.getByRole('button', { name: 'Save recording' }).click();
+    await expect(page.getByRole('alert')).toContainText('does not look like audio/wav');
+
+    await page.goto(`${base}#/workflows/${wf}`);
+    await expect(page.getByLabel('Stitching')).toContainText('1 recorded, 1 still to record');
+
+    // outbound results, with nothing dialled yet
+    await page.goto(`${base}#/outbound`);
+    await field(page, 'Client').selectOption({ label: 'Stitch UI Co' });
+    await expect(page.getByLabel('Rates')).toContainText('no attempts yet');
+    await expect(page.getByLabel('Best times to call back')).toContainText('No callback times captured');
+    await page.close();
+  }, 60_000);
+
+  it('shows which providers have failed over and why, funding levels, and saves alert levels and failover rules', async () => {
+    const st = env.staffToken;
+    const pid = (await env.call(st, 'POST', '/internal/providers', { adapterKey: 'elevenlabs', name: 'ui-voice', params: { apiKey: 'k' } })).json().id;
+    for (let i = 0; i < 3; i++) expect((await env.call(st, 'POST', `/internal/providers/${pid}/samples`, { kind: 'error' })).statusCode).toBe(201);
+    expect((await env.call(st, 'POST', `/internal/providers/${pid}/funding`, { kind: 'topup', amount: '40', currency: 'USD' })).statusCode).toBe(201);
+
+    const page = await browser.newPage();
+    await signIn(page, st);
+    await page.goto(`${base}#/resilience`);
+    await expect(page.getByRole('heading', { name: 'Resilience', level: 1 })).toBeVisible();
+    await expect(page.getByLabel('Provider health').getByRole('row', { name: /^ui-voice Failed over Repeated errors\./ })).toBeVisible();
+    await expect(page.getByLabel('Recent failovers')).toContainText('hard errors');
+    await expect(page.getByLabel('Funding').getByRole('row', { name: /^ui-voice 40 USD OK not set not set$/ })).toBeVisible();
+
+    const levels = page.getByLabel('Funding alert levels');
+    await field(levels, 'Provider').selectOption({ label: 'ui-voice' });
+    await field(levels, 'Warn below').fill('50');
+    await field(levels, 'Critical below').fill('10');
+    await levels.getByRole('button', { name: 'Save levels' }).click();
+    await expect(page.getByLabel('Funding').getByRole('row', { name: /^ui-voice 40 USD Running low 50 10$/ })).toBeVisible();
+
+    await field(levels, 'Warn below').fill('50');                           // a critical level above the warning level is refused
+    await field(levels, 'Critical below').fill('60');
+    await levels.getByRole('button', { name: 'Save levels' }).click();
+    await expect(levels.getByRole('alert')).toContainText('critical level must not be above');
+
+    const rules = page.getByLabel('Failover rules');
+    await field(rules, 'Errors before failing over').fill('5');
+    await rules.getByRole('button', { name: 'Save rules' }).click();
+    await expect(field(rules, 'Errors before failing over')).toHaveAttribute('placeholder', '5');
+    await page.close();
+  }, 60_000);
+
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();
     await signIn(page, env.staffToken);
-    await expect(page.getByRole('heading', { name: 'Providers' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
     await page.reload();
-    await expect(page.getByRole('heading', { name: 'Providers' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
     await page.close();
   });
 });

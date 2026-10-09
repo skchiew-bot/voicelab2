@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { redactNumbers, TEST_CALL_MESSAGE, type Fetch, type NormalizedEvent } from './types.js';
+import { ProviderRefused, redactNumbers, HOLD_MESSAGE, TEST_CALL_MESSAGE, type Fetch, type NormalizedEvent } from './types.js';
 
 const basic = (user: string, pass: string) => 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
 
@@ -28,10 +28,19 @@ export async function twilioPlaceCall(
     throw new Error(`Could not reach Twilio: ${redactNumbers((err as Error).message)}`);
   }
   const body = (await res.json().catch(() => null)) as { sid?: string; message?: string } | null;
-  if (!res.ok || !body?.sid) {
-    throw new Error(`Twilio refused the call (HTTP ${res.status})${body?.message ? `: ${redactNumbers(body.message)}` : ''}`);
-  }
+  if (!res.ok) throw new ProviderRefused(`Twilio refused the call (HTTP ${res.status})${body?.message ? `: ${redactNumbers(body.message)}` : ''}`);
+  // A success with no call id is not a refusal: the call may have been placed, so it is not tried elsewhere.
+  if (!body?.sid) throw new Error(`Twilio answered (HTTP ${res.status}) without a call id`);
   return { providerCallId: body.sid };
+}
+
+/** End a call that is still up (used for a caller who has waited too long). */
+export async function twilioHangup(c: TwilioCreds, http: Fetch, callSid: string): Promise<void> {
+  const res = await http(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(c.accountSid)}/Calls/${encodeURIComponent(callSid)}.json`, {
+    method: 'POST', headers: { authorization: twilioAuth(c), 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ Status: 'completed' }).toString(), signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`Twilio hangup failed (HTTP ${res.status})`);
 }
 
 /**
@@ -77,4 +86,30 @@ export function parseTwilio(params: Record<string, string>, callIdHint?: string,
 const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 export const twimlTestCall = () =>
   `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${xml(TEST_CALL_MESSAGE)}</Say><Hangup/></Response>`;
+/** The hold message, then back to the voice URL, which says it again while the caller is still waiting. It never just ends. */
+export const twimlHold = (redirectUrl: string) =>
+  `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${xml(HOLD_MESSAGE)}</Say><Pause length="20"/><Redirect method="POST">${xml(redirectUrl)}</Redirect></Response>`;
 export const twimlReject = () => `<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>`;
+
+export type CallUsage = { state: 'pending' } | { state: 'ready'; seconds: number; cost: string; currency: string };
+
+/**
+ * What Twilio itself says a call lasted and cost. The price appears some time after the call ends, so
+ * "pending" means ask again later. Twilio reports charges as negative numbers; this returns the amount.
+ */
+export async function twilioFetchCallUsage(c: TwilioCreds, http: Fetch, callSid: string): Promise<CallUsage> {
+  let res: Response;
+  try {
+    res = await http(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(c.accountSid)}/Calls/${encodeURIComponent(callSid)}.json`, {
+      method: 'GET', headers: { authorization: twilioAuth(c) }, signal: AbortSignal.timeout(15_000),
+    });
+  } catch (err) {
+    throw new Error(`Could not reach Twilio: ${redactNumbers((err as Error).message)}`);
+  }
+  if (!res.ok) throw new Error(`Twilio would not return that call (HTTP ${res.status}).`);
+  const b = (await res.json().catch(() => null)) as { duration?: string | null; price?: string | null; price_unit?: string | null } | null;
+  if (!b || b.price === null || b.price === undefined || b.price === '' || b.duration === null || b.duration === undefined) return { state: 'pending' };
+  const cost = String(b.price).replace(/^-/, '');
+  if (!/^\d+(\.\d+)?$/.test(cost) || !/^\d+$/.test(String(b.duration))) throw new Error('Twilio returned a call record in a format Voice Lab does not recognise.');
+  return { state: 'ready', seconds: Number(b.duration), cost, currency: (b.price_unit ?? 'USD').toUpperCase() };
+}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ApiError } from './api';
 
 export function Errors({ error }: { error: unknown }) {
@@ -26,8 +26,11 @@ export function Field({ label, help, children }: { label: string; help?: string;
 export function useLoad<T>(load: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const latest = useRef(0);
   const reload = useCallback(() => {
-    load().then((d) => { setData(d); setError(null); }, setError);
+    // Only the newest request may update the screen, so a slow older answer cannot overwrite a newer one.
+    const mine = ++latest.current;
+    load().then((d) => { if (mine === latest.current) { setData(d); setError(null); } }, (e) => { if (mine === latest.current) setError(e); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
   useEffect(reload, [reload]);

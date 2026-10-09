@@ -99,7 +99,7 @@ Built and tested:
 - **Admin console** (`/admin/`, React single-page app served by the API): staff sign-in; add a provider from a form built from the adapter declaration; edit capabilities; add and confirm charging versions; record provider funding; add clients, projects, users and credits. Driven end to end in a real browser by `tests/admin-ui.test.ts`. Exit criterion 1 is now met through the UI.
 
 Not built yet:
-- Tenant switcher and the Control Tower shell.
+- A tenant switcher.
 - Redis and the job queue (nothing in Phase 0 needs them yet).
 - Finer roles and permissions beyond internal admin, tenant admin and tenant user.
 - The Docker install path has not been run end to end; its compose file validates, but it needs a real run.
@@ -143,16 +143,18 @@ Built and tested. The provider APIs are unreachable from the build environment, 
   - A call moves forward only (a late event cannot reopen or re-price it), is finished and priced exactly once even when callbacks race, and a pricing failure is recorded and retryable (`POST /internal/calls/:id/cost/retry`) instead of losing the call.
   - Customer numbers exist in memory while a call is set up and are never stored, logged or audited; provider error text is scrubbed of anything number-shaped.
   - Until Phase 2, every answered call plays a short test message and hangs up.
+- **Reconciliation** (`POST /internal/calls/:id/reconcile`, `POST /internal/reconcile/run`): a call's estimated cost is compared with the provider's own duration and price, and every figure the provider gave must be within a set tolerance (default 2%, `RECONCILE_TOLERANCE_PCT`; differences under a second or a hundredth of a cent are ignored). A match adds a "reconciled" cost record (no second draw of credits, and the campaign rollup counts each call once); a difference is stored, flagged on the call and logged, and the estimate is left alone. Twilio can be checked automatically; any provider can be checked from figures an operator enters, and the provider's price is required, since a duration alone cannot show the rate was right (Telnyx has no automatic check yet). Two checks of one call take turns, and re-pricing a call can never wipe its reconciled or variance flag. Twilio's price is sometimes not yet published, in which case the answer is "pending", not a guess.
+- **Direction-specific rates:** a rate can apply to inbound calls, outbound calls, or both, because providers charge them differently. A version that would charge a call twice (a line for any call plus one for a direction, or the same direction twice) is refused.
+- **Reference rates:** the blueprint's research figures can be saved onto a provider in one step, always as unconfirmed, with a billing increment the operator chooses (the research gives none).
+- **Console screens** for FX rates, the rate card, our numbers, do-not-call lists (with a dry-run check), and calls with their timeline, cost lines, reconciliation and re-pricing.
 - **Do-not-call gate**, failing closed: an unparseable number, or a country with no declared position, is blocked. Supports a national registry per country and each client's own opt-out list. Numbers are stored as keyed hashes. `gateOutbound` logs the decision to the call-event log without the number.
 
 Not built yet:
 - **Proof against the live services.** The Twilio and Telnyx request formats, status values and signature schemes were written from the providers' published behaviour, and their docs were not reachable while building, so they have not been checked against the real services. Exit criterion 1 (test calls on both) is not met until someone runs real test calls with live accounts, public URLs and `PUBLIC_BASE_URL` set.
 - **Talking to a caller.** The voice providers (OpenAI, ElevenLabs) are not connected to calls, so there is no voicebot yet. Do not point a real number at this: callers hear a test message and the call ends.
 - **A known gap in call control:** if the server stops in the instant between storing a Telnyx event and sending its reply command, that command is not re-sent (a retried event is skipped as a duplicate), so a call could sit unanswered.
-- **Reconciliation** against each provider's own usage data. Cost records are stored as `estimated`; nothing sets `reconciled` yet, so exit criterion 2 is only partly met.
+- **Automatic reconciliation for Telnyx**, and a schedule for the sweep (`POST /internal/reconcile/run` must be called, for example from a cron job). The sweep records each try, tries the longest-waiting call first, skips calls that never connected, and leaves a call for a person after 8 tries. The Twilio call-record fields used (`duration`, `price`, `price_unit`) were written from memory, like the rest of call control, and are unverified against the live service.
 - **Feeding usage into the cost record.** The record accepts seconds, characters and tokens; no live call yet supplies them.
-- **Reference rates.** There is no seeded starting data. Operators enter rates in the console and mark them confirmed.
-- **Console screens** for FX, the rate card, do-not-call lists and cost views. These are API only for now.
 
 **Exit criteria**
 - Inbound and outbound test calls work on both Twilio and Telnyx.
@@ -173,6 +175,25 @@ Goal: the minimum workflow engine that stitching and modules can hang off.
 - First template: debt collection, tailored to Malaysia.
 
 *Deferred to later in the phase or after it: the prompt-to-workflow builder. It needs its own credit pricing, and that is never set below the provider's token cost.*
+
+**Status (in progress)**
+
+Built and tested:
+- **The definition and validator:** a workflow is plain JSON (never executed): `speak` nodes (fixed, hybrid or dynamic), `api` calls, `subflow`, `handoff` and `end`, with conditions in a small fixed language. The validator refuses a missing start, an edge to a node that does not exist, a node nothing leads to, a variable that is used but never set, malformed conditions, a fixed node with slots or a hybrid one without, and more. A saved version with problems is kept but can never be published.
+- **The engine:** runs a call as a resumable step function over plain data, so it can wait for the caller and continue later. Routing takes the first condition that holds; if none does, the call ends cleanly. Subflows run inside a workflow and return their outcome; a handoff passes the call with every variable and does not come back (to another workflow, or to a person with a reason). A missing variable stops the call before anything wrong is said; a loop is stopped by limits on steps per request, steps per call and integration calls per call. Phone numbers, in any form and however deeply nested, are refused in a call's variables and in what an integration returns.
+- **Understanding replies:** by phrase rules, whole words only, and a match inside a longer phrase of another intent is ignored, so "tidak boleh" (cannot) is not read as "boleh" (can). Several intents is "ambiguous", none is "unknown".
+- **Versions:** an edit inside a node is a minor version (1.0 to 1.1); a change to where the call can go (nodes, transitions, conditions, targets) is major (1.1 to 2.0). Versions are immutable, and two saves at once get different numbers.
+- **Staging, production and rollback:** a version must be valid, every workflow it hands over to must be live in the same environment and receive every variable it needs, and subflows may not loop. Production also needs the version live in staging and a clean list-based simulation of that exact version, in which every scenario states the outcome it expects (none expecting a failure) and every workflow it reaches is, in production, the version that was simulated. A new version of a workflow is refused if a workflow already live in that environment would break on it, and the same goes for a rollback. A rollback goes back one version at a time, however often it is used. A call pins the versions it can reach when it starts, so a deploy or rollback never changes one already under way. A reply claims its turn before anything runs, so two replies at once cannot both act (or both write to an integration); a reply can say which question it answers.
+- **List-based simulation:** many scripted callers through one version, judged against what each should do; integrations answer only from the scenario, so a simulation never touches a real system. Every scenario is stored as a run with its steps, ready for replay.
+- **Integrations:** a client's own system can be called mid-call. The address must be https with a real hostname; the connection refuses any hostname that resolves to a private, loopback, link-local or metadata address (checked at connect time, so a name that later points inward is refused too); redirects are never followed; replies are size- and time-limited. Values go into the path URL-encoded. The key is encrypted and never returned. A staging test call reads but never writes.
+- **Sensitive variables:** marked in the workflow, they are never spoken, given to a model, or sent to an integration, in any workflow of the call (checked before publishing and again while the call runs). They are never recorded in steps or shown in views. A sensitive answer is used to route the call and then forgotten. Values supplied at the start are held sealed (encrypted, bound to the call) while the call waits, and wiped when it ends; a call left waiting is ended and wiped by a sweep (`POST /internal/workflow-runs/sweep`, which must be scheduled by whoever runs the deployment: nothing calls it automatically yet).
+- **The Malaysian debt-collection template** (English and Bahasa Malaysia): greeting, identity check on the last four digits of the identity card number, balance, then a promise to pay, a payment plan, or a person.
+- **Console:** a Workflows list with template creation, and a workflow page with versions, publish and rollback buttons, a JSON editor with a problem check, an outline, simulation, and a test call.
+
+Not built yet:
+- **A real phone call through a workflow.** No speech recognition or voice provider is connected, so the engine takes the caller's words as text and live calls cannot yet hold a conversation. This is why the first exit criterion is only partly met.
+- **The prompt-to-workflow builder** (deferred above) and a **visual canvas**.
+- **A model for replies the phrase rules cannot match.** The template's wording is a draft: it needs review by whoever is responsible for compliance, and the Bahasa Malaysia by a native speaker, before real use.
 
 **Exit criteria**
 - The debt-collection template runs end to end in staging and then in production.
@@ -195,6 +216,22 @@ Goal: cut cost without hurting the caller's experience.
   - rejected, wrong number, third party and unreachable outcomes
   - captured best callback times
 
+**Status (in progress)**
+
+Built and tested (against fakes; no audio has been played on a real call):
+- **Pre-recorded audio:** a client's recordings are stored per language and found by their exact words (not by name), so what is played is always what the workflow says. Only fixed words are recorded: a new take is a new version, and the old one is kept. The upload refuses a file whose first bytes are not the audio type it claims, and anything over 5 MB. The console has a Recordings screen (upload, list, play).
+- **Stitching plan:** every line a call speaks is planned as recorded and live parts. A fixed line is played whole if recorded. A hybrid line plays the recorded frame and speaks only the slot, and neighbouring live parts are joined into one request so the voice reads them as one phrase. A model-written line is always live. Sensitive variables are still refused. Each spoken line records how many characters are synthesised and how many played from a recording, in the call's steps and its totals; the count is by character, not byte.
+- **Measuring the saving:** the same scripted callers are played with and without the recordings, and the difference in synthesised characters is priced exactly at the voice provider's per-character rate. It also lists the fixed words still worth recording.
+- **DID pool and DID check:** before every dial (after the do-not-call gate, so a blocked number uses none), the check excludes any DID that has ever failed for this contact, picks the cheapest provider's numbers (a provider with no captured rate comes last), and uses the least recently used. If every number is locked for the contact, or the client has none, the call is refused and no provider is contacted; such calls are not counted as the provider failing. A named caller ID gets the same check. A failure is recorded against a call, locks that DID from that contact for good (rows cannot change), and the contact is known only by a keyed hash, so no customer number is kept.
+- **Outbound analytics:** attempts, contact rate and answer rate, who rejected, wrong numbers, third parties, no answer and unreachable, answered calls not yet classified (shown, not guessed), and the callback times people asked for, in their own time zone.
+
+Not built or not proven:
+- **Playing audio.** No voice provider or speech pipeline is connected to calls, so nothing plays a recording on the telephony leg. This phase decides what would be played and counts it. Whether the seams between a recording and live speech sound natural cannot be tested without people listening.
+- **Call cost records do not yet receive the synthesised-character count.** The count is in each run and the saving is measured from it, but a real call's cost record has no voice usage until a voice provider is connected to calls.
+- **DID failures are recorded by an operator or another system through the API.** Nothing yet detects a spam label or carrier block from provider events, because the exact signals each provider sends have not been checked against the live services.
+- **Outcomes are recorded through the API** and are not yet tied to the end outcome of a workflow run, since a call does not yet carry a workflow.
+- **The blind listening check and Customer Experience Council sign-off** need people.
+
 **Exit criteria**
 - The cost difference between a stitched and an unstitched version of the same flow is measured.
 - A blind listening check confirms there is no drop in caller experience (the Customer Experience Council signs off).
@@ -215,6 +252,29 @@ Goal: degrade gracefully instead of failing.
 - Inbound concurrency is a per-client entitlement. Extra channels are deducted from credits monthly.
 - Optional premium overburst for clients at a configurable premium.
 - **Funding-health monitor.** It alerts at configurable thresholds before a provider balance reaches zero.
+
+**Status (in progress)**
+
+Built and tested against fakes (no real provider has failed during a live call):
+- **Failover rules:** a provider is judged failed after N errors inside a window, N dead-air silences, or latency whose typical (median) value is over a threshold for enough replies; one bad reply never does it. A failed provider is trusted again only after a run of good attempts over a minimum time, and only attempts since it last changed state count, so it does not flip back on the first sign of life. Out of funding fails over at once and is not retried; a topped-up provider goes on probation. Every threshold is configurable (`resilience_policy`) and every switch is logged and shown in the console.
+- **Voice failover with handover:** a call tries its voice providers in the client's order. When one is failed over, the next plays a bridge message, is told where the flow is, what was collected and what each side said (never a sensitive value), and the interrupted line is replayed in full with its slot values. A provider that is still trusted is simply tried again. A call already moved stays on the secondary rather than bouncing back.
+- **Total failure:** a holding message, then a person if one is available, else a callback offer, else voicemail; a callback request is always recorded first unless the call went to a person, so the call is never left in silence, and a failing telephony leg cannot stop the record being made.
+- **Telephony failover:** a failed, unfunded or full provider is passed over by the DID check; a provider that fails to place a call is counted against it and the next provider is tried; with every provider unavailable the dial is refused plainly and no provider is contacted. Refusals are not counted as the provider failing.
+- **Concurrency ceilings:** taken from the rates' concurrency limit. A dial goes to the cheapest provider with room; if every provider is full it is held back with a retry time (nothing placed, no customer number kept), unless the client has agreed an overburst premium, in which case the call is marked, carries the provider's burst multiplier and the client's credits are multiplied by the agreed premium. A call within the ceiling carries no burst line. Dials arriving together cannot take the same last channel.
+- **Inbound entitlement:** a client's simultaneous inbound channels (plus extra channels). Beyond them a call waits (hold message, never hung up on), the longest-waiting call moves up when a channel frees, a caller who gives up is recorded as abandoned (the provider's time is costed, no credits drawn), and a caller who waits too long is hung up on and given a callback request. A caller who is served after waiting is billed credits only from when they were served, and a caller on hold counts against the provider's ceiling. A client with no entitlement set is not limited. Extra channels are charged to credits monthly, once per month.
+- **Funding-health monitor:** alert levels per provider and currency (warn and critical, chosen by an operator) feed the Control Tower; an empty balance fails the provider over.
+- **Console:** a Resilience screen (provider health and why, capacity, funding and alert levels, the failover rules, recent failovers). The Control Tower raises alerts for failed or unfunded providers, low funding, queued callers and held-back dials.
+
+Not built or not proven:
+- **No voice provider is connected to live calls**, so voice failover is exercised through a model of a provider, and the bridge and replay are not heard.
+- **An outbound dial held back is not queued here:** keeping a queue would mean keeping the customer's number. The dialler retries after the time it is given.
+- **A queued inbound caller hears a hold message;** nothing yet starts the workflow when their turn comes.
+- **Funding is not deducted as calls are costed**, so the monitor works from entered balances.
+- **Failures come from errors at dial time and reported samples,** not yet from provider webhooks or measured dead air on a live call.
+- **Nothing sends a failed provider traffic, so recovery needs probes.** `probeProviders` tries failed voice providers and must be run on a schedule by the deployment; a failed telephony provider has no probe yet and recovers only when samples are reported through the API. A recovered provider must show a run of good attempts spanning the minimum time.
+- **The held-back dials and the orphan events:** a dial held back for capacity leaves its gate and DID-check events in the event log under an id that never becomes a call.
+- **Hanging up a timed-out queued caller** uses a Twilio call-update request written from memory and unchecked against the live service.
+- Per-client voice routes, fallback plans and entitlements are set through the API; the console shows the result but does not edit them yet.
 
 **Exit criteria**
 - Chaos tests cover killing the provider, injecting latency and running the balance to zero. Each produces the expected failover with no dead drop.
@@ -317,6 +377,15 @@ Goal: self-contained modules that each plug into the shared backbone. Each one c
 - A spike in QA scores or sentiment, or drift on a promoted node.
 
 Alerts are delivered inside the console first. Later they can also go to email, WhatsApp or Slack, chosen per alert type.
+
+### Control Tower status (version 1)
+
+The console now opens on the Control Tower (`#/tower`, `GET /internal/control-tower`, `GET /internal/progress`):
+- **Needs attention:** alerts derived from live state, each linking to where it is fixed: no MYR rate or client rate card; no public address for webhooks; call events a provider cannot verify (no Twilio Auth Token or Telnyx public key); credentials not checked; no rates in force, or rates not confirmed; no do-not-call position declared; calls that could not be priced, finished calls never priced, or that differ from the provider; calls stuck dialling or in progress for too long (provider events probably not arriving); credentials that cannot be decrypted; a provider failing at least half of its last 24 hours of finished calls (once it has at least five); a recorded funding balance that has run out on an active provider. Calls that never connected (a refused dial, a blocked number) have nothing to price and are never counted as pricing failures.
+- **Project progress:** every phase with its status, exit criteria (met, partly or not met, and how each was proven: tested, tested against fakes, or proven live), what is still open, and the open decisions. The data is `src/progress.ts`, maintained by hand, and a test ties it to this plan's phase names, exit-criteria text (including the Control Tower's and the one that applies to every phase) and decisions table so the two cannot drift. A criterion can only be marked proven live with a written "Live evidence:" note.
+- **Live calls, provider health, funding and cost and margin** (last 24 hours and 7 days, each call counted once).
+
+Not built yet: the change-log panel, alerts by email, WhatsApp or Slack, funding runway and burn rate (calls do not yet deduct from the recorded funding balance), and the stitching, deliverability, concurrency, journey and learning-loop panels, which wait for their phases.
 
 ### Control Tower Exit Criteria (Overall)
 

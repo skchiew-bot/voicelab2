@@ -16,9 +16,17 @@ import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
-import { addNumber, callKnown, costCall, getCall, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { addNumber, callKnown, callQueued, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { registerResilienceRoutes } from './routes/resilience.js';
+import { registerStitchingRoutes } from './routes/stitching.js';
+import { registerWorkflowRoutes } from './routes/workflows.js';
+import type { HttpDeps } from './workflows/integrations.js';
+import { controlTower } from './store/control-tower.js';
+import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
+import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
+import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
 import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
-import { parseTwilio, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
+import { parseTwilio, twimlHold, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
 import { createProvider, getProvider, listProviders, preflight, recheckProvider, setCapability } from './store/providers.js';
 import { createProject, createTenant, createUser, listProjects, listTenants } from './store/tenants.js';
 
@@ -26,12 +34,15 @@ interface Session { userId: string; email: string; actor: Actor }
 
 const adminDist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'admin', 'dist');
 
-const money = z.string().regex(/^-?\d+(\.\d+)?$/, 'Use a decimal number as text, e.g. "12.50".');
+// At most what the database columns hold (10 digits before the point, 8 after), so a huge value is a clear 400, not a crash.
+const money = z.string().regex(/^-?\d{1,10}(\.\d{1,8})?$/, 'Use a decimal number as text, e.g. "12.50" (up to 10 digits before the point and 8 after).');
 const currency = z.string().length(3).transform((s) => s.toUpperCase());
 
 export interface Deps {
   /** Outbound HTTP for provider credential checks. Replaced in tests. */
   fetch?: Fetch;
+  /** How workflow integrations connect. Only tests change this; production always uses the guarded default. */
+  integrationHttp?: HttpDeps;
 }
 
 export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): FastifyInstance {
@@ -70,7 +81,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     done(null, Object.fromEntries(new URLSearchParams(body as string)));
   });
 
-  const callDeps: CallDeps = { pool, key, dncKey, http, baseUrl: config.PUBLIC_BASE_URL?.replace(/\/$/, '') };
+  const callDeps: CallDeps = { pool, key, dncKey, http, baseUrl: config.PUBLIC_BASE_URL?.replace(/\/$/, ''), tolerancePct: config.RECONCILE_TOLERANCE_PCT };
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof AppError) return reply.status(err.status).send({ error: err.message, details: err.details });
@@ -78,7 +89,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const pgCode = (err as { code?: string }).code;
     if (pgCode === '23505') return reply.status(409).send({ error: 'Already exists.' });
     if (pgCode === '23503') return reply.status(400).send({ error: 'Refers to something that does not exist.' });
-    if (pgCode === '23514') return reply.status(400).send({ error: 'A value is out of range.' });
+    if (pgCode === '23514' || pgCode === '22003') return reply.status(400).send({ error: 'A value is out of range.' });
     if ((err as { statusCode?: number }).statusCode === 400) return reply.status(400).send({ error: 'Invalid request.' });
     console.error(err);
     return reply.status(500).send({ error: 'Internal error.' });
@@ -194,7 +205,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
       components: z.array(z.object({
         component: z.enum(['telephony_leg', 'stt', 'llm', 'tts', 'platform', 'concurrency', 'other']),
         unit: z.enum(['per_minute', 'per_second', 'per_character', 'per_1k_characters', 'per_token', 'per_1k_tokens', 'per_1m_tokens', 'per_credit', 'flat']),
-        rate: money, currency, billingLine: z.string().optional(),
+        rate: money, currency, billingLine: z.string().optional(), direction: z.enum(['any', 'inbound', 'outbound']).optional(),
       })).min(1),
     }).parse(req.body);
     return reply.status(201).send(await withActor(pool, s.actor, (c) => addChargingVersion(c, s.userId, id, body)));
@@ -204,6 +215,27 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const { at } = z.object({ at: z.coerce.date().optional() }).parse(req.query);
     return withActor(pool, s.actor, async (c) => (at ? chargingAt(c, id, at) : listChargingVersions(c, id)));
+  });
+  // Starting rates from the blueprint, saved unconfirmed. The caller chooses the billing increment: the blueprint gives none.
+  app.get('/internal/reference-rates', async (req) => {
+    await internal(req);
+    return REFERENCE_RATES;
+  });
+  app.post('/internal/providers/:id/charging/reference', async (req, reply) => {
+    const s = await internal(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const body = z.object({
+      effectiveFrom: z.coerce.date(), billingIncrementSeconds: z.number().int().positive(),
+      minimumChargeSeconds: z.number().int().min(0).optional(), rounding: z.enum(['up', 'nearest', 'down']).optional(),
+    }).parse(req.body);
+    return reply.status(201).send(await withActor(pool, s.actor, async (c) => {
+      const p = await getProvider(c, id);
+      const ref = referenceRateFor(p.adapter_key);
+      if (!ref) throw new AppError(400, `There is no reference rate for ${p.adapter_key}.`);
+      return addChargingVersion(c, s.userId, id, {
+        ...body, burstPremiumMultiplier: ref.burstPremiumMultiplier, notes: REFERENCE_NOTE, components: ref.components,
+      });
+    }));
   });
   app.post('/internal/charging/:versionId/confirm', async (req) => {
     const s = await internal(req);
@@ -322,6 +354,20 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     return withActor(pool, s.actor, (c) => gateOutbound(c, dncKey, body));
   });
 
+  registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerResilienceRoutes(app, { pool, internal, callDeps });
+  registerStitchingRoutes(app, { pool, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+
+  // ------------------------------------------------- control tower
+  app.get('/internal/control-tower', async (req) => {
+    const s = await internal(req);
+    return withActor(pool, s.actor, (c) => controlTower(c, key, { publicBaseUrlSet: Boolean(callDeps.baseUrl) }));
+  });
+  app.get('/internal/progress', async (req) => {
+    await internal(req);
+    return { generatedAt: new Date().toISOString(), phases: PHASES, crossCutting: CROSS_CUTTING, decisions: DECISIONS };
+  });
+
   // ------------------------------------------------ numbers and calls
   app.post('/internal/numbers', async (req, reply) => {
     const s = await internal(req);
@@ -338,11 +384,40 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   app.post('/internal/calls/outbound', async (req, reply) => {
     const s = await internal(req);
     const body = z.object({
-      tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), providerId: z.string().uuid(),
-      from: z.string(), to: z.string(), country,
+      tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), providerId: z.string().uuid().optional(),
+      from: z.string().optional(), to: z.string(), country,
     }).parse(req.body);
     const result = await placeOutboundCall(callDeps, s.userId, body);
+    // A dial held back for want of capacity is not an error to fix but a request to retry shortly.
+    if ('deferred' in result) return reply.status(429).header('retry-after', String(result.retryAfterSeconds)).send(result);
     return reply.status(result.allowed ? 201 : 200).send(result);
+  });
+  app.get('/internal/calls', async (req) => {
+    const s = await internal(req);
+    const q = z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(50), tenantId: z.string().uuid().optional(),
+      status: z.enum(['dialing', 'ringing', 'in_progress', 'completed', 'unanswered', 'failed', 'blocked']).optional(),
+    }).parse(req.query);
+    return withActor(pool, s.actor, (c) => listCalls(c, q));
+  });
+  app.post('/internal/calls/:callId/reconcile', async (req) => {
+    const s = await internal(req);
+    const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
+    const body = z.discriminatedUnion('source', [
+      z.object({ source: z.literal('provider_api') }),
+      z.object({ source: z.literal('manual'), reportedSeconds: z.number().min(0).max(1_000_000).optional(), reportedCost: money, currency: currency.optional() }),
+    ]).parse(req.body);
+    return reconcileCall(callDeps, s.userId, callId, body);
+  });
+  app.get('/internal/calls/:callId/reconciliations', async (req) => {
+    const s = await internal(req);
+    const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
+    return withActor(pool, s.actor, (c) => listReconciliations(c, callId));
+  });
+  app.post('/internal/reconcile/run', async (req) => {
+    const s = await internal(req);
+    const body = z.object({ olderThanMinutes: z.number().int().min(0).default(60), limit: z.number().int().min(1).max(500).default(50) }).parse(req.body ?? {});
+    return reconcileSweep(callDeps, s.userId, body);
   });
   app.get('/internal/calls/:callId', async (req) => {
     const s = await internal(req);
@@ -380,7 +455,8 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     if (ev) await processWebhook(callDeps, provider, ev, callId);
     if (!voice) return reply.status(204).send();
     const known = ev ? await callKnown(callDeps, provider.id, ev.providerCallId) : false;
-    return reply.type('text/xml').send(known ? twimlTestCall() : twimlReject());
+    const queued = known && ev ? await callQueued(callDeps, provider.id, ev.providerCallId) : false;
+    return reply.type('text/xml').send(known ? (queued ? twimlHold(`${callDeps.baseUrl}/webhooks/twilio/${provider.id}/voice${callId ? `?callId=${callId}` : ''}`) : twimlTestCall()) : twimlReject());
   };
   app.post('/webhooks/twilio/:providerId/status', twilioHook(false));
   app.post('/webhooks/twilio/:providerId/voice', twilioHook(true));

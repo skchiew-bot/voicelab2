@@ -85,6 +85,24 @@ Goal: the shared backbone that every later phase plugs into.
 - Event bus or call-event log that every later component writes to. The Control Tower and replay both read from it.
 - Deployment packaging aimed at a non-technical operator: a single install path, guided setup and a health check.
 
+**Status (in progress)**
+
+Built and tested:
+- Tenants, projects, users with hashed API tokens, internal and client roles.
+- Adapter framework with parameter declarations for Twilio, Telnyx, OpenAI and ElevenLabs, served at `GET /internal/adapters`; structural validation only (live credential checks are Phase 1).
+- Capability registry, editable per provider.
+- Versioned, append-only charging records with a confirmation record for rates checked against pricing pages.
+- Both ledgers, separated by database role and row-level security.
+- Partitioned call-event log, audit log and model-config table.
+- Encrypted provider credentials (AES-256-GCM); the API never returns them.
+- Docker Compose and a setup script with a health check.
+
+Not built yet:
+- **The admin UI.** Exit criterion 1 is met at the API level only; the form that renders from `GET /internal/adapters` is still to do, as are the tenant switcher and the Control Tower shell.
+- Redis and the job queue (nothing in Phase 0 needs them yet).
+- Finer roles and permissions beyond internal admin, tenant admin and tenant user.
+- The Docker install path has not been run end to end; its compose file validates, but it needs a real run.
+
 **Exit criteria**
 - An operator can add a provider through the UI and enter its parameters and charging mechanism, without a code change.
 - A rate change creates a new version, and old records keep their original rate.

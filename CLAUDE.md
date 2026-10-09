@@ -2,6 +2,18 @@
 
 Provider-agnostic voice orchestration platform. The blueprint is the source of truth for what to build; `BUILD_PLAN.md` sets the order and the exit criteria for each phase.
 
+## Commands
+
+- `npm test` runs unit and database tests (needs local Postgres; each test file gets a throwaway database).
+- `npm run typecheck` runs `tsc --noEmit`. Run both before pushing.
+- `npm run migrate` applies `migrations/*.sql`. Migrations are append-only: add a new file, never edit an applied one.
+
+## Invariants (do not break)
+
+- Client-facing code runs as the `voicelab_client` database role via `withActor`; provider cost, charging, funding and secrets must stay unreachable from it. `tests/foundations.test.ts` proves this.
+- Charging versions, both ledgers, the call-event log and the audit log are append-only (database triggers). A change is a new row.
+- Provider secrets are encrypted and never returned by the API, logged or audited.
+
 ## Model selection (applies to every phase)
 
 Token cost is a build requirement. Pick the smallest model that does the task reliably, and escalate only when needed. This applies to the product's runtime AI calls and to any build or dev work that calls a model.

@@ -4,6 +4,28 @@ Derived from *Voice Lab Blueprint And Build Plan* (Oct 9, 2026, @skchiew). The b
 
 Sequence from the blueprint: telephony, voice and metering first, then a minimal workflow skeleton, then stitching. Everything else builds on those.
 
+## Global Requirements (All Phases)
+
+### Model selection and token cost
+
+Token cost is a build requirement, not a Phase 6 detail. Every AI task in every phase picks the smallest model that does the job reliably, and escalates only when needed. The same rules are in `CLAUDE.md` so every Claude Code session follows them.
+
+| Task type | Model | Examples in this plan |
+| --- | --- | --- |
+| High-volume, per-turn | Haiku 5.5 | Intent and sentiment tagging (Phase 5), turn logging (Phase 6), drift screening (Phase 6), routine QA checks |
+| Per-change or per-cluster | Sonnet 5.5 | Script distillation (Phase 6), prompt-to-workflow builder (Phase 2), QA scorecard scoring (Phase 5) |
+| Low-volume, high-stakes | Opus 5.5 | Quality and Customer Experience Council review (Phases 3 and 6), approvals and policy changes (Phase 7) |
+
+- Volume decides the tier: the more often a step runs, the smaller its model.
+- Escalate on low confidence or when a cheap check flags a problem, and record the escalation in the audit trail.
+- Use rules, embeddings and thresholds instead of an LLM wherever they do the job (for example, clustering).
+- Cache repeated prompt prefixes, and batch work that isn't in the live call path.
+- Model choice per task is configuration, not code.
+- Log model, input tokens and output tokens per task. They feed the cost record (Phase 1) and the Control Tower cost panel.
+- Prices are not hardcoded; read current pricing before setting the cost model.
+
+**Exit criteria (every phase):** each AI task the phase introduces has a configured model tier, a logged token count and a documented escalation rule.
+
 ## Phase Overview
 
 | Phase | Name | Depends on | Control Tower slice |

@@ -16,7 +16,9 @@ import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
-import { addNumber, callKnown, costCall, getCall, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { addNumber, callKnown, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
+import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
 import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
 import { parseTwilio, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
 import { createProvider, getProvider, listProviders, preflight, recheckProvider, setCapability } from './store/providers.js';
@@ -70,7 +72,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     done(null, Object.fromEntries(new URLSearchParams(body as string)));
   });
 
-  const callDeps: CallDeps = { pool, key, dncKey, http, baseUrl: config.PUBLIC_BASE_URL?.replace(/\/$/, '') };
+  const callDeps: CallDeps = { pool, key, dncKey, http, baseUrl: config.PUBLIC_BASE_URL?.replace(/\/$/, ''), tolerancePct: config.RECONCILE_TOLERANCE_PCT };
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof AppError) return reply.status(err.status).send({ error: err.message, details: err.details });
@@ -194,7 +196,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
       components: z.array(z.object({
         component: z.enum(['telephony_leg', 'stt', 'llm', 'tts', 'platform', 'concurrency', 'other']),
         unit: z.enum(['per_minute', 'per_second', 'per_character', 'per_1k_characters', 'per_token', 'per_1k_tokens', 'per_1m_tokens', 'per_credit', 'flat']),
-        rate: money, currency, billingLine: z.string().optional(),
+        rate: money, currency, billingLine: z.string().optional(), direction: z.enum(['any', 'inbound', 'outbound']).optional(),
       })).min(1),
     }).parse(req.body);
     return reply.status(201).send(await withActor(pool, s.actor, (c) => addChargingVersion(c, s.userId, id, body)));
@@ -204,6 +206,27 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const { at } = z.object({ at: z.coerce.date().optional() }).parse(req.query);
     return withActor(pool, s.actor, async (c) => (at ? chargingAt(c, id, at) : listChargingVersions(c, id)));
+  });
+  // Starting rates from the blueprint, saved unconfirmed. The caller chooses the billing increment: the blueprint gives none.
+  app.get('/internal/reference-rates', async (req) => {
+    await internal(req);
+    return REFERENCE_RATES;
+  });
+  app.post('/internal/providers/:id/charging/reference', async (req, reply) => {
+    const s = await internal(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const body = z.object({
+      effectiveFrom: z.coerce.date(), billingIncrementSeconds: z.number().int().positive(),
+      minimumChargeSeconds: z.number().int().min(0).optional(), rounding: z.enum(['up', 'nearest', 'down']).optional(),
+    }).parse(req.body);
+    return reply.status(201).send(await withActor(pool, s.actor, async (c) => {
+      const p = await getProvider(c, id);
+      const ref = referenceRateFor(p.adapter_key);
+      if (!ref) throw new AppError(400, `There is no reference rate for ${p.adapter_key}.`);
+      return addChargingVersion(c, s.userId, id, {
+        ...body, burstPremiumMultiplier: ref.burstPremiumMultiplier, notes: REFERENCE_NOTE, components: ref.components,
+      });
+    }));
   });
   app.post('/internal/charging/:versionId/confirm', async (req) => {
     const s = await internal(req);
@@ -343,6 +366,33 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     }).parse(req.body);
     const result = await placeOutboundCall(callDeps, s.userId, body);
     return reply.status(result.allowed ? 201 : 200).send(result);
+  });
+  app.get('/internal/calls', async (req) => {
+    const s = await internal(req);
+    const q = z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(50), tenantId: z.string().uuid().optional(),
+      status: z.enum(['dialing', 'ringing', 'in_progress', 'completed', 'unanswered', 'failed', 'blocked']).optional(),
+    }).parse(req.query);
+    return withActor(pool, s.actor, (c) => listCalls(c, q));
+  });
+  app.post('/internal/calls/:callId/reconcile', async (req) => {
+    const s = await internal(req);
+    const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
+    const body = z.discriminatedUnion('source', [
+      z.object({ source: z.literal('provider_api') }),
+      z.object({ source: z.literal('manual'), reportedSeconds: z.number().min(0).optional(), reportedCost: money.optional(), currency: currency.optional() }),
+    ]).parse(req.body);
+    return reconcileCall(callDeps, s.userId, callId, body);
+  });
+  app.get('/internal/calls/:callId/reconciliations', async (req) => {
+    const s = await internal(req);
+    const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
+    return withActor(pool, s.actor, (c) => listReconciliations(c, callId));
+  });
+  app.post('/internal/reconcile/run', async (req) => {
+    const s = await internal(req);
+    const body = z.object({ olderThanMinutes: z.number().int().min(0).default(60), limit: z.number().int().min(1).max(500).default(50) }).parse(req.body ?? {});
+    return reconcileSweep(callDeps, s.userId, body);
   });
   app.get('/internal/calls/:callId', async (req) => {
     const s = await internal(req);

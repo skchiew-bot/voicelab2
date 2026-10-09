@@ -12,7 +12,7 @@ import { recordCallCost } from './costs.js';
 import { gateOutbound, normalizeE164 } from './dnc.js';
 import { recordEvent } from './events.js';
 
-export interface CallDeps { pool: pg.Pool; key: Buffer; dncKey: Buffer; http: Fetch; baseUrl?: string }
+export interface CallDeps { pool: pg.Pool; key: Buffer; dncKey: Buffer; http: Fetch; baseUrl?: string; tolerancePct?: number }
 
 export interface ProviderRow {
   id: string; adapter_key: string; kind: string; status: string; params: Record<string, unknown>; secret_params: Buffer;
@@ -250,3 +250,10 @@ export const getCall = async (c: pg.PoolClient, callId: string) => {
 export const callKnown = (d: CallDeps, providerId: string, providerCallId: string) =>
   asInternal(d, async (c) =>
     (await c.query('SELECT 1 FROM calls WHERE provider_id = $1 AND provider_call_id = $2', [providerId, providerCallId])).rowCount === 1);
+
+export const listCalls = async (c: pg.PoolClient, o: { limit: number; status?: string; tenantId?: string }) =>
+  (await c.query(
+    `SELECT id, tenant_id, project_id, provider_id, direction, status, country, started_at, answered_at, ended_at,
+            duration_seconds, end_reason, cost_status FROM calls
+      WHERE ($1::text IS NULL OR status = $1) AND ($2::uuid IS NULL OR tenant_id = $2)
+      ORDER BY started_at DESC LIMIT $3`, [o.status ?? null, o.tenantId ?? null, o.limit])).rows;

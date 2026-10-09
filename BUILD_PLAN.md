@@ -143,16 +143,18 @@ Built and tested. The provider APIs are unreachable from the build environment, 
   - A call moves forward only (a late event cannot reopen or re-price it), is finished and priced exactly once even when callbacks race, and a pricing failure is recorded and retryable (`POST /internal/calls/:id/cost/retry`) instead of losing the call.
   - Customer numbers exist in memory while a call is set up and are never stored, logged or audited; provider error text is scrubbed of anything number-shaped.
   - Until Phase 2, every answered call plays a short test message and hangs up.
+- **Reconciliation** (`POST /internal/calls/:id/reconcile`, `POST /internal/reconcile/run`): a call's estimated cost is compared with the provider's own duration and price, and every figure the provider gave must be within a set tolerance (default 2%, `RECONCILE_TOLERANCE_PCT`; differences under a second or a hundredth of a cent are ignored). A match adds a "reconciled" cost record (no second draw of credits, and the campaign rollup counts each call once); a difference is stored, flagged on the call and logged, and the estimate is left alone. Twilio can be checked automatically; any provider can be checked from figures an operator enters (Telnyx has no automatic check yet). Twilio's price is sometimes not yet published, in which case the answer is "pending", not a guess.
+- **Direction-specific rates:** a rate can apply to inbound calls, outbound calls, or both, because providers charge them differently.
+- **Reference rates:** the blueprint's research figures can be saved onto a provider in one step, always as unconfirmed, with a billing increment the operator chooses (the research gives none).
+- **Console screens** for FX rates, the rate card, our numbers, do-not-call lists (with a dry-run check), and calls with their timeline, cost lines, reconciliation and re-pricing.
 - **Do-not-call gate**, failing closed: an unparseable number, or a country with no declared position, is blocked. Supports a national registry per country and each client's own opt-out list. Numbers are stored as keyed hashes. `gateOutbound` logs the decision to the call-event log without the number.
 
 Not built yet:
 - **Proof against the live services.** The Twilio and Telnyx request formats, status values and signature schemes were written from the providers' published behaviour, and their docs were not reachable while building, so they have not been checked against the real services. Exit criterion 1 (test calls on both) is not met until someone runs real test calls with live accounts, public URLs and `PUBLIC_BASE_URL` set.
 - **Talking to a caller.** The voice providers (OpenAI, ElevenLabs) are not connected to calls, so there is no voicebot yet. Do not point a real number at this: callers hear a test message and the call ends.
 - **A known gap in call control:** if the server stops in the instant between storing a Telnyx event and sending its reply command, that command is not re-sent (a retried event is skipped as a duplicate), so a call could sit unanswered.
-- **Reconciliation** against each provider's own usage data. Cost records are stored as `estimated`; nothing sets `reconciled` yet, so exit criterion 2 is only partly met.
+- **Automatic reconciliation for Telnyx**, and a schedule for the sweep (`POST /internal/reconcile/run` must be called, for example from a cron job). The Twilio call-record fields used (`duration`, `price`, `price_unit`) were written from memory, like the rest of call control, and are unverified against the live service.
 - **Feeding usage into the cost record.** The record accepts seconds, characters and tokens; no live call yet supplies them.
-- **Reference rates.** There is no seeded starting data. Operators enter rates in the console and mark them confirmed.
-- **Console screens** for FX, the rate card, do-not-call lists and cost views. These are API only for now.
 
 **Exit criteria**
 - Inbound and outbound test calls work on both Twilio and Telnyx.

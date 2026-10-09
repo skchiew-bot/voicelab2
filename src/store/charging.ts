@@ -11,7 +11,7 @@ export interface ChargingInput {
   burstPremiumMultiplier?: number | null;
   notes?: string;
   components: {
-    component: string; unit: string; rate: string; currency: string; billingLine?: string;
+    component: string; unit: string; rate: string; currency: string; billingLine?: string; direction?: 'any' | 'inbound' | 'outbound';
   }[];
 }
 
@@ -45,9 +45,9 @@ export async function addChargingVersion(
   );
   for (const comp of input.components) {
     await c.query(
-      `INSERT INTO charging_components (charging_version_id, component, unit, rate, currency, billing_line)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [v.rows[0].id, comp.component, comp.unit, comp.rate, comp.currency, comp.billingLine ?? 'main'],
+      `INSERT INTO charging_components (charging_version_id, component, unit, rate, currency, billing_line, direction)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [v.rows[0].id, comp.component, comp.unit, comp.rate, comp.currency, comp.billingLine ?? 'main', comp.direction ?? 'any'],
     );
   }
   await audit(c, actorId, 'charging.add_version', 'provider', providerId, { version });
@@ -64,7 +64,7 @@ async function getVersion(c: pg.PoolClient, versionId: string) {
   );
   if (!rows[0]) throw new AppError(404, 'Charging version not found.');
   const comps = await c.query(
-    `SELECT component, unit, rate, currency, billing_line FROM charging_components
+    `SELECT component, unit, rate, currency, billing_line, direction FROM charging_components
       WHERE charging_version_id = $1 ORDER BY billing_line, component`,
     [versionId],
   );

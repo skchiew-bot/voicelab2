@@ -39,7 +39,7 @@ Register the numbers you own with `POST /internal/numbers`; an inbound call is r
 
 ## Admin console
 
-Staff sign in with an API token. Providers: add one from a form built from the adapter's declared settings, set capabilities, add charging versions, confirm rates, record funding. Clients: add a client, grant credits, add projects, create users (their token is shown once).
+Staff sign in with an API token. Screens: Providers, Clients, Rates (FX and the client rate card), Numbers, Do not call, and Calls (cost by campaign, each call's timeline and cost lines, reconciliation and re-pricing). Providers: add one from a form built from the adapter's declared settings, set capabilities, add charging versions, confirm rates, record funding. Clients: add a client, grant credits, add projects, create users (their token is shown once).
 
 ## API (Phase 0)
 
@@ -73,3 +73,8 @@ All requests send `Authorization: Bearer <token>`. `/internal/*` is Daythree sta
 | `GET /internal/calls/:callId` | A call's status, timings and cost state |
 | `POST /internal/calls/:callId/cost/retry` | Re-price a call whose cost could not be recorded |
 | `POST /webhooks/twilio/:providerId/(voice\|status)`, `POST /webhooks/telnyx/:providerId` | Provider callbacks; no token, verified by signature |
+| `GET /internal/reference-rates`, `POST /internal/providers/:id/charging/reference` | The blueprint's starting rates, saved onto a provider as unconfirmed |
+| `GET /internal/calls` | Recent calls, filterable by status |
+| `POST /internal/calls/:callId/reconcile` | Check a call's cost against the provider (`provider_api`, Twilio only) or against figures you enter (`manual`) |
+| `GET /internal/calls/:callId/reconciliations` | The checks made on a call |
+| `POST /internal/reconcile/run` | Check every finished, unchecked Twilio call. Call it on a schedule |

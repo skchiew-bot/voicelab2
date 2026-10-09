@@ -47,6 +47,7 @@ export async function setupDb() {
     VOICELAB_SECRET_KEY: randomBytes(32).toString('base64'),
     PORT: 0,
     PUBLIC_BASE_URL: 'https://voicelab.test',
+    RECONCILE_TOLERANCE_PCT: 2,
   };
   const provider = fakeProviderApi();
   const app = buildApp(pool, config, { fetch: provider.fetch });

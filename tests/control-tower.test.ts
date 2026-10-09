@@ -213,3 +213,113 @@ describe('the live panels', () => {
     expect(p.decisions).toEqual(DECISIONS);
   });
 });
+
+// ---- findings from the independent review, each reproduced here before it was fixed
+describe('calls that never connected', () => {
+  it('are not a pricing problem', async () => {
+    const e = await (await import('./helpers.js')).setupDb();
+    try {
+      const st2 = e.staffToken;
+      const t = (await e.call(st2, 'POST', '/internal/tenants', { name: 'NC' })).json().id;
+      const p = (await e.call(st2, 'POST', '/internal/providers', { adapterKey: 'twilio', name: 'tw-nc', params: { accountSid: 'AC1', authToken: 'x', twimlAppVoiceUrl: 'https://x.example/v' } })).json().id;
+      await e.call(st2, 'POST', '/internal/numbers', { providerId: p, e164: '+60311119999', tenantId: t, country: 'MY' });
+      await e.call(st2, 'POST', '/internal/dnc/registries', { country: 'MY', requirement: 'registry', source: 'test' });
+      e.provider.state.respond = () => new Response('{}', { status: 500 });
+      const res = await e.call(st2, 'POST', '/internal/calls/outbound', { tenantId: t, providerId: p, from: '+60311119999', to: '+60187654000', country: 'MY' });
+      expect(res.statusCode).toBe(502);
+      const codes2 = (await e.call(st2, 'GET', '/internal/control-tower')).json().alerts.map((a: { code: string }) => a.code);
+      expect(codes2).not.toContain('cost_failed');
+    } finally { await e.teardown(); }
+  });
+});
+
+describe('an unreadable secret', () => {
+  it('is reported as an alert and does not take the whole Control Tower down', async () => {
+    const p = await twilio('tw-corrupt');
+    await env.pool.query(`UPDATE providers SET secret_params = '\\x0001020304' WHERE id = $1`, [p.id]);
+    const res = await env.call(st(), 'GET', '/internal/control-tower');
+    expect(res.statusCode).toBe(200);
+    const a = res.json().alerts.filter((x: { message: string }) => x.message.includes('tw-corrupt'));
+    expect(a.map((x: { code: string }) => x.code)).toContain('secrets_unreadable');
+    expect(a.find((x: { code: string }) => x.code === 'secrets_unreadable').severity).toBe('high');
+    expect(res.json().providers.length).toBeGreaterThan(3); // the other panels are still there
+    await env.pool.query(`UPDATE providers SET status = 'disabled' WHERE id = $1`, [p.id]);
+  });
+});
+
+describe('calls that are stuck', () => {
+  const tenantId = async () => (await env.pool.query(`SELECT id FROM tenants WHERE name = 'CT Co'`)).rows[0].id as string;
+  const insert = async (provider: string, status: string, ago: string, extra = '') => env.pool.query(
+    `INSERT INTO calls (id, tenant_id, provider_id, direction, status, started_at${extra ? ', ended_at, cost_status' : ''})
+     VALUES ($1,$2,$3,'outbound',$4, now() - $5::interval${extra ? ', now() - interval \'20 minutes\', \'pending\'' : ''})`,
+    [randomUUID(), await tenantId(), provider, status, ago]);
+  const provId = async (name: string) => (await env.pool.query('SELECT id FROM providers WHERE name = $1', [name])).rows[0].id as string;
+
+  it('raise an alert once they have waited too long, and not before', async () => {
+    const prov = await provId('tw-rates');
+    await env.pool.query(`DELETE FROM calls WHERE status IN ('dialing', 'ringing', 'in_progress')`);
+    await insert(prov, 'dialing', '5 minutes');
+    await insert(prov, 'in_progress', '2 hours');
+    expect(await codes()).not.toContain('calls_stuck');
+    await insert(prov, 'dialing', '30 minutes');
+    await insert(prov, 'in_progress', '7 hours');
+    const a = (await alerts()).find((x: { code: string }) => x.code === 'calls_stuck');
+    expect(a.severity).toBe('high');
+    expect(a.message).toContain('2 calls');
+    expect(a.message).toMatch(/webhook/i);
+  });
+
+  it('do not dilute a provider\'s failure rate', async () => {
+    const prov = await provId('tx-nokey');
+    await env.pool.query('DELETE FROM calls WHERE provider_id = $1', [prov]);
+    for (let i = 0; i < 5; i++) await insert(prov, 'failed', '1 hour');
+    for (let i = 0; i < 6; i++) await insert(prov, 'dialing', '1 hour');
+    expect(await codes('tx-nokey')).toContain('provider_failing'); // 5 of 5 finished calls failed; unfinished ones say nothing
+  });
+
+  it('raise an alert when an ended call was never priced', async () => {
+    const prov = await provId('tw-rates');
+    await insert(prov, 'completed', '1 hour', 'ended');
+    expect(await codes()).toContain('cost_pending');
+    await env.pool.query(`UPDATE calls SET cost_status = 'recorded' WHERE cost_status = 'pending'`);
+    expect(await codes()).not.toContain('cost_pending');
+  });
+
+  it('are counted in full even when the list shows only the newest', async () => {
+    const prov = await provId('tw-rates');
+    await env.pool.query(`DELETE FROM calls WHERE status IN ('dialing', 'ringing', 'in_progress')`);
+    for (let i = 0; i < 25; i++) await insert(prov, 'in_progress', '1 minute');
+    const t = await tower();
+    expect(t.activeCalls).toHaveLength(20);
+    expect(t.activeTotal).toBe(25);
+    await env.pool.query(`DELETE FROM calls WHERE status IN ('dialing', 'ringing', 'in_progress')`);
+  });
+});
+
+describe('funding alerts', () => {
+  it('ignore a provider that has been disabled', async () => {
+    const prov = (await env.pool.query(`SELECT id FROM providers WHERE name = 'tw-rates'`)).rows[0].id;
+    expect(await codes('tw-rates')).toContain('funding_empty');
+    await env.pool.query(`UPDATE providers SET status = 'disabled' WHERE id = $1`, [prov]);
+    expect(await codes('tw-rates')).not.toContain('funding_empty');
+    await env.pool.query(`UPDATE providers SET status = 'active' WHERE id = $1`, [prov]);
+  });
+});
+
+describe('the progress data cannot drift unnoticed', () => {
+  it('matches the plan\'s Control Tower criteria exactly', () => {
+    const sec = plan.split('### Control Tower Exit Criteria (Overall)')[1]!.split(/^(?:---|## )/m)[0]!;
+    const top = sec.split('\n').filter((l) => l.startsWith('- ')).map((l) => l.slice(2).trim());
+    expect(PHASES.find((p) => p.id === 'CT')!.criteria.map((c) => c.text)).toEqual(top);
+  });
+  it('includes the criterion that applies to every phase', async () => {
+    const { CROSS_CUTTING } = await import('../src/progress.js');
+    const m = /\*\*Exit criteria \(every phase\):\*\* ([^\n]+)/.exec(plan)!;
+    expect(CROSS_CUTTING.map((c) => c.text)).toEqual([m[1]!.trim()]);
+  });
+  it('lets nothing be called proven live without saying what the evidence was', () => {
+    for (const p of PHASES) for (const c of p.criteria) {
+      if (c.proof === 'live') expect(c.note ?? '', `${p.id}: "${c.text}"`).toContain('Live evidence:');
+    }
+  });
+});

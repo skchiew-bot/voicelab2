@@ -51,13 +51,22 @@ export function ControlTower() {
 
   const phases = progress.data?.phases ?? [];
   const count = (s: string) => phases.filter((p) => p.status === s).length;
+  // Worked out from the data, so it cannot go stale when something is finally proven against a real provider.
+  const liveProven = phases.flatMap((p) => p.criteria).filter((c) => c.proof === 'live').length;
   const t = tower.data;
   const pname = (id: string) => t?.providers.find((p) => p.id === id)?.name ?? id.slice(0, 8);
 
   return (
     <>
       <h1>Control Tower</h1>
-      <Errors error={tower.error ?? progress.error} />
+      <p className="muted">
+        {t ? `Updated ${new Date(t.generatedAt).toLocaleTimeString()}. ` : ''}
+        <button className="link" onClick={() => { tower.reload(); progress.reload(); }}>Refresh now</button>
+      </p>
+      {(tower.error || progress.error) && (t || progress.data) && (
+        <div className="errors" role="alert">The latest refresh failed, so what you see below may be out of date{t ? ` (as of ${new Date(t.generatedAt).toLocaleTimeString()})` : ''}.</div>
+      )}
+      {(tower.error || progress.error) && !t && !progress.data && <Errors error={tower.error ?? progress.error} />}
 
       <section className="card" aria-label="Needs attention">
         <h2>Needs attention</h2>
@@ -74,10 +83,21 @@ export function ControlTower() {
         {progress.data && (
           <p>
             <strong>{count('done')}</strong> of {phases.length} done · <strong>{count('in_progress')}</strong> in progress · <strong>{count('not_started')}</strong> not started.
-            {' '}<span className="muted">Nothing has yet been proven against the real Twilio, Telnyx, OpenAI or ElevenLabs.</span>
+            {' '}<span className="muted">{liveProven === 0
+              ? 'Nothing has yet been proven against the real Twilio, Telnyx, OpenAI or ElevenLabs.'
+              : `${liveProven} exit criteri${liveProven === 1 ? 'on has' : 'a have'} been proven against a real provider.`}</span>
           </p>
         )}
         <div className="phases">{phases.map((p) => <Phase key={p.id} p={p} />)}</div>
+        {progress.data && progress.data.crossCutting.length > 0 && (
+          <div className="phase" aria-label="Applies to every phase">
+            <h3>Applies to every phase</h3>
+            <ul className="criteria">{progress.data.crossCutting.map((c) => (
+              <li key={c.text}><span className={STATE[c.state][1]}>{STATE[c.state][0]}</span> Each phase's exit also requires that {c.text}
+                {c.note && <div className="muted">{c.note}</div>}</li>
+            ))}</ul>
+          </div>
+        )}
         {progress.data && (
           <details>
             <summary>{progress.data.decisions.length} open decisions</summary>
@@ -96,6 +116,7 @@ export function ControlTower() {
                 <tbody>{t.activeCalls.map((c) => <tr key={c.id}><td>{fmtDate(c.started_at)}</td><td>{c.direction}</td><td>{c.status.replace('_', ' ')}</td><td>{pname(c.provider_id)}</td></tr>)}</tbody>
               </table>
             )}
+            {t.activeTotal > t.activeCalls.length && <p className="muted">Showing the newest {t.activeCalls.length} of {t.activeTotal} calls in progress.</p>}
             <p className="muted">{t.blocked24h} outbound call{t.blocked24h === 1 ? '' : 's'} blocked by the do-not-call gate in the last 24 hours.</p>
           </section>
 

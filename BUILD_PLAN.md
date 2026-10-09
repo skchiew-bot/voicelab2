@@ -99,7 +99,7 @@ Built and tested:
 - **Admin console** (`/admin/`, React single-page app served by the API): staff sign-in; add a provider from a form built from the adapter declaration; edit capabilities; add and confirm charging versions; record provider funding; add clients, projects, users and credits. Driven end to end in a real browser by `tests/admin-ui.test.ts`. Exit criterion 1 is now met through the UI.
 
 Not built yet:
-- Tenant switcher and the Control Tower shell.
+- A tenant switcher.
 - Redis and the job queue (nothing in Phase 0 needs them yet).
 - Finer roles and permissions beyond internal admin, tenant admin and tenant user.
 - The Docker install path has not been run end to end; its compose file validates, but it needs a real run.
@@ -323,8 +323,8 @@ Alerts are delivered inside the console first. Later they can also go to email, 
 ### Control Tower status (version 1)
 
 The console now opens on the Control Tower (`#/tower`, `GET /internal/control-tower`, `GET /internal/progress`):
-- **Needs attention:** alerts derived from live state, each linking to where it is fixed: no MYR rate or client rate card; no public address for webhooks; call events a provider cannot verify (no Twilio Auth Token or Telnyx public key); credentials not checked; no rates in force, or rates not confirmed; no do-not-call position declared; calls that could not be priced or that differ from the provider; a provider failing at least half of its last 24 hours of calls (once it has at least five); a recorded funding balance that has run out.
-- **Project progress:** every phase with its status, exit criteria (met, partly or not met, and how each was proven: tested, tested against fakes, or proven live), what is still open, and the open decisions. The data is `src/progress.ts`, maintained by hand, and a test ties it to this plan's phase names, exit-criteria text and decisions table so the two cannot drift.
+- **Needs attention:** alerts derived from live state, each linking to where it is fixed: no MYR rate or client rate card; no public address for webhooks; call events a provider cannot verify (no Twilio Auth Token or Telnyx public key); credentials not checked; no rates in force, or rates not confirmed; no do-not-call position declared; calls that could not be priced, finished calls never priced, or that differ from the provider; calls stuck dialling or in progress for too long (provider events probably not arriving); credentials that cannot be decrypted; a provider failing at least half of its last 24 hours of finished calls (once it has at least five); a recorded funding balance that has run out on an active provider. Calls that never connected (a refused dial, a blocked number) have nothing to price and are never counted as pricing failures.
+- **Project progress:** every phase with its status, exit criteria (met, partly or not met, and how each was proven: tested, tested against fakes, or proven live), what is still open, and the open decisions. The data is `src/progress.ts`, maintained by hand, and a test ties it to this plan's phase names, exit-criteria text (including the Control Tower's and the one that applies to every phase) and decisions table so the two cannot drift. A criterion can only be marked proven live with a written "Live evidence:" note.
 - **Live calls, provider health, funding and cost and margin** (last 24 hours and 7 days, each call counted once).
 
 Not built yet: the change-log panel, alerts by email, WhatsApp or Slack, funding runway and burn rate (calls do not yet deduct from the recorded funding balance), and the stitching, deliverability, concurrency, journey and learning-loop panels, which wait for their phases.

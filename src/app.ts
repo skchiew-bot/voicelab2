@@ -18,7 +18,7 @@ import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRa
 import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
 import { addNumber, callKnown, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
 import { controlTower } from './store/control-tower.js';
-import { DECISIONS, PHASES } from './progress.js';
+import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
 import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
 import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
 import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
@@ -355,7 +355,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   });
   app.get('/internal/progress', async (req) => {
     await internal(req);
-    return { generatedAt: new Date().toISOString(), phases: PHASES, decisions: DECISIONS };
+    return { generatedAt: new Date().toISOString(), phases: PHASES, crossCutting: CROSS_CUTTING, decisions: DECISIONS };
   });
 
   // ------------------------------------------------ numbers and calls

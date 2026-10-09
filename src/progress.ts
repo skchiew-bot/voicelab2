@@ -87,10 +87,19 @@ export const PHASES: PhaseProgress[] = [
   {
     id: 'CT', name: 'Control Tower', status: 'in_progress', summary: 'One internal console to see and steer the whole platform. Version 1 shows project progress, what needs attention, live calls, provider health, funding and cost.',
     criteria: [
-      { text: 'An operator can answer these from one screen without opening a provider console:', state: 'partly', proof: 'tests', note: 'Calls, provider health, funding balances, cost and margin, and a list of what needs attention are on one screen. Funding is not yet deducted automatically as calls are costed, and alerts are shown in the console only.' },
+      { text: 'An operator can answer these from one screen without opening a provider console:', state: 'partly', proof: 'tests', note: 'What needs attention, live calls, provider health, recorded funding balances, and cost and margin totals are on one screen; cost by campaign is one click away on the Calls screen. Funding is not yet deducted automatically as calls are costed, and alerts are shown in the console only.' },
       { text: 'Every action taken in the Control Tower appears in the change log, with who did it and why.', state: 'not_met', proof: 'none', note: 'Actions are recorded in the audit log, but no change-log screen shows them yet.' },
     ],
     open: ['A change-log screen (actions are recorded in the audit log, but nothing shows them yet)', 'Alerts by email, WhatsApp or Slack', 'Funding runway and burn rate'],
+  },
+];
+
+/** The plan's exit criterion that applies to every phase. */
+export const CROSS_CUTTING: Criterion[] = [
+  {
+    text: 'each AI task the phase introduces has a configured model tier, a logged token count and a documented escalation rule.',
+    state: 'partly', proof: 'none',
+    note: 'No AI task exists in the product yet. The model_config table and the tier rules in CLAUDE.md are in place; token logging and escalation rules do not exist yet.',
   },
 ];
 

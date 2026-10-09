@@ -73,6 +73,7 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(p1).toContainText('Still open');
     await expect(page.getByLabel('Phase 4')).toContainText('Not started');
     await expect(page.getByLabel('Control Tower', { exact: true }).first()).toBeVisible();
+    await expect(page.getByLabel('Applies to every phase')).toContainText('configured model tier');
     await progress.getByText('10 open decisions').click();
     await expect(progress.getByText('Hosting region')).toBeVisible();
 
@@ -98,6 +99,36 @@ describe.skipIf(!run)('admin UI', () => {
     await link.click();
     await expect(page.getByRole('heading', { name: 'tx tower' })).toBeVisible();
     expect(page.url()).toContain(prov);
+    await page.close();
+  });
+
+  it('says so when a refresh fails, instead of showing old numbers as current', async () => {
+    const page = await browser.newPage();
+    await signIn(page, env.staffToken);
+    await expect(page.getByLabel('Needs attention')).toBeVisible();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await page.route('**/internal/control-tower', (route) => route.abort());
+    await page.getByRole('button', { name: 'Refresh now' }).click();
+    await expect(page.getByRole('alert')).toContainText('may be out of date');
+    await expect(page.getByLabel('Needs attention')).toBeVisible(); // what was shown stays, but is no longer presented as current
+    await page.unroute('**/internal/control-tower');
+    await page.getByRole('button', { name: 'Refresh now' }).click();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await page.close();
+  });
+
+  it('says when it is showing only the newest of many live calls', async () => {
+    const st = env.staffToken;
+    const t = (await env.call(st, 'POST', '/internal/tenants', { name: 'Busy Co' })).json().id;
+    const prov = (await env.call(st, 'POST', '/internal/providers', { adapterKey: 'twilio', name: 'tw busy', params: { accountSid: 'ACb', authToken: 'x', twimlAppVoiceUrl: 'https://x.example/v' } })).json().id;
+    const { randomUUID } = await import('node:crypto');
+    for (let i = 0; i < 25; i++) {
+      await env.pool.query(`INSERT INTO calls (id, tenant_id, provider_id, direction, status) VALUES ($1,$2,$3,'inbound','in_progress')`, [randomUUID(), t, prov]);
+    }
+    const page = await browser.newPage();
+    await signIn(page, st);
+    await expect(page.getByLabel('Live calls')).toContainText('Showing the newest 20 of 25 calls in progress');
+    await env.pool.query(`DELETE FROM calls WHERE tenant_id = $1`, [t]);
     await page.close();
   });
 

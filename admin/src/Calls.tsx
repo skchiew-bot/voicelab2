@@ -4,7 +4,7 @@ import { Errors, Field, fmtDate, useAction, useLoad } from './ui';
 
 const COST_STATE: Record<string, { text: string; cls: string }> = {
   pending: { text: 'Not priced', cls: 'badge warn' }, recorded: { text: 'Estimated', cls: 'badge warn' },
-  reconciled: { text: 'Reconciled', cls: 'badge ok' }, variance: { text: 'Differs from provider', cls: 'badge bad' }, failed: { text: 'Could not price', cls: 'badge bad' },
+  not_applicable: { text: 'Nothing to price', cls: 'badge' }, reconciled: { text: 'Reconciled', cls: 'badge ok' }, variance: { text: 'Differs from provider', cls: 'badge bad' }, failed: { text: 'Could not price', cls: 'badge bad' },
 };
 
 function CallDetail({ call, onChanged }: { call: CallRow; onChanged: () => void }) {

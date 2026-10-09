@@ -41,7 +41,7 @@ export interface Adapter {
 export interface Capability { capability: string; support: 'native' | 'composable' | 'unsupported'; notes: string | null }
 export interface Provider {
   id: string; adapter_key: string; kind: string; name: string; params: Record<string, unknown>;
-  status: string; secrets_stored: boolean; capabilities: Capability[];
+  status: string; secrets_stored: boolean; credentials_checked_at: string | null; capabilities: Capability[];
 }
 export interface Component { component: string; unit: string; rate: string; currency: string; billing_line: string }
 export interface ChargingVersion {

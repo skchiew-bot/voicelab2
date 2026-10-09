@@ -6,7 +6,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import type pg from 'pg';
 import { z, ZodError } from 'zod';
 import { listAdapters } from './adapters/registry.js';
-import { CAPABILITIES } from './adapters/types.js';
+import { CAPABILITIES, type Fetch } from './adapters/types.js';
 import type { Config } from './config.js';
 import { withActor, type Actor } from './db.js';
 import { AppError } from './errors.js';
@@ -14,7 +14,9 @@ import { hashToken, parseKey } from './secrets.js';
 import { chargingAt, addChargingVersion, confirmVersion, listChargingVersions } from './store/charging.js';
 import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
-import { createProvider, getProvider, listProviders, setCapability } from './store/providers.js';
+import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
+import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
+import { createProvider, getProvider, listProviders, preflight, recheckProvider, setCapability } from './store/providers.js';
 import { createProject, createTenant, createUser, listProjects, listTenants } from './store/tenants.js';
 
 interface Session { userId: string; email: string; actor: Actor }
@@ -24,9 +26,16 @@ const adminDist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 
 const money = z.string().regex(/^-?\d+(\.\d+)?$/, 'Use a decimal number as text, e.g. "12.50".');
 const currency = z.string().length(3).transform((s) => s.toUpperCase());
 
-export function buildApp(pool: pg.Pool, config: Config): FastifyInstance {
+export interface Deps {
+  /** Outbound HTTP for provider credential checks. Replaced in tests. */
+  fetch?: Fetch;
+}
+
+export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): FastifyInstance {
+  const http: Fetch = deps.fetch ?? fetch;
   const app = Fastify({ logger: false });
   const key = parseKey(config.VOICELAB_SECRET_KEY);
+  const dncKey = dncKeyFrom(key);
 
   async function authenticate(req: FastifyRequest): Promise<Session> {
     const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1];
@@ -127,8 +136,15 @@ export function buildApp(pool: pg.Pool, config: Config): FastifyInstance {
     const body = z.object({
       adapterKey: z.string(), name: z.string().min(1),
       params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
+      skipValidation: z.boolean().optional(),
     }).parse(req.body);
-    return reply.status(201).send(await withActor(pool, s.actor, (c) => createProvider(c, key, s.userId, body)));
+    const checkedAt = await preflight(body, http); // talks to the provider before any transaction opens
+    return reply.status(201).send(await withActor(pool, s.actor, (c) => createProvider(c, key, s.userId, body, checkedAt)));
+  });
+  app.post('/internal/providers/:id/check', async (req) => {
+    const s = await internal(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    return recheckProvider(pool, key, http, s.userId, id, (fn) => withActor(pool, s.actor, fn));
   });
   app.get('/internal/providers', async (req) => {
     const s = await internal(req);
@@ -161,7 +177,7 @@ export function buildApp(pool: pg.Pool, config: Config): FastifyInstance {
       notes: z.string().optional(),
       components: z.array(z.object({
         component: z.enum(['telephony_leg', 'stt', 'llm', 'tts', 'platform', 'concurrency', 'other']),
-        unit: z.enum(['per_minute', 'per_second', 'per_character', 'per_token', 'per_credit', 'flat']),
+        unit: z.enum(['per_minute', 'per_second', 'per_character', 'per_1k_characters', 'per_token', 'per_1k_tokens', 'per_1m_tokens', 'per_credit', 'flat']),
         rate: money, currency, billingLine: z.string().optional(),
       })).min(1),
     }).parse(req.body);
@@ -200,6 +216,94 @@ export function buildApp(pool: pg.Pool, config: Config): FastifyInstance {
     const s = await internal(req);
     const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
     return withActor(pool, s.actor, (c) => eventsForCall(c, callId));
+  });
+
+  // ------------------------------------------------ FX and rate card
+  app.post('/internal/fx', async (req, reply) => {
+    const s = await internal(req);
+    const body = z.object({ currency: currency.refine((c) => c !== 'USD', 'USD is the base currency.'), perUsd: money, effectiveFrom: z.coerce.date() }).parse(req.body);
+    return reply.status(201).send(await withActor(pool, s.actor, (c) => addFxRate(c, s.userId, body)));
+  });
+  app.get('/internal/fx', async (req) => {
+    const s = await internal(req);
+    return withActor(pool, s.actor, listFxRates);
+  });
+  app.post('/internal/rate-card', async (req, reply) => {
+    const s = await internal(req);
+    const body = z.object({
+      effectiveFrom: z.coerce.date(), inboundCreditsPerMinute: money, outboundCreditsPerMinute: money, creditValueUsd: money,
+    }).parse(req.body);
+    return reply.status(201).send(await withActor(pool, s.actor, (c) => addRateCard(c, s.userId, body)));
+  });
+  app.get('/internal/rate-card', async (req) => {
+    const s = await internal(req);
+    return withActor(pool, s.actor, listRateCards);
+  });
+
+  // ------------------------------------------------------ call costs
+  app.post('/internal/calls/:callId/cost', async (req, reply) => {
+    const s = await internal(req);
+    const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
+    const body = z.object({
+      tenantId: z.string().uuid(), projectId: z.string().uuid().optional(),
+      direction: z.enum(['inbound', 'outbound']), occurredAt: z.coerce.date(),
+      usage: z.array(z.object({
+        providerId: z.string().uuid(),
+        usage: z.object({
+          seconds: z.number().min(0).optional(), characters: z.number().int().min(0).optional(),
+          inputTokens: z.number().int().min(0).optional(), outputTokens: z.number().int().min(0).optional(),
+          burst: z.boolean().optional(),
+        }),
+      })).min(1),
+    }).parse(req.body);
+    return reply.status(201).send(await withActor(pool, s.actor, (c) => recordCallCost(c, s.userId, { callId, ...body })));
+  });
+  app.get('/internal/calls/:callId/cost', async (req) => {
+    const s = await internal(req);
+    const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
+    return withActor(pool, s.actor, (c) => getCallCost(c, callId));
+  });
+  app.get('/internal/costs/campaigns', async (req) => {
+    const s = await internal(req);
+    const { tenantId } = z.object({ tenantId: z.string().uuid().optional() }).parse(req.query);
+    return withActor(pool, s.actor, (c) => campaignCosts(c, tenantId));
+  });
+
+  // ---------------------------------------------- do-not-call gate
+  const country = z.string().length(2).transform((v) => v.toUpperCase());
+  app.post('/internal/dnc/registries', async (req, reply) => {
+    const s = await internal(req);
+    const body = z.object({ country, requirement: z.enum(['registry', 'none_required']), source: z.string().min(1) }).parse(req.body);
+    return reply.status(201).send(await withActor(pool, s.actor, (c) => declareRegistry(c, s.userId, body)));
+  });
+  app.get('/internal/dnc/registries', async (req) => {
+    const s = await internal(req);
+    return withActor(pool, s.actor, listRegistries);
+  });
+  app.post('/internal/dnc/numbers', async (req) => {
+    const s = await internal(req);
+    const body = z.object({
+      country, tenantId: z.string().uuid().optional(), numbers: z.array(z.string()).min(1).max(10_000), source: z.string().optional(),
+    }).parse(req.body);
+    return withActor(pool, s.actor, (c) => addNumbers(c, dncKey, s.userId, body));
+  });
+  app.post('/internal/dnc/numbers/remove', async (req) => {
+    const s = await internal(req);
+    const body = z.object({ country, tenantId: z.string().uuid().optional(), number: z.string() }).parse(req.body);
+    return withActor(pool, s.actor, (c) => removeNumber(c, dncKey, s.userId, body));
+  });
+  // Dry run: answers without writing to the call log. Real dials use gateOutbound.
+  app.post('/internal/dial/check', async (req) => {
+    const s = await internal(req);
+    const body = z.object({ tenantId: z.string().uuid(), country, to: z.string() }).parse(req.body);
+    return withActor(pool, s.actor, (c) => preDialCheck(c, dncKey, body));
+  });
+  app.post('/internal/dial/gate', async (req) => {
+    const s = await internal(req);
+    const body = z.object({
+      tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), callId: z.string().uuid(), country, to: z.string(),
+    }).parse(req.body);
+    return withActor(pool, s.actor, (c) => gateOutbound(c, dncKey, body));
   });
 
   // --------------------------------------------------- client portal

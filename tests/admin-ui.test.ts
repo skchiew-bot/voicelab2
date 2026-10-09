@@ -81,7 +81,16 @@ describe.skipIf(!run)('admin UI', () => {
     await form.getByRole('button', { name: 'Add provider' }).click();
     await expect(page.getByRole('heading', { name: 'twilio ui' })).toBeVisible();
     await expect(page.getByText('credentials stored (encrypted)')).toBeVisible();
+    await expect(page.getByText('Credentials checked', { exact: true })).toBeVisible();
     expect(await page.content()).not.toContain('ui-secret-token');
+
+    // Credentials can be re-checked on demand, and a rejection is shown plainly.
+    await page.getByRole('button', { name: 'Check credentials now' }).click();
+    await expect(page.getByRole('status')).toContainText('accepted by the provider');
+    env.provider.state.respond = () => new Response('{}', { status: 401 });
+    await page.getByRole('button', { name: 'Check credentials now' }).click();
+    await expect(page.getByRole('alert')).toContainText('rejected these credentials');
+    env.provider.state.respond = () => new Response(JSON.stringify({ status: 'active' }), { status: 200 });
 
     // Capabilities are editable.
     await page.getByLabel('stt support').selectOption('composable');
@@ -145,6 +154,30 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
     await page.close();
   }, 60_000);
+
+  it('shows a provider outage clearly and lets the operator save without checking', async () => {
+    const page = await browser.newPage();
+    await signIn(page, env.staffToken);
+    env.provider.state.respond = () => { throw new Error('getaddrinfo ENOTFOUND api.telnyx.com'); };
+    await page.getByLabel('Provider type').selectOption('telnyx');
+    const form = page.getByRole('form', { name: 'Add provider' });
+    await field(form, 'Name').fill('telnyx offline');
+    await field(form, 'API key').fill('KEY-OFFLINE');
+    await field(form, 'Webhook URL').fill('https://example.com/hook');
+    await form.getByRole('button', { name: 'Add provider' }).click();
+    await expect(page.getByRole('alert')).toContainText('Could not reach Telnyx');
+
+    await form.getByLabel('Save without checking').check();
+    await form.getByRole('button', { name: 'Add provider' }).click();
+    await expect(page.getByRole('heading', { name: 'telnyx offline' })).toBeVisible();
+    await expect(page.getByText('Credentials not checked')).toBeVisible();
+
+    env.provider.state.respond = () => new Response(JSON.stringify({ data: { balance: '9.99', currency: 'USD' } }), { status: 200 });
+    await page.getByRole('button', { name: 'Check credentials now' }).click();
+    await expect(page.getByRole('status')).toContainText('balance: 9.99 USD');
+    await expect(page.getByText('Credentials checked', { exact: true })).toBeVisible();
+    await page.close();
+  });
 
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();

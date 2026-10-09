@@ -14,6 +14,10 @@ Provider-agnostic voice orchestration platform. The blueprint is the source of t
 - Client-facing code runs as the `voicelab_client` database role via `withActor`; provider cost, charging, funding and secrets must stay unreachable from it. `tests/foundations.test.ts` proves this.
 - Charging versions, both ledgers, the call-event log and the audit log are append-only (database triggers). A change is a new row.
 - Provider secrets are encrypted and never returned by the API, logged or audited.
+- Cost records, FX, rate cards and do-not-call lists are internal only; clients see credits drawn and nothing about provider cost or margin.
+- Every outbound dial must go through `gateOutbound` (`src/store/dnc.ts`) before the provider is called. The gate fails closed. Phone numbers are never stored, logged or audited in clear.
+- Money is exact: use `src/money.ts` (BigInt, 1e-8) and `src/billing.ts`, never floating point. A call that cannot be priced is refused, not recorded with a guess.
+- Tests never call real provider APIs. Provider HTTP goes through the injected `fetch`; use `fakeProviderApi` in `tests/helpers.ts`. When a test's setup calls an endpoint, assert it succeeded.
 
 ## Model selection (applies to every phase)
 

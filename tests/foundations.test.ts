@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readdirSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withActor } from '../src/db.js';
 import { recordEvent } from '../src/store/events.js';
@@ -209,6 +210,6 @@ describe('event log and audit', () => {
 
   it('reports health with the migration count', async () => {
     const res = await env.app.inject({ method: 'GET', url: '/health' });
-    expect(res.json()).toEqual({ ok: true, migrations: 1 });
+    expect(res.json()).toEqual({ ok: true, migrations: readdirSync('migrations').filter((f) => f.endsWith('.sql')).length });
   });
 });

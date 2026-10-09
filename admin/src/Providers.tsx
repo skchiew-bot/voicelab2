@@ -23,6 +23,7 @@ export function AddProvider({ adapters, onAdded }: { adapters: Adapter[]; onAdde
   const [adapterKey, setAdapterKey] = useState('');
   const [name, setName] = useState('');
   const [values, setValues] = useState<Record<string, string | boolean>>({});
+  const [skip, setSkip] = useState(false);
   const { pending, error, run } = useAction();
   const adapter = adapters.find((a) => a.key === adapterKey);
 
@@ -35,8 +36,8 @@ export function AddProvider({ adapters, onAdded }: { adapters: Adapter[]; onAdde
       if (v === undefined || v === '' || v === false) continue;
       params[def.key] = def.type === 'number' ? Number(v) : v;
     }
-    const created = await run(() => api<Provider>('POST', '/internal/providers', { adapterKey, name, params }));
-    if (created) { setName(''); setValues({}); setAdapterKey(''); onAdded(created); }
+    const created = await run(() => api<Provider>('POST', '/internal/providers', { adapterKey, name, params, ...(skip ? { skipValidation: true } : {}) }));
+    if (created) { setName(''); setValues({}); setAdapterKey(''); setSkip(false); onAdded(created); }
   }
 
   return (
@@ -58,7 +59,13 @@ export function AddProvider({ adapters, onAdded }: { adapters: Adapter[]; onAdde
             <ParamInput key={def.key} def={def} value={values[def.key] ?? (def.type === 'boolean' ? false : '')}
               onChange={(v) => setValues((s) => ({ ...s, [def.key]: v }))} />
           ))}
-          <p className="muted">Secrets are encrypted when saved and are not shown again.</p>
+          <p className="muted">
+            Saving checks these credentials with {adapter.displayName} using a read-only request. Secrets are encrypted when saved and are not shown again.
+          </p>
+          <label className="check">
+            <input type="checkbox" checked={skip} onChange={(e) => setSkip(e.target.checked)} />
+            Save without checking (only if the provider’s API is unreachable; you can check later)
+          </label>
         </>
       )}
       <Errors error={error} />

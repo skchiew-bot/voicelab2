@@ -128,6 +128,23 @@ Goal: real calls on real providers, with the true cost of every call known.
 - **Do-not-call pre-dial gate**, as a hard check per country. The blueprint lists it under Case Management. It is pulled forward here because no outbound call may be placed without it.
 - Reference rates entered as starting data and marked *unconfirmed* until each one is checked against the provider's current pricing page.
 
+**Status (in progress)**
+
+Built and tested. The provider APIs are unreachable from the build environment, so everything below is proven against fakes of their responses, not against the real services:
+- **Credential checks on save** for all four adapters. Twilio fetches the account over basic auth (token, or API key pair) and refuses an account that is not active. Telnyx uses the read-only balance endpoint. OpenAI lists models. ElevenLabs fetches the user. A rejection is told apart from an outage; "save without checking" exists for outages, is recorded in the audit log, and the credentials can be checked later, from the console or the API.
+- **Billing math** in exact integer arithmetic: increment, rounding (up, nearest, down) and minimum charge, with no floating point.
+- **Per-call cost record:** one line per billable component, each pointing at the exact charging version used, so a later rate change cannot alter it. Totals in USD and MYR using the FX rate in force at the time, credits drawn, margin, and the project tag. Re-sending a call returns the stored record and draws no credits twice. A call it cannot price (no rates, no FX rate) is refused, not recorded wrong.
+- **Credit meter** mirrors the provider's billing increment. Credits are zero until a rate card exists.
+- **FX rates and the client rate card** (versioned, append-only), and a per-campaign cost rollup.
+- **Do-not-call gate**, failing closed: an unparseable number, or a country with no declared position, is blocked. Supports a national registry per country and each client's own opt-out list. Numbers are stored as keyed hashes. `gateOutbound` logs the decision to the call-event log without the number.
+
+Not built yet:
+- **Placing and receiving calls:** Twilio TwiML and Telnyx call control, webhooks turned into call events, and live OpenAI and ElevenLabs sessions. This needs live accounts, so exit criterion 1 is not met.
+- **Reconciliation** against each provider's own usage data. Cost records are stored as `estimated`; nothing sets `reconciled` yet, so exit criterion 2 is only partly met.
+- **Feeding usage into the cost record.** The record accepts seconds, characters and tokens; no live call yet supplies them.
+- **Reference rates.** There is no seeded starting data. Operators enter rates in the console and mark them confirmed.
+- **Console screens** for FX, the rate card, do-not-call lists and cost views. These are API only for now.
+
 **Exit criteria**
 - Inbound and outbound test calls work on both Twilio and Telnyx.
 - Every test call produces a complete cost record, and the record reconciles with the provider's own usage data within an agreed tolerance.

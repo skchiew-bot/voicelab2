@@ -1,4 +1,25 @@
-import type { Adapter } from './types.js';
+import type { Adapter, Fetch, ValidationResult } from './types.js';
+
+/** One read-only GET. Hosts are fixed per adapter: nothing a user types decides where we connect. */
+async function probe(
+  label: string, http: Fetch, url: string, headers: Record<string, string>,
+  read?: (body: unknown) => ValidationResult,
+): Promise<ValidationResult> {
+  try {
+    const res = await http(url, { method: 'GET', headers, signal: AbortSignal.timeout(10_000) });
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, kind: 'rejected', reason: `${label} rejected these credentials (HTTP ${res.status}).` };
+    }
+    if (!res.ok) {
+      return { ok: false, kind: 'unavailable', reason: `${label} answered HTTP ${res.status}, so the credentials could not be confirmed.` };
+    }
+    return read ? read(await res.json().catch(() => null)) : { ok: true };
+  } catch (err) {
+    return { ok: false, kind: 'unreachable', reason: `Could not reach ${label}: ${(err as Error).message}` };
+  }
+}
+
+const basic = (user: string, pass: string) => 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
 
 // Telephony providers carry no speech capabilities themselves; those route to a
 // voice provider. Capability defaults here are a starting point to be verified
@@ -29,6 +50,17 @@ export const twilio: Adapter = {
     const hasKeyPair = Boolean(v.apiKeySid) && Boolean(v.apiKeySecret);
     return hasToken || hasKeyPair ? null : 'Provide either an Auth Token, or both an API key SID and API key secret.';
   },
+  validate(v, http) {
+    const sid = String(v.accountSid);
+    const auth = v.authToken ? basic(sid, String(v.authToken)) : basic(String(v.apiKeySid), String(v.apiKeySecret));
+    return probe('Twilio', http, `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}.json`,
+      { authorization: auth }, (body) => {
+        const status = (body as { status?: string } | null)?.status;
+        return status && status !== 'active'
+          ? { ok: false, kind: 'rejected', reason: `The Twilio account is ${status}, not active.` }
+          : { ok: true, info: status ? { accountStatus: status } : undefined };
+      });
+  },
 };
 
 export const telnyx: Adapter = {
@@ -46,6 +78,12 @@ export const telnyx: Adapter = {
     inbound_calls: 'native', outbound_calls: 'native', call_transfer: 'native', call_recording: 'native',
     ...telephonyOnly,
   },
+  // The read-only balance endpoint doubles as the credential check.
+  validate: (v, http) => probe('Telnyx', http, 'https://api.telnyx.com/v2/balance',
+    { authorization: `Bearer ${String(v.apiKey)}` }, (body) => {
+      const d = (body as { data?: { balance?: string; currency?: string } } | null)?.data;
+      return { ok: true, info: d?.balance ? { balance: `${d.balance} ${d.currency ?? ''}`.trim() } : undefined };
+    }),
 };
 
 export const openai: Adapter = {
@@ -57,6 +95,7 @@ export const openai: Adapter = {
     { key: 'apiKey', label: 'API key', type: 'secret', required: true },
     { key: 'project', label: 'Project ID', type: 'string', required: false },
   ],
+  validate: (v, http) => probe('OpenAI', http, 'https://api.openai.com/v1/models', { authorization: `Bearer ${String(v.apiKey)}` }),
   defaultCapabilities: {
     inbound_calls: 'unsupported', outbound_calls: 'unsupported', call_transfer: 'composable', call_recording: 'composable',
     stt: 'native', llm: 'native', tts: 'native', realtime_conversation: 'native',
@@ -72,6 +111,7 @@ export const elevenlabs: Adapter = {
     { key: 'apiKey', label: 'API key', type: 'secret', required: true },
     { key: 'agentId', label: 'Agent ID', type: 'string', required: false },
   ],
+  validate: (v, http) => probe('ElevenLabs', http, 'https://api.elevenlabs.io/v1/user', { 'xi-api-key': String(v.apiKey) }),
   defaultCapabilities: {
     inbound_calls: 'unsupported', outbound_calls: 'unsupported', call_transfer: 'composable', call_recording: 'composable',
     stt: 'native', llm: 'composable', tts: 'native', realtime_conversation: 'native',

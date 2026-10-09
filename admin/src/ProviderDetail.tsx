@@ -3,10 +3,33 @@ import { api, type ChargingVersion, type Provider } from './api';
 import { Errors, Field, fmtDate, useAction, useLoad } from './ui';
 
 const COMPONENTS = ['telephony_leg', 'stt', 'llm', 'tts', 'platform', 'concurrency', 'other'];
-const UNITS = ['per_minute', 'per_second', 'per_character', 'per_token', 'per_credit', 'flat'];
+const UNITS = ['per_minute', 'per_second', 'per_character', 'per_1k_characters', 'per_token', 'per_1k_tokens', 'per_1m_tokens', 'per_credit', 'flat'];
 
 interface Row { component: string; unit: string; rate: string; currency: string; billingLine: string }
 const blankRow = (): Row => ({ component: 'telephony_leg', unit: 'per_minute', rate: '', currency: 'USD', billingLine: 'main' });
+
+function CredentialCheck({ provider, onChecked }: { provider: Provider; onChecked: () => void }) {
+  const [result, setResult] = useState<{ ok: boolean; reason?: string; info?: Record<string, string> } | null>(null);
+  const { pending, error, run } = useAction();
+  return (
+    <div className="creds">
+      <p>
+        <span className={provider.credentials_checked_at ? 'badge ok' : 'badge warn'}>
+          {provider.credentials_checked_at ? 'Credentials checked' : 'Credentials not checked'}
+        </span>{' '}
+        {provider.credentials_checked_at && <span className="muted">{fmtDate(provider.credentials_checked_at)}</span>}{' '}
+        <button className="secondary" disabled={pending} onClick={async () => {
+          const r = await run(() => api<{ ok: boolean; reason?: string; info?: Record<string, string> }>('POST', `/internal/providers/${provider.id}/check`));
+          if (r) { setResult(r); onChecked(); }
+        }}>Check credentials now</button>
+      </p>
+      <Errors error={error} />
+      {result && (result.ok
+        ? <div className="notice ok" role="status">Credentials accepted by the provider.{result.info && Object.keys(result.info).length > 0 && ` ${Object.entries(result.info).map(([k, v]) => `${k}: ${v}`).join(', ')}`}</div>
+        : <div className="errors" role="alert">{result.reason}</div>)}
+    </div>
+  );
+}
 
 function Capabilities({ provider, onChanged }: { provider: Provider; onChanged: () => void }) {
   const { error, run } = useAction();
@@ -201,6 +224,7 @@ export function ProviderDetail({ id }: { id: string }) {
             {provider.data.adapter_key} · {provider.data.kind} · {provider.data.status} ·
             {' '}{provider.data.secrets_stored ? 'credentials stored (encrypted)' : 'no credentials stored'}
           </p>
+          <CredentialCheck provider={provider.data} onChecked={provider.reload} />
           <section className="card">
             <h2>Settings</h2>
             {Object.keys(provider.data.params).length === 0

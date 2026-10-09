@@ -31,29 +31,6 @@ function CredentialCheck({ provider, onChecked }: { provider: Provider; onChecke
   );
 }
 
-function CredentialCheck({ provider, onChecked }: { provider: Provider; onChecked: () => void }) {
-  const [result, setResult] = useState<{ ok: boolean; reason?: string; info?: Record<string, string> } | null>(null);
-  const { pending, error, run } = useAction();
-  return (
-    <div className="creds">
-      <p>
-        <span className={provider.credentials_checked_at ? 'badge ok' : 'badge warn'}>
-          {provider.credentials_checked_at ? 'Credentials checked' : 'Credentials not checked'}
-        </span>{' '}
-        {provider.credentials_checked_at && <span className="muted">{fmtDate(provider.credentials_checked_at)}</span>}{' '}
-        <button className="secondary" disabled={pending} onClick={async () => {
-          const r = await run(() => api<{ ok: boolean; reason?: string; info?: Record<string, string> }>('POST', `/internal/providers/${provider.id}/check`));
-          if (r) { setResult(r); onChecked(); }
-        }}>Check credentials now</button>
-      </p>
-      <Errors error={error} />
-      {result && (result.ok
-        ? <div className="notice ok" role="status">Credentials accepted by the provider.{result.info && Object.keys(result.info).length > 0 && ` ${Object.entries(result.info).map(([k, v]) => `${k}: ${v}`).join(', ')}`}</div>
-        : <div className="errors" role="alert">{result.reason}</div>)}
-    </div>
-  );
-}
-
 function Capabilities({ provider, onChanged }: { provider: Provider; onChanged: () => void }) {
   const { error, run } = useAction();
   return (

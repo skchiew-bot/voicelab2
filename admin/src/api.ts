@@ -86,3 +86,12 @@ export interface PhaseProgress {
   criteria: { text: string; state: 'met' | 'partly' | 'not_met'; proof: 'tests' | 'fakes' | 'live' | 'none'; note?: string }[];
 }
 export interface Progress { generatedAt: string; phases: PhaseProgress[]; crossCutting: PhaseProgress['criteria']; decisions: string[] }
+
+export interface WorkflowSummary { id: string; tenant_id: string; name: string; latest_version: string | null; staging_version: string | null; production_version: string | null }
+export interface WfIssue { code: string; nodeId?: string; message: string }
+export interface WfVersion { id: string; version: string; change: string; valid: boolean; issues: { errors: WfIssue[]; warnings: WfIssue[] }; note: string | null; created_at: string; definition: WorkflowDef }
+export interface WorkflowDef { start: string; variables?: string[]; nodes: Record<string, { type: string; speech?: string; text?: string | Record<string, string>; transitions?: { when?: unknown; to: string }[]; workflow?: string; target?: unknown; outcome?: string; integration?: string; label?: string }> }
+export interface WorkflowDetailData { id: string; tenant_id: string; name: string; live: { staging: string | null; production: string | null }; previous: { staging: string | null; production: string | null }; history: { id: number; environment: string; kind: string; version: string; created_at: string }[]; versions: WfVersion[] }
+export interface TemplateInfo { key: string; title: string; description: string; entry: string; workflows: { key: string; description: string }[] }
+export interface SimResult { batchId: string; total: number; passed: number; failed: number; clean: boolean; gateProblems?: string[]; results: { name: string; passed: boolean; outcome: string | null; failures: string[] }[] }
+export interface RunView { id: string; version: number; status: string; outcome: string | null; error: string | null; said: string[]; awaiting: { captureAs: string } | null }

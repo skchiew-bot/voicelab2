@@ -74,3 +74,10 @@ details > summary { cursor: pointer; color: var(--accent); }
 .badge { white-space: nowrap; }
 /* On a phone a wide table scrolls inside itself rather than widening the whole page. */
 @media (max-width: 700px) { table { display: block; max-width: 100%; overflow-x: auto; } }
+.code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85rem; }
+ul.outline { list-style: none; padding: 0; display: flex; flex-direction: column; gap: .6rem; }
+.outline .line { font-style: italic; }
+ol.transcript { list-style: none; padding: 0; display: flex; flex-direction: column; gap: .35rem; }
+ol.transcript li.caller { text-align: right; }
+ol.transcript li.note { color: var(--muted); font-style: italic; }
+td.actions { white-space: nowrap; }

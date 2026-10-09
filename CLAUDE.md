@@ -29,6 +29,10 @@ Provider-agnostic voice orchestration platform. The blueprint is the source of t
 - A finished call is priced once. Calls move forward only; a late or duplicate event must not reopen or re-price one.
 - Our own numbers (`phone_numbers`) are stored; customers' numbers are not. Scrub provider error text with `redactNumbers` before it is stored, logged or returned.
 - A call has one cost, counted once: a reconciled record replaces the estimate in every total (`campaignCosts` takes the latest per call). Reconciling never draws credits again.
+- Workflow definitions are data and are never executed: conditions use the fixed language in `src/workflows/conditions.ts`, and text slots are plain substitution. A version that fails `validateDefinition` can be saved but never deployed.
+- Calls to a client's integrations go only through `callIntegration` (`src/workflows/integrations.ts`): https only, every resolved address public (checked at connect time), no redirects, limited size and time. Simulations never call a real system, and a staging run never writes to one.
+- Sensitive workflow variables are never spoken, given to a model, sent to an integration, recorded in steps or shown in views, in any workflow of the call (enforced at publish time and again at run time). While a call waits they are held sealed, and they are wiped when it ends or is abandoned. A phone number, in any form or nesting, is never allowed in a call's variables. Look up names in definitions and variables with `own()` (never `in` or `[]`), so inherited names like `constructor` never count.
+- A call pins the workflow versions it can reach when it starts. Deploying or rolling back never changes a call already under way.
 - Money is exact: use `src/money.ts` (BigInt, 1e-8) and `src/billing.ts`, never floating point. A call that cannot be priced is refused, not recorded with a guess.
 - Tests never call real provider APIs. Provider HTTP goes through the injected `fetch`; use `fakeProviderApi` in `tests/helpers.ts`. When a test's setup calls an endpoint, assert it succeeded.
 

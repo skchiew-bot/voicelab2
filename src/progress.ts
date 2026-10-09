@@ -42,12 +42,19 @@ export const PHASES: PhaseProgress[] = [
     ],
   },
   {
-    id: '2', name: 'Workflow Skeleton', status: 'not_started', summary: "The minimum workflow engine that stitching and modules can hang off.",
+    id: '2', name: 'Workflow Skeleton', status: 'in_progress', summary: "The minimum workflow engine that stitching and modules can hang off. The engine, versions, staging and production, simulation, integrations and the Malaysian debt-collection template are built and tested.",
     criteria: [
-      notMet('The debt-collection template runs end to end in staging and then in production.'),
-      notMet('Rolling back to the previous version works on a live workflow.'),
-      notMet("A workflow with a dangling path can't be published."),
-    ], open: [],
+      { text: 'The debt-collection template runs end to end in staging and then in production.', state: 'partly', proof: 'tests',
+        note: "Runs from the first word to the outcome in staging (simulated) and in production (a scripted caller replying through the API), all tested. No real phone call runs through it: no speech recognition or voice provider is connected to calls, so a live call cannot yet hold this conversation. The wording is a draft for compliance and native-speaker review." },
+      { text: 'Rolling back to the previous version works on a live workflow.', state: 'met', proof: 'tests', note: 'Tested with a call in flight: it finishes on the version it started on, and new calls get the version rolled back to.' },
+      { text: "A workflow with a dangling path can't be published.", state: 'met', proof: 'tests', note: 'A missing target (including names every object inherits), an unreachable node, or a dependency that is not ready each block publishing; a new version that would break a live caller is refused too.' },
+    ],
+    open: [
+      'Live phone calls cannot hold this conversation yet: no speech recognition or voice provider is connected, and the engine takes the caller\'s words as text',
+      'The prompt-to-workflow builder (deferred in the plan)',
+      'A visual canvas: the console shows an outline and a JSON editor',
+      'Replies are understood by phrase rules only; nothing yet handles a reply the rules cannot match',
+    ],
   },
   {
     id: '3', name: 'Stitching And Outbound Deliverability', status: 'not_started', summary: "Cut cost without hurting the caller's experience.",

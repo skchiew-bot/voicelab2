@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { withActor, type Actor } from '../db.js';
 import { createIntegration, listIntegrations } from '../store/integrations.js';
-import { getRun, listRuns, replyRun, simulate, startRun, type RunDeps } from '../store/runs.js';
+import { abandonStaleRuns, getRun, listRuns, replyRun, simulate, startRun, type RunDeps } from '../store/runs.js';
 import * as wf from '../store/workflows.js';
 import { instantiate, templateFor, TEMPLATES } from '../workflows/templates.js';
 import { validateDefinition } from '../workflows/validate.js';
@@ -88,10 +88,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: Ctx): void {
     const body = z.object({ versionId: id.optional(), scenarios: z.array(scenario).min(1).max(500) }).parse(req.body);
     return simulate(ctx.runDeps, s.userId, { workflowId, versionId: body.versionId, scenarios: body.scenarios as never });
   });
+  app.post('/internal/workflow-runs/sweep', async (req) => {
+    const s = await ctx.internal(req);
+    const body = z.object({ olderThanMinutes: z.number().int().min(5).max(60 * 24 * 30).default(60) }).parse(req.body ?? {});
+    return abandonStaleRuns(ctx.runDeps, s.userId, body);
+  });
   app.get('/internal/workflows/:workflowId/simulations', async (req) => {
     const { workflowId } = z.object({ workflowId: id }).parse(req.params);
     return run(req, async (c) => (await c.query(
-      `SELECT b.id, b.total, b.passed, b.failed, b.created_at, v.major || '.' || v.minor AS version
+      `SELECT b.id, b.total, b.passed, b.failed, b.gate_ok, b.created_at, v.major || '.' || v.minor AS version
          FROM simulation_batches b JOIN workflow_versions v ON v.id = b.version_id WHERE b.workflow_id = $1 ORDER BY b.created_at DESC LIMIT 50`, [workflowId])).rows);
   });
   app.get('/internal/simulations/:batchId', async (req) => {

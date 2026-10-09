@@ -1,6 +1,8 @@
-import type { Condition, Json } from './definition.js';
+import { own, type Condition, type Json } from './definition.js';
 
 export type Vars = Record<string, Json>;
+
+const get = (vars: Vars, k: string): Json | undefined => (own(vars, k) ? vars[k] : undefined);
 
 const same = (a: Json | undefined, b: Json | undefined): boolean =>
   a !== undefined && b !== undefined && (typeof a === 'object' || typeof b === 'object' ? JSON.stringify(a) === JSON.stringify(b) : String(a) === String(b));
@@ -16,9 +18,9 @@ export function evalCondition(c: Condition, vars: Vars): boolean {
   if ('all' in c) return c.all.every((x) => evalCondition(x, vars));
   if ('any' in c) return c.any.some((x) => evalCondition(x, vars));
   if ('not' in c) return !evalCondition(c.not, vars);
-  const left = vars[c.var];
+  const left = get(vars, c.var);
   if (c.op === 'exists') return left !== undefined && left !== null && left !== '';
-  const right = c.valueVar !== undefined ? vars[c.valueVar] : c.value;
+  const right = c.valueVar !== undefined ? get(vars, c.valueVar) : c.value;
   switch (c.op) {
     case 'eq': return same(left, right);
     case 'ne': return left !== undefined && right !== undefined && !same(left, right);

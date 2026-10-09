@@ -65,4 +65,8 @@ export interface WorkflowDefinition {
 
 export const LIMITS = { nodes: 500, textChars: 2000, definitionBytes: 256 * 1024, transitionsPerNode: 20 } as const;
 export const ID_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Names every object inherits. They are never nodes, variables or stored values: `vars["constructor"]` must not "exist". */
+export const RESERVED_NAMES: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
+export const isName = (s: unknown): s is string => typeof s === 'string' && ID_RE.test(s) && !RESERVED_NAMES.has(s);
+export const own = (o: object, k: string): boolean => Object.hasOwn(o, k);
 export const SLOT_RE = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;

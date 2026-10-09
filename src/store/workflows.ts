@@ -1,7 +1,7 @@
 import type pg from 'pg';
 import { AppError } from '../errors.js';
 import type { WorkflowDefinition } from '../workflows/definition.js';
-import { checkReferences, isWorkflowName } from '../workflows/refs.js';
+import { checkReferences, isWorkflowName, referencesOf } from '../workflows/refs.js';
 import { validateDefinition, type ValidationResult } from '../workflows/validate.js';
 import { classifyChange, nextVersion, versionLabel, type Change } from '../workflows/versioning.js';
 import { audit } from './audit.js';
@@ -116,6 +116,23 @@ async function liveDefinitions(c: pg.PoolClient, tenantId: string, env: Environm
   return { names, live };
 }
 
+/**
+ * Workflows already live in this environment that go to `wf`: they must still hold together once `wf` is replaced
+ * by `candidate` (it may need other variables, or mark something sensitive that they speak).
+ */
+async function dependentProblems(c: pg.PoolClient, wf: { tenant_id: string; name: string }, candidate: WorkflowDefinition, env: Environment): Promise<string[]> {
+  const { names, live } = await liveDefinitions(c, wf.tenant_id, env);
+  const out: string[] = [];
+  for (const [name, def] of live) {
+    if (name === wf.name || !referencesOf(def).some((r) => r.workflow === wf.name)) continue;
+    const issues = checkReferences(name, def, (n) => (n === wf.name ? candidate : live.get(n) ?? (names.has(n) ? 'undeployed' : 'absent')));
+    for (const i of issues) out.push(`"${name}" (live in ${env}) would break: ${i.message}`);
+  }
+  return out;
+}
+
+const lockTenant = (c: pg.PoolClient, tenantId: string) => c.query(`SELECT pg_advisory_xact_lock(hashtext('wfdeploy:' || $1))`, [tenantId]);
+
 async function referenceProblems(c: pg.PoolClient, wf: { tenant_id: string; name: string }, def: WorkflowDefinition, env: Environment) {
   const { names, live } = await liveDefinitions(c, wf.tenant_id, env);
   return checkReferences(wf.name, def, (name) => (name === wf.name ? def : live.get(name) ?? (names.has(name) ? 'undeployed' : 'absent')));
@@ -129,6 +146,7 @@ async function referenceProblems(c: pg.PoolClient, wf: { tenant_id: string; name
 export async function deploy(c: pg.PoolClient, actorId: string | null, workflowId: string, e: { versionId: string; environment: Environment }) {
   await c.query('SELECT id FROM workflows WHERE id = $1 FOR UPDATE', [workflowId]);
   const wf = await getWorkflow(c, workflowId);
+  await lockTenant(c, wf.tenant_id); // deploys of one tenant's workflows are checked against each other one at a time
   const version = (await c.query('SELECT * FROM workflow_versions WHERE id = $1 AND workflow_id = $2', [e.versionId, workflowId])).rows[0] as VersionRow | undefined;
   if (!version) throw new AppError(404, 'That version does not belong to this workflow.');
   const label = versionLabel(version);
@@ -139,14 +157,31 @@ export async function deploy(c: pg.PoolClient, actorId: string | null, workflowI
   const refs = await referenceProblems(c, wf, version.definition, e.environment);
   if (refs.length) throw new AppError(400, `Version ${label} cannot go live in ${e.environment}: it depends on workflows that are not ready.`, refs.map((r) => r.message));
 
+  const broken = await dependentProblems(c, wf, version.definition, e.environment);
+  if (broken.length) throw new AppError(409, `Version ${label} would break workflows that are live in ${e.environment} and depend on it.`, broken);
+
   const stack = liveStack(await history(c, workflowId, e.environment));
   if (stack[stack.length - 1] === version.id) throw new AppError(409, `Version ${label} is already live in ${e.environment}.`);
 
   if (e.environment === 'production') {
     const inStaging = await liveVersionId(c, workflowId, 'staging');
     if (inStaging !== version.id) throw new AppError(409, `Version ${label} is not live in staging. Deploy it to staging and simulate it there first.`);
-    const clean = (await c.query('SELECT 1 FROM simulation_batches WHERE version_id = $1 AND failed = 0 AND total > 0 LIMIT 1', [version.id])).rowCount === 1;
-    if (!clean) throw new AppError(409, `Version ${label} has no clean simulation. Run a list-based simulation of it in staging and make every scenario pass.`);
+    const batches = (await c.query('SELECT pins FROM simulation_batches WHERE version_id = $1 AND failed = 0 AND total > 0 AND gate_ok ORDER BY created_at DESC', [version.id])).rows;
+    if (batches.length === 0) throw new AppError(409, `Version ${label} has no clean simulation. Run a list-based simulation of it in staging in which every scenario states its expected outcome (none expecting an error) and passes.`);
+    // What was tested must be what will run: every workflow it reaches must be at the simulated version in production.
+    const byName = new Map((await c.query('SELECT id, name FROM workflows WHERE tenant_id = $1', [wf.tenant_id])).rows.map((r) => [r.name as string, r.id as string]));
+    const mismatches = async (pins: Record<string, string>) => {
+      const out: string[] = [];
+      for (const [name, vid] of Object.entries(pins)) {
+        if (name === wf.name) continue;
+        const live = byName.has(name) ? await liveVersionId(c, byName.get(name)!, 'production') : undefined;
+        if (live !== vid) out.push(`"${name}" is not at the version that was simulated.`);
+      }
+      return out;
+    };
+    let problems: string[] = [];
+    for (const b of batches) { problems = await mismatches(b.pins as Record<string, string>); if (problems.length === 0) break; }
+    if (problems.length) throw new AppError(409, `Version ${label} was simulated against different versions of the workflows it uses than the ones live in production. Simulate it again.`, problems);
   }
 
   const d = (await c.query(
@@ -160,11 +195,14 @@ export async function deploy(c: pg.PoolClient, actorId: string | null, workflowI
 export async function rollback(c: pg.PoolClient, actorId: string | null, workflowId: string, environment: Environment) {
   await c.query('SELECT id FROM workflows WHERE id = $1 FOR UPDATE', [workflowId]);
   const wf = await getWorkflow(c, workflowId);
+  await lockTenant(c, wf.tenant_id);
   const stack = liveStack(await history(c, workflowId, environment));
   if (stack.length < 2) throw new AppError(409, `There is no earlier version to go back to in ${environment}.`);
   const target = (await c.query('SELECT * FROM workflow_versions WHERE id = $1', [stack[stack.length - 2]])).rows[0] as VersionRow;
   const refs = await referenceProblems(c, wf, target.definition, environment);
   if (refs.length) throw new AppError(409, `Version ${versionLabel(target)} cannot be restored: it depends on workflows that are no longer ready.`, refs.map((r) => r.message));
+  const broken = await dependentProblems(c, wf, target.definition, environment);
+  if (broken.length) throw new AppError(409, `Version ${versionLabel(target)} cannot be restored: it would break workflows that are live in ${environment} and depend on this one.`, broken);
   const d = (await c.query(
     `INSERT INTO workflow_deployments (workflow_id, environment, version_id, kind, deployed_by) VALUES ($1,$2,$3,'rollback',$4) RETURNING *`,
     [workflowId, environment, target.id, actorId])).rows[0];

@@ -1,6 +1,6 @@
 import { conditionVars } from './conditions.js';
 import {
-  ID_RE, LIMITS, OPERATORS, SLOT_RE, type Condition, type Json, type LocalText, type WorkflowDefinition, type WorkflowNode,
+  ID_RE, isName, LIMITS, OPERATORS, own, SLOT_RE, type Condition, type Json, type LocalText, type WorkflowDefinition, type WorkflowNode,
 } from './definition.js';
 import { isWorkflowName } from './refs.js';
 import { slotsIn } from './render.js';
@@ -22,11 +22,11 @@ function checkCondition(c: unknown, nodeId: string, add: (code: string, msg: str
     return list.every((x) => checkCondition(x, nodeId, add, depth + 1));
   }
   if ('not' in c) return checkCondition(c.not, nodeId, add, depth + 1);
-  if (typeof c.var !== 'string' || !ID_RE.test(c.var)) { add('bad_condition', 'A condition\'s var must be a variable name.'); return false; }
+  if (!isName(c.var)) { add('bad_condition', 'A condition\'s var must be a variable name.'); return false; }
   if (!OPERATORS.includes(c.op as never)) { add('bad_condition', `"${String(c.op)}" is not a known operator (${OPERATORS.join(', ')}).`); return false; }
   if (c.op !== 'exists' && c.value === undefined && c.valueVar === undefined) { add('bad_condition', `The "${c.op}" operator needs a value or a valueVar.`); return false; }
   if (c.op === 'in' && c.valueVar === undefined && !Array.isArray(c.value)) { add('bad_condition', 'The "in" operator needs a list as its value.'); return false; }
-  if (c.valueVar !== undefined && (typeof c.valueVar !== 'string' || !ID_RE.test(c.valueVar))) { add('bad_condition', 'valueVar must be a variable name.'); return false; }
+  if (c.valueVar !== undefined && !isName(c.valueVar)) { add('bad_condition', 'valueVar must be a variable name.'); return false; }
   return true;
 }
 
@@ -37,7 +37,7 @@ function stringsIn(v: unknown, out: string[] = []): string[] {
   return out;
 }
 
-const textsOf = (t: LocalText | undefined): string[] => (t === undefined ? [] : typeof t === 'string' ? [t] : Object.values(t));
+const textsOf = (t: LocalText | undefined): string[] => (typeof t === 'string' ? [t] : isObj(t) ? (Object.values(t) as string[]) : []);
 
 /**
  * Everything that can be decided from the definition alone. A definition with any error cannot be published.
@@ -58,11 +58,13 @@ export function validateDefinition(input: unknown): ValidationResult {
   const ids = Object.keys(def.nodes);
   if (ids.length === 0) { err('no_nodes', 'A workflow needs at least one node.'); return { errors, warnings }; }
   if (ids.length > LIMITS.nodes) err('too_many_nodes', `A workflow can have at most ${LIMITS.nodes} nodes.`);
-  if (typeof def.start !== 'string' || !(def.start in def.nodes)) err('bad_start', 'The start must name a node that exists.');
+  const nodesProto = Object.getPrototypeOf(def.nodes);
+  if (nodesProto !== Object.prototype && nodesProto !== null) err('bad_node_id', 'A node named __proto__ is not allowed.');
+  if (typeof def.start !== 'string' || !own(def.nodes, def.start)) err('bad_start', 'The start must name a node that exists.');
 
   const declared = new Set<string>();
   if (def.variables !== undefined) {
-    if (!Array.isArray(def.variables) || !def.variables.every((v) => typeof v === 'string' && ID_RE.test(v))) err('bad_variables', '"variables" must be a list of variable names.');
+    if (!Array.isArray(def.variables) || !def.variables.every((v) => isName(v))) err('bad_variables', '"variables" must be a list of variable names.');
     else def.variables.forEach((v) => declared.add(v));
   }
   const languages = Array.isArray(def.languages) ? def.languages.filter((l): l is string => typeof l === 'string') : [];
@@ -73,14 +75,14 @@ export function validateDefinition(input: unknown): ValidationResult {
   const sent: { name: string; nodeId: string }[] = [];     // sent to an integration
   const sensitive = new Set<string>();
   if (def.sensitiveVariables !== undefined) {
-    if (!Array.isArray(def.sensitiveVariables) || !def.sensitiveVariables.every((v) => typeof v === 'string' && ID_RE.test(v))) err('bad_sensitive', '"sensitiveVariables" must be a list of variable names.');
+    if (!Array.isArray(def.sensitiveVariables) || !def.sensitiveVariables.every((v) => isName(v))) err('bad_sensitive', '"sensitiveVariables" must be a list of variable names.');
     else def.sensitiveVariables.forEach((v) => sensitive.add(v));
   }
   const edges = new Map<string, string[]>();
 
   for (const id of ids) {
     const raw = (def.nodes as Record<string, unknown>)[id];
-    if (!ID_RE.test(id)) err('bad_node_id', `"${id}" is not a valid node name (letters, digits and underscores, not starting with a digit).`, id);
+    if (!isName(id)) err('bad_node_id', `"${id}" is not a valid node name (letters, digits and underscores, not starting with a digit).`, id);
     if (!isObj(raw) || typeof raw.type !== 'string') { err('bad_node', 'A node must be an object with a type.', id); continue; }
     const n = raw as unknown as WorkflowNode & Record<string, unknown>;
     const targets: string[] = [];
@@ -112,7 +114,7 @@ export function validateDefinition(input: unknown): ValidationResult {
         if (!['fixed', 'hybrid', 'dynamic'].includes(n.speech as string)) { nodeErr('bad_speech', 'speech must be fixed, hybrid or dynamic.'); break; }
         const texts = textsOf(n.text as LocalText | undefined);
         if (isObj(n.text) && !('en' in n.text)) nodeErr('text_needs_english', 'Text in several languages must include "en", which is the fallback.');
-        if (n.text !== undefined && texts.some((t) => typeof t !== 'string')) nodeErr('bad_text', 'Text must be a string, or a string per language.');
+        if (n.text !== undefined && (typeof n.text !== 'string' && !isObj(n.text) || texts.some((t) => typeof t !== 'string'))) nodeErr('bad_text', 'Text must be a string, or a string per language.');
         if (texts.some((t) => typeof t === 'string' && t.length > LIMITS.textChars)) nodeErr('text_too_long', `Text is limited to ${LIMITS.textChars} characters.`);
         if (n.speech === 'dynamic') {
           if (typeof n.prompt !== 'string' || !n.prompt.trim()) nodeErr('dynamic_needs_prompt', 'A dynamic node needs a prompt telling the model what to say.');
@@ -130,13 +132,13 @@ export function validateDefinition(input: unknown): ValidationResult {
         }
         if (n.listen !== undefined) {
           const l = n.listen as unknown;
-          if (!isObj(l) || typeof l.captureAs !== 'string' || !ID_RE.test(l.captureAs)) nodeErr('bad_listen', 'listen.captureAs must be a variable name.');
+          if (!isObj(l) || !isName(l.captureAs)) nodeErr('bad_listen', 'listen.captureAs must be a variable name.');
           else {
             assigned.add(l.captureAs);
             if (l.sensitive !== undefined && typeof l.sensitive !== 'boolean') nodeErr('bad_listen', 'listen.sensitive must be true or false.');
             if (l.sensitive === true) sensitive.add(l.captureAs);
             if (l.intents !== undefined) {
-              if (!isObj(l.intents) || !Object.entries(l.intents).every(([k, v]) => ID_RE.test(k) && Array.isArray(v) && v.length > 0 && v.every((p) => typeof p === 'string' && p.trim() !== ''))) {
+              if (!isObj(l.intents) || !Object.entries(l.intents).every(([k, v]) => isName(k) && Array.isArray(v) && v.length > 0 && v.every((p) => typeof p === 'string' && p.trim() !== ''))) {
                 nodeErr('bad_intents', 'intents must map each intent name to a non-empty list of phrases.');
               } else assigned.add(`${l.captureAs}_intent`);
             }
@@ -151,7 +153,7 @@ export function validateDefinition(input: unknown): ValidationResult {
         if (n.method !== undefined && n.method !== 'GET' && n.method !== 'POST') nodeErr('bad_method', 'method must be GET or POST.');
         if (n.body !== undefined) stringsIn(n.body).forEach((s) => slotsIn(s).forEach(addSent));
         if (n.store !== undefined) {
-          if (!isObj(n.store) || !Object.entries(n.store).every(([k, p]) => ID_RE.test(k) && typeof p === 'string' && /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(p))) nodeErr('bad_store', 'store must map a variable name to a dotted path such as data.balance.');
+          if (!isObj(n.store) || !Object.entries(n.store).every(([k, p]) => isName(k) && typeof p === 'string' && /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(p))) nodeErr('bad_store', 'store must map a variable name to a dotted path such as data.balance.');
           else Object.keys(n.store).forEach((k) => assigned.add(k));
         }
         if (n.onError !== undefined) { if (typeof n.onError !== 'string') nodeErr('bad_on_error', 'onError must name a node.'); else targets.push(n.onError); }
@@ -161,7 +163,7 @@ export function validateDefinition(input: unknown): ValidationResult {
         if (typeof n.workflow !== 'string' || !isWorkflowName(n.workflow)) nodeErr('bad_workflow', 'A subflow must name the workflow it runs (letters, digits, - and _).');
         assigned.add(`${id}_outcome`);
         if (n.exports !== undefined) {
-          if (!Array.isArray(n.exports) || !n.exports.every((v) => typeof v === 'string' && ID_RE.test(v))) nodeErr('bad_exports', 'exports must be a list of variable names.');
+          if (!Array.isArray(n.exports) || !n.exports.every((v) => isName(v))) nodeErr('bad_exports', 'exports must be a list of variable names.');
           else n.exports.forEach((v) => assigned.add(v));
         }
         break;
@@ -183,11 +185,11 @@ export function validateDefinition(input: unknown): ValidationResult {
 
   // Dangling paths: an edge to a node that does not exist, and nodes nothing can reach.
   for (const [id, targets] of edges) {
-    for (const t of targets) if (!(t in (def.nodes as object))) err('unknown_target', `Goes to "${t}", which does not exist.`, id);
+    for (const t of targets) if (!own(def.nodes as object, t)) err('unknown_target', `Goes to "${t}", which does not exist.`, id);
   }
-  if (typeof def.start === 'string' && def.start in (def.nodes as object)) {
+  if (typeof def.start === 'string' && own(def.nodes as object, def.start)) {
     const seen = new Set<string>([def.start]); const queue = [def.start];
-    while (queue.length) for (const t of edges.get(queue.shift()!) ?? []) if (t in (def.nodes as object) && !seen.has(t)) { seen.add(t); queue.push(t); }
+    while (queue.length) for (const t of edges.get(queue.shift()!) ?? []) if (own(def.nodes as object, t) && !seen.has(t)) { seen.add(t); queue.push(t); }
     for (const id of ids) if (!seen.has(id)) err('unreachable_node', `Nothing leads to "${id}", so it can never run.`, id);
   }
 

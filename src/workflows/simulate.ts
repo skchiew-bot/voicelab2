@@ -14,6 +14,19 @@ export interface Scenario {
 
 export interface ScenarioResult { name: string; passed: boolean; outcome: string | null; failures: string[]; runId?: string }
 
+/**
+ * A batch counts towards production only if each scenario says what it expects (an outcome) and none of them
+ * expects the call to fail: passing a scenario that asserts nothing proves nothing.
+ */
+export function gateProblems(scenarios: Scenario[]): string[] {
+  const out: string[] = [];
+  for (const s of scenarios) {
+    if (s.expect?.outcome === undefined) out.push(`"${s.name}" does not say what outcome it expects.`);
+    else if (s.expect.outcome === 'error') out.push(`"${s.name}" expects the call to fail, so it cannot count towards production.`);
+  }
+  return out;
+}
+
 export const MAX_SCENARIOS = 500;
 export const MAX_REPLIES = 50;
 

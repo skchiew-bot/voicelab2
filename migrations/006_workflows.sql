@@ -46,6 +46,10 @@ CREATE TABLE simulation_batches (
   passed      integer NOT NULL,
   failed      integer NOT NULL,
   results     jsonb NOT NULL,
+  -- Whether the batch can count towards production: every scenario states its expected outcome, none expects an error.
+  gate_ok     boolean NOT NULL DEFAULT false,
+  -- The version of every workflow the batch ran against, so production can be checked to match what was tested.
+  pins        jsonb NOT NULL DEFAULT '{}',
   created_by  uuid REFERENCES users(id),
   created_at  timestamptz NOT NULL DEFAULT now()
 );
@@ -63,8 +67,13 @@ CREATE TABLE workflow_runs (
   batch_id      uuid REFERENCES simulation_batches(id),
   pins          jsonb NOT NULL,
   state         jsonb NOT NULL,
+  -- Sensitive variables held while a call waits for the caller, encrypted (bound to this run); wiped when the call ends.
+  sealed        bytea,
   state_version integer NOT NULL DEFAULT 0,
-  status        text NOT NULL CHECK (status IN ('running', 'awaiting_reply', 'ended')),
+  -- 'processing': a reply has been claimed and is being applied, so a second reply cannot fire the same integration calls.
+  status        text NOT NULL CHECK (status IN ('running', 'awaiting_reply', 'processing', 'ended')),
+  claimed_at    timestamptz,
+  updated_at    timestamptz NOT NULL DEFAULT now(),
   outcome       text,
   error         text,
   started_at    timestamptz NOT NULL DEFAULT now(),

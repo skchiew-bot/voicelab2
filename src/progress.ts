@@ -47,7 +47,7 @@ export const PHASES: PhaseProgress[] = [
       { text: 'The debt-collection template runs end to end in staging and then in production.', state: 'partly', proof: 'tests',
         note: "Runs from the first word to the outcome in staging (simulated) and in production (a scripted caller replying through the API), all tested. No real phone call runs through it: no speech recognition or voice provider is connected to calls, so a live call cannot yet hold this conversation. The wording is a draft for compliance and native-speaker review." },
       { text: 'Rolling back to the previous version works on a live workflow.', state: 'met', proof: 'tests', note: 'Tested with a call in flight: it finishes on the version it started on, and new calls get the version rolled back to.' },
-      { text: "A workflow with a dangling path can't be published.", state: 'met', proof: 'tests', note: 'A missing target, an unreachable node, or a dependency that is not ready each block publishing.' },
+      { text: "A workflow with a dangling path can't be published.", state: 'met', proof: 'tests', note: 'A missing target (including names every object inherits), an unreachable node, or a dependency that is not ready each block publishing; a new version that would break a live caller is refused too.' },
     ],
     open: [
       'Live phone calls cannot hold this conversation yet: no speech recognition or voice provider is connected, and the engine takes the caller\'s words as text',

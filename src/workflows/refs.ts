@@ -1,4 +1,4 @@
-import { ID_RE, type WorkflowDefinition } from './definition.js';
+import { ID_RE, type Json, type WorkflowDefinition } from './definition.js';
 import { slotsIn } from './render.js';
 
 export interface Reference { node: string; kind: 'subflow' | 'handoff'; workflow: string }
@@ -24,7 +24,35 @@ export function knownVariables(def: WorkflowDefinition): Set<string> {
   return known;
 }
 
-export interface ReferenceIssue { code: 'unknown_workflow' | 'not_deployed' | 'subflow_cycle' | 'missing_context'; node?: string; message: string }
+export interface ReferenceIssue { code: 'unknown_workflow' | 'not_deployed' | 'subflow_cycle' | 'missing_context' | 'sensitive_across_workflows'; node?: string; message: string }
+
+const stringsIn = (v: Json | undefined, out: string[] = []): string[] => {
+  if (typeof v === 'string') out.push(v);
+  else if (Array.isArray(v)) v.forEach((x) => stringsIn(x, out));
+  else if (v !== null && typeof v === 'object') Object.values(v).forEach((x) => stringsIn(x, out));
+  return out;
+};
+
+/** Variables a workflow marks sensitive, by list or by a sensitive answer. */
+export function sensitiveOf(def: WorkflowDefinition): Set<string> {
+  const out = new Set<string>(def.sensitiveVariables ?? []);
+  for (const n of Object.values(def.nodes)) if (n.type === 'speak' && n.listen?.sensitive) out.add(n.listen.captureAs);
+  return out;
+}
+
+/** Variables a workflow reads out loud, gives to a model, or sends to an integration. */
+export function leavesTheCall(def: WorkflowDefinition): Set<string> {
+  const out = new Set<string>();
+  for (const n of Object.values(def.nodes)) {
+    if (n.type === 'speak') {
+      const texts = n.text === undefined ? [] : typeof n.text === 'string' ? [n.text] : Object.values(n.text);
+      for (const t of [...texts, ...(n.speech === 'dynamic' && n.prompt ? [n.prompt] : [])]) slotsIn(t).forEach((s) => out.add(s));
+    } else if (n.type === 'api') {
+      for (const t of [n.path, ...stringsIn(n.body as Json | undefined)]) slotsIn(t).forEach((s) => out.add(s));
+    }
+  }
+  return out;
+}
 
 /**
  * Checks that need other workflows: does each target exist and is it live where this one is going, does the
@@ -41,6 +69,12 @@ export function checkReferences(
     const target = lookup(r.workflow);
     if (target === 'absent') { issues.push({ code: 'unknown_workflow', node: r.node, message: `"${r.node}" goes to the workflow "${r.workflow}", which does not exist.` }); continue; }
     if (target === 'undeployed') { issues.push({ code: 'not_deployed', node: r.node, message: `"${r.node}" goes to "${r.workflow}", which is not deployed there yet. Deploy it first.` }); continue; }
+    // Sensitivity follows the call across workflows: what one marks sensitive, the other may not speak or send.
+    const mine = sensitiveOf(def); const theirs = sensitiveOf(target);
+    const theirUse = leavesTheCall(target); const myUse = leavesTheCall(def);
+    const leaks = [...mine].filter((v) => theirUse.has(v));
+    if (r.kind === 'subflow') leaks.push(...[...theirs].filter((v) => myUse.has(v) && !leaks.includes(v)));
+    if (leaks.length) issues.push({ code: 'sensitive_across_workflows', node: r.node, message: `${leaks.map((m) => `"${m}"`).join(', ')} is sensitive in "${leaks.some((v) => mine.has(v)) ? name : r.workflow}" but spoken or sent by "${leaks.some((v) => mine.has(v)) ? r.workflow : name}". A sensitive value is never spoken or sent, in any workflow of the call.` });
     const missing = (target.variables ?? []).filter((v) => !known.has(v));
     if (missing.length) issues.push({ code: 'missing_context', node: r.node, message: `"${r.workflow}" needs ${missing.map((m) => `"${m}"`).join(', ')}, which "${name}" never has, so the call could not carry it over.` });
   }

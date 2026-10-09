@@ -14,6 +14,7 @@ export async function createIntegration(
   if (problem) throw new AppError(400, `That address cannot be used: ${problem}`);
   if ((e.authHeader === undefined) !== (e.authSecret === undefined)) throw new AppError(400, 'Give both the key\'s header name and the key, or neither.');
   if (e.authHeader !== undefined && !/^[A-Za-z0-9-]{1,64}$/.test(e.authHeader)) throw new AppError(400, 'The header name may only use letters, digits and "-".');
+  if (e.authSecret !== undefined && (/[\r\n\0]/.test(e.authSecret) || e.authSecret.length > 4096 || e.authSecret.trim() === '')) throw new AppError(400, 'The key must be a single line of at most 4096 characters.');
   if (e.authHeader !== undefined && ['host', 'content-length', 'content-type', 'transfer-encoding', 'connection'].includes(e.authHeader.toLowerCase())) {
     throw new AppError(400, `"${e.authHeader}" cannot be used for the key.`);
   }

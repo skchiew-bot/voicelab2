@@ -1,5 +1,9 @@
-import { SLOT_RE, type LocalText } from './definition.js';
+import { own, SLOT_RE, type LocalText } from './definition.js';
 import type { Vars } from './conditions.js';
+
+export class SensitiveVariable extends Error {
+  constructor(public variable: string) { super(`The variable "${variable}" is sensitive, so it is never spoken or sent anywhere.`); }
+}
 
 export class MissingVariable extends Error {
   constructor(public variable: string) { super(`The variable "${variable}" is not set.`); }
@@ -15,9 +19,10 @@ export function pickText(text: LocalText, lang: string | undefined): string | un
  * Fill {{slots}} from variables. A missing variable throws instead of speaking a gap or a placeholder
  * to a caller: the call is better ended and flagged than made to say something wrong.
  */
-export function renderText(template: string, vars: Vars): string {
+export function renderText(template: string, vars: Vars, forbidden: readonly string[] = []): string {
   return template.replace(SLOT_RE, (_m, name: string) => {
-    const v = vars[name];
+    if (forbidden.includes(name)) throw new SensitiveVariable(name);
+    const v = own(vars, name) ? vars[name] : undefined;
     if (v === undefined || v === null || v === '') throw new MissingVariable(name);
     return typeof v === 'object' ? JSON.stringify(v) : String(v);
   });

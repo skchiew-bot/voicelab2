@@ -21,7 +21,8 @@ for (const [net4, bits] of [
   ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4],
 ] as const) blocked4.addSubnet(net4, bits, 'ipv4');
 for (const [net6, bits] of [
-  ['::', 128], ['::1', 128],
+  ['::', 96],           // includes ::1 and IPv4-compatible addresses such as ::10.0.0.1
+  ['fec0::', 10],       // old site-local range
   ['::ffff:0:0', 96],   // IPv4 inside IPv6: refused outright rather than unpacked
   ['64:ff9b::', 96],    // NAT64
   ['100::', 64], ['2001::', 32], ['2001:db8::', 32], ['2002::', 16],

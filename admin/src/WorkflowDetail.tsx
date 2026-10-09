@@ -145,7 +145,7 @@ function Simulate({ workflowId, detail }: { workflowId: string; detail: Workflow
   return (
     <section className="card" aria-label="Simulation">
       <h2>Simulate</h2>
-      <p className="muted">Run a list of scripted callers through a version, with nothing real touched. Production needs a simulation of the exact version in which every caller does what you expected. Each has a name, the variables it starts with, what the caller says in order, and what you expect (<code>outcome</code>, <code>says</code>, <code>doesNotSay</code>, <code>handoff</code>).</p>
+      <p className="muted">Run a list of scripted callers through a version, with nothing real touched. Production needs a simulation of the exact version in which every caller states its expected <code>outcome</code> and does what you expected. Each has a name, the variables it starts with, what the caller says in order, and what you expect (<code>outcome</code>, <code>says</code>, <code>doesNotSay</code>, <code>handoff</code>).</p>
       <Field label="Version to simulate">
         <select value={versionId} onChange={(e) => setVersionId(e.target.value)}>
           <option value="">The version live in staging</option>
@@ -164,6 +164,7 @@ function Simulate({ workflowId, detail }: { workflowId: string; detail: Workflow
         <>
           <div className={result.clean ? 'notice ok' : 'errors'} role={result.clean ? 'status' : 'alert'}>
             {result.passed} of {result.total} passed. {result.clean ? 'This version can now go to production.' : 'Fix the failures before this version can go to production.'}
+            {result.gateProblems && result.gateProblems.length > 0 && ` ${result.gateProblems.join(' ')}`}
           </div>
           <table>
             <thead><tr><th>Caller</th><th>Result</th><th>Outcome</th><th>What went wrong</th></tr></thead>

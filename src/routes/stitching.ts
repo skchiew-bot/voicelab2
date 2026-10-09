@@ -6,7 +6,7 @@ import { DID_FAILURE_REASONS, listPool, recordDidFailure } from '../store/dids.j
 import { OUTCOMES, outboundAnalytics, recordOutcome } from '../store/outbound.js';
 import { addRecording, CONTENT_TYPES, listRecordings, recordingAudio, recordingGaps, recordingIndex } from '../store/recordings.js';
 import { measureStitching, type RunDeps } from '../store/runs.js';
-import { getVersion, getWorkflow, listVersions } from '../store/workflows.js';
+import { getVersion, getWorkflow, listVersions, liveVersionId } from '../store/workflows.js';
 import { AppError } from '../errors.js';
 import { scenario } from './workflows.js';
 
@@ -43,8 +43,10 @@ export function registerStitchingRoutes(app: FastifyInstance, ctx: Ctx): void {
     const { versionId } = z.object({ versionId: id.optional() }).parse(req.query);
     return run(req, async (c) => {
       const w = await getWorkflow(c, workflowId);
-      const v = versionId ? await getVersion(c, versionId) : (await listVersions(c, workflowId))[0];
-      if (!v) throw new AppError(404, 'This workflow has no versions.');
+      // The same default as a measurement and a simulation: the version live in staging, else the newest.
+      const liveId = versionId ? undefined : await liveVersionId(c, workflowId, 'staging');
+      const v = versionId || liveId ? await getVersion(c, (versionId ?? liveId)!) : (await listVersions(c, workflowId))[0];
+      if (!v || (versionId && v.workflow_id !== workflowId)) throw new AppError(404, 'That version does not belong to this workflow.');
       return recordingGaps(v.definition, await recordingIndex(c, w.tenant_id));
     });
   });

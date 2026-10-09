@@ -3,8 +3,8 @@ import { api, type Provider, type RecordingGaps, type StitchReport } from './api
 import { Errors, Field, useAction, useLoad } from './ui';
 
 /** What to record for a workflow, and what recording it saves. */
-export function Stitching({ workflowId, scenariosText }: { workflowId: string; scenariosText: string }) {
-  const gaps = useLoad(() => api<RecordingGaps>('GET', `/internal/workflows/${workflowId}/recording-gaps`), [workflowId]);
+export function Stitching({ workflowId, scenariosText, versionId }: { workflowId: string; scenariosText: string; versionId: string }) {
+  const gaps = useLoad(() => api<RecordingGaps>('GET', `/internal/workflows/${workflowId}/recording-gaps${versionId ? `?versionId=${versionId}` : ''}`), [workflowId, versionId]);
   const providers = useLoad(() => api<Provider[]>('GET', '/internal/providers'));
   const [voiceId, setVoiceId] = useState('');
   const [report, setReport] = useState<StitchReport | null>(null);
@@ -38,7 +38,7 @@ export function Stitching({ workflowId, scenariosText }: { workflowId: string; s
       <div><button disabled={act.pending || !voiceId} onClick={async () => {
         let scenarios: unknown;
         try { scenarios = JSON.parse(scenariosText); } catch { act.run(async () => { throw new Error('The scenarios in the Simulate box are not valid JSON.'); }); return; }
-        const r = await act.run(() => api<StitchReport>('POST', `/internal/workflows/${workflowId}/stitching-report`, { voiceProviderId: voiceId, scenarios }));
+        const r = await act.run(() => api<StitchReport>('POST', `/internal/workflows/${workflowId}/stitching-report`, { voiceProviderId: voiceId, versionId: versionId || undefined, scenarios }));
         if (r) setReport(r);
       }}>Measure saving</button></div>
       {report && (

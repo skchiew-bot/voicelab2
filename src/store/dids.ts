@@ -20,7 +20,8 @@ async function outboundPerMinuteUsd(c: pg.PoolClient, providerId: string, at: Da
   let total = 0n;
   for (const k of comps) {
     const perMinute = k.unit === 'per_second' ? mulDiv(toScaled(k.rate), 60n, 1n) : toScaled(k.rate);
-    total += mulDiv(perMinute, SCALE, await perUsd(c, k.currency, at));
+    // A currency with no exchange rate makes the price unknown, not the whole dial impossible.
+    try { total += mulDiv(perMinute, SCALE, await perUsd(c, k.currency, at)); } catch { return null; }
   }
   return total;
 }
@@ -43,7 +44,9 @@ export async function chooseDid(
   await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`did:${e.tenantId}:${e.country}`]);
   const pool = (await c.query(
     `SELECT n.id, n.e164, n.provider_id, n.last_used_at, n.use_count,
-            EXISTS (SELECT 1 FROM did_failures f WHERE f.tenant_id = n.tenant_id AND f.phone_number_id = n.id AND f.contact_hash = $4) AS locked
+            -- locked by the number the contact sees: the same number at another provider is the same caller ID
+            EXISTS (SELECT 1 FROM did_failures f JOIN phone_numbers fn ON fn.id = f.phone_number_id
+                     WHERE f.tenant_id = n.tenant_id AND fn.e164 = n.e164 AND f.contact_hash = $4) AS locked
        FROM phone_numbers n JOIN providers p ON p.id = n.provider_id
       WHERE n.tenant_id = $1 AND n.country = $2 AND n.status = 'active' AND p.kind = 'telephony' AND p.status = 'active'
         AND ($3::uuid IS NULL OR n.provider_id = $3)`,
@@ -82,7 +85,9 @@ export async function chooseDid(
 
 /** Is this specific DID usable for this contact? Used when an operator names the caller ID instead of letting the pool choose. */
 export async function didLockedFor(c: pg.PoolClient, tenantId: string, phoneNumberId: string, contactHash: string): Promise<boolean> {
-  return (await c.query('SELECT 1 FROM did_failures WHERE tenant_id = $1 AND phone_number_id = $2 AND contact_hash = $3 LIMIT 1', [tenantId, phoneNumberId, contactHash])).rowCount === 1;
+  return (await c.query(
+    `SELECT 1 FROM did_failures f JOIN phone_numbers fn ON fn.id = f.phone_number_id JOIN phone_numbers n ON n.e164 = fn.e164
+      WHERE f.tenant_id = $1 AND n.id = $2 AND f.contact_hash = $3 LIMIT 1`, [tenantId, phoneNumberId, contactHash])).rowCount === 1;
 }
 
 /**
@@ -90,9 +95,13 @@ export async function didLockedFor(c: pg.PoolClient, tenantId: string, phoneNumb
  * contact. The contact is known only by the hash stored on the call, so no number is needed here or kept.
  */
 export async function recordDidFailure(c: pg.PoolClient, actorId: string | null, callId: string, reason: DidFailureReason) {
-  const call = (await c.query('SELECT id, tenant_id, from_number_id, contact_hash, direction FROM calls WHERE id = $1', [callId])).rows[0];
+  const call = (await c.query('SELECT id, tenant_id, from_number_id, contact_hash, direction, status, end_reason FROM calls WHERE id = $1', [callId])).rows[0];
   if (!call) throw new AppError(404, 'Call not found.');
   if (call.direction !== 'outbound' || !call.from_number_id || !call.contact_hash) throw new AppError(409, 'That call was not dialled from a pooled number, so there is no DID to lock.');
+  // A call that never went out (blocked, or refused by this very check) says nothing about how the DID fared with a carrier.
+  if (call.status === 'blocked' || ['did_locked', 'all_locked_for_contact', 'no_numbers'].includes(call.end_reason ?? '')) {
+    throw new AppError(409, 'That call was never dialled, so it cannot show a DID failing.');
+  }
   const exists = (await c.query('SELECT 1 FROM did_failures WHERE phone_number_id = $1 AND contact_hash = $2 AND call_id = $3', [call.from_number_id, call.contact_hash, callId])).rowCount;
   if (!exists) {
     await c.query(

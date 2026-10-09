@@ -350,3 +350,102 @@ describe('outbound analytics', () => {
     expect((await get('/internal/analytics/outbound?from=2026-02-01&to=2026-01-01')).statusCode).toBe(400);
   });
 });
+
+// ---------------------------------------------------------------------------------------------- review findings
+describe('found in review', () => {
+  let t2: string;
+  beforeAll(async () => {
+    t2 = (await must(post('/internal/tenants', { name: 'Review Co' }))).json().id;
+  });
+  const dialT2 = (body: object) => post('/internal/calls/outbound', { tenantId: t2, country: 'MY', ...body });
+
+  it('locks the caller ID the contact sees, even when the same number is registered at two providers', async () => {
+    const SHARED = '+60355550001';
+    await must(post('/internal/numbers', { providerId: telnyxId, e164: SHARED, tenantId: t2, country: 'MY' }));
+    await must(post('/internal/numbers', { providerId: twilioId, e164: SHARED, tenantId: t2, country: 'MY' }));
+    const contact = '+60123459001';
+    env.provider.calls.length = 0;
+    const first = (await must(dialT2({ to: contact }))).json();
+    expect(fromOf(dialsMade()[0]!)).toBe(SHARED);
+    await must(post(`/internal/calls/${first.callId}/did-failure`, { reason: 'spam_flagged' }));
+    env.provider.calls.length = 0;
+    const again = await dialT2({ to: contact });                      // Twilio's copy of the same number must not be offered
+    expect(again.statusCode).toBe(409);
+    expect(dialsMade()).toHaveLength(0);
+    const named = await dialT2({ to: contact, from: SHARED, providerId: twilioId });
+    expect(named.statusCode).toBe(409);
+    expect(dialsMade()).toHaveLength(0);
+  });
+
+  it('ranks a provider priced in a currency with no exchange rate last instead of failing every dial', async () => {
+    const eur = (await must(post('/internal/providers', { adapterKey: 'twilio', name: 'tw-eur', params: { accountSid: 'AC2', authToken: 't', twimlAppVoiceUrl: `${BASE}/v` } }))).json().id;
+    await must(post(`/internal/providers/${eur}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 6, components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.001', currency: 'EUR' }] }));
+    await must(post('/internal/numbers', { providerId: eur, e164: '+60355550002', tenantId: t2, country: 'MY' }));
+    env.provider.calls.length = 0;
+    expect((await dialT2({ to: '+60123459002' })).statusCode).toBe(201);
+    expect(fromOf(dialsMade()[0]!)).toBe('+60355550001');          // the priced provider, not the unpriced one
+  });
+
+  it('prices per-second and non-USD rates correctly when ranking providers', async () => {
+    const t3 = (await must(post('/internal/tenants', { name: 'Rank Co' }))).json().id;
+    // MYR is 4.5 per USD. A: 0.020 USD/min as per_second 0.000333... is not exact, so use 0.0002 USD/s = 0.012 USD/min.
+    // B: 0.05 MYR/min = 0.01111 USD/min. B is cheaper only if MYR is converted the right way round.
+    const mk = async (name: string, rate: string, unit: string, currency: string) => {
+      const id = (await must(post('/internal/providers', { adapterKey: 'telnyx', name, params: { apiKey: 'k', webhookUrl: `${BASE}/h`, connectionId: 'c', webhookPublicKey: 'AAAA' } }))).json().id;
+      await must(post(`/internal/providers/${id}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'telephony_leg', unit, rate, currency }] }));
+      return id as string;
+    };
+    const a = await mk('rank-a', '0.0002', 'per_second', 'USD');
+    const b = await mk('rank-b', '0.05', 'per_minute', 'MYR');
+    await must(post('/internal/numbers', { providerId: a, e164: '+60355550010', tenantId: t3, country: 'MY' }));
+    await must(post('/internal/numbers', { providerId: b, e164: '+60355550011', tenantId: t3, country: 'MY' }));
+    env.provider.calls.length = 0;
+    await must(post('/internal/calls/outbound', { tenantId: t3, country: 'MY', to: '+60123459003' }));
+    expect(fromOf(dialsMade()[0]!)).toBe('+60355550011');           // 0.0111 USD/min beats 0.012 USD/min
+  });
+
+  it('spreads simultaneous dials across the pool instead of giving them all the same number', async () => {
+    const t4 = (await must(post('/internal/tenants', { name: 'Burst Co' }))).json().id;
+    for (const n of ['+60355550021', '+60355550022', '+60355550023']) await must(post('/internal/numbers', { providerId: telnyxId, e164: n, tenantId: t4, country: 'MY' }));
+    env.provider.calls.length = 0;
+    await Promise.all([0, 1, 2].map((i) => must(post('/internal/calls/outbound', { tenantId: t4, country: 'MY', to: `+6012345910${i}` }))));
+    expect(new Set(dialsMade().map(fromOf)).size).toBe(3);
+  });
+
+  it('names a missing or non-telephony provider plainly instead of failing', async () => {
+    expect((await dial({ to: CONTACT_A, providerId: randomUUID() })).statusCode).toBe(404);
+    expect((await dial({ to: '+60198765432', providerId: randomUUID() })).statusCode).toBe(404);
+    expect((await dial({ to: CONTACT_A, providerId: voiceId })).statusCode).toBe(400);
+  });
+
+  it('will not lock a DID because of a call that never went out', async () => {
+    const blocked = (await must(dial({ to: '+60198765432', from: TX2, providerId: telnyxId }))).json();
+    const r = await post(`/internal/calls/${blocked.callId}/did-failure`, { reason: 'spam_flagged' });
+    expect(r.statusCode).toBe(409);
+    const n = (await env.pool.query(`SELECT count(*)::int AS n FROM did_failures WHERE call_id = $1`, [blocked.callId])).rows[0].n;
+    expect(n).toBe(0);
+  });
+
+  it('refuses a version that belongs to another workflow when listing what to record', async () => {
+    const a = (await must(post(`/internal/tenants/${tenantId}/workflows`, { name: 'gaps_a', definition: frameWorkflow() }))).json();
+    const b = (await must(post(`/internal/tenants/${otherTenantId}/workflows`, { name: 'gaps_b', definition: frameWorkflow() }))).json();
+    expect((await get(`/internal/workflows/${a.workflow.id}/recording-gaps?versionId=${b.version.id}`)).statusCode).toBe(404);
+    expect((await get(`/internal/workflows/${a.workflow.id}/recording-gaps?versionId=${a.version.id}`)).statusCode).toBe(200);
+  });
+
+  it('plays only the client\'s own recordings in a call', async () => {
+    const w = (await must(post(`/internal/tenants/${tenantId}/workflows`, { name: 'isolation', definition: { start: 'a', nodes: { a: { type: 'speak', speech: 'fixed', text: 'Words recorded only for the other client.', transitions: [{ to: 'e' }] }, e: { type: 'end', outcome: 'ok' } } } }))).json();
+    await must(post(`/internal/workflows/${w.workflow.id}/deploy`, { versionId: w.version.id, environment: 'staging' }));
+    await must(upload('Words recorded only for the other client.', { tenant: otherTenantId }));
+    const run = (await must(post(`/internal/workflows/${w.workflow.id}/runs`, { environment: 'staging' }))).json();
+    expect(run.speech).toEqual({ synthChars: 'Words recorded only for the other client.'.length, recordedChars: 0 });
+  });
+
+  it('falls back to English wording, and English recordings, for a language the text does not have', async () => {
+    const w = (await must(post(`/internal/tenants/${tenantId}/workflows`, { name: 'lang_fallback', definition: { start: 'a', variables: ['lang'], nodes: { a: { type: 'speak', speech: 'fixed', text: { en: 'Fallback line.' }, transitions: [{ to: 'e' }] }, e: { type: 'end', outcome: 'ok' } } } }))).json();
+    await must(post(`/internal/workflows/${w.workflow.id}/deploy`, { versionId: w.version.id, environment: 'staging' }));
+    await must(upload('Fallback line.'));
+    const run = (await must(post(`/internal/workflows/${w.workflow.id}/runs`, { environment: 'staging', variables: { lang: 'fr' } }))).json();
+    expect(run.speech).toEqual({ synthChars: 0, recordedChars: 'Fallback line.'.length });
+  });
+});

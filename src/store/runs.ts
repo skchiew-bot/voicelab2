@@ -316,8 +316,15 @@ export async function measureStitching(d: RunDeps, e: { workflowId: string; vers
     for (const k of lines) perUsds.set(k.currency, await perUsd(c, k.currency, at));
     return { wf, resolved: await resolvePins(c, wf, 'staging', e.versionId), recordings: await recordingIndex(c, wf.tenant_id), lines, perUsds, confirmed };
   });
-  const stitched = sumSpeech(await Promise.all(e.scenarios.map((s) => playScenario(ctx.resolved, s, d.speaker, ctx.recordings))));
-  const unstitched = sumSpeech(await Promise.all(e.scenarios.map((s) => playScenario(ctx.resolved, s, d.speaker, undefined))));
+  // One at a time, and with no model writing lines: a model's wording varies, and would colour the difference being measured
+  // (a dynamic line speaks its fallback text here, and is live in both runs).
+  const play = async (recordings: Deps['recordings']) => {
+    const played: Played[] = [];
+    for (const s of e.scenarios) played.push(await playScenario(ctx.resolved, s, undefined, recordings));
+    return sumSpeech(played);
+  };
+  const stitched = await play(ctx.recordings);
+  const unstitched = await play(undefined);
 
   const costUsd = (chars: number): bigint => ctx.lines.reduce((sum: bigint, k: { unit: Unit; rate: string; currency: string; billing_line: string }) => {
     const q = quantityFor(k.unit, k.billing_line, { characters: chars }, null);

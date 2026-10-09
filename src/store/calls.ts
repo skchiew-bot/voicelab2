@@ -66,6 +66,11 @@ export async function placeOutboundCall(d: CallDeps, actorId: string, input: Pla
   const chash = toNumber ? contactHash(toNumber, contactKeyFrom(d.key)) : null;
 
   const setup = await asInternal(d, async (c) => {
+    if (input.providerId) {
+      const named = await loadProvider(c, input.providerId);
+      if (!named) throw new AppError(404, 'Provider not found.');
+      if (named.kind !== 'telephony' || named.status !== 'active') throw new AppError(400, 'That provider cannot place calls.');
+    }
     let own: { id: string; e164: string; provider_id: string } | undefined;
     if (named) {
       const rows = (await c.query(

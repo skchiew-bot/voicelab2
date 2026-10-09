@@ -177,7 +177,7 @@ function Simulate({ workflowId, detail }: { workflowId: string; detail: Workflow
         </>
       )}
     </section>
-    <Stitching workflowId={workflowId} scenariosText={text} />
+    <Stitching workflowId={workflowId} scenariosText={text} versionId={versionId} />
     </>
   );
 }

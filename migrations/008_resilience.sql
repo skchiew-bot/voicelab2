@@ -127,6 +127,10 @@ ALTER TABLE calls ADD COLUMN burst boolean NOT NULL DEFAULT false;
 -- What the client's credits are multiplied by for this call (an overburst premium the client agreed to), if any.
 ALTER TABLE calls ADD COLUMN credit_multiplier numeric(6,3) CHECK (credit_multiplier >= 1);
 ALTER TABLE calls ADD COLUMN queued_at timestamptz;
+-- A caller who waited for a channel and gave up (or was timed out) was never served: provider time is costed, credits are not drawn.
+ALTER TABLE calls ADD COLUMN no_credit boolean NOT NULL DEFAULT false;
+-- A caller who waited is billed credits only from the moment they were served, not for the hold.
+ALTER TABLE calls ADD COLUMN credit_from timestamptz;
 ALTER TABLE calls DROP CONSTRAINT calls_status_check;
 ALTER TABLE calls ADD CONSTRAINT calls_status_check CHECK (status IN
   ('queued', 'dialing', 'ringing', 'in_progress', 'completed', 'unanswered', 'failed', 'blocked'));

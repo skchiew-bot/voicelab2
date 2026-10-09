@@ -49,9 +49,11 @@ describe('health: failing over, and trusting again only slowly', () => {
     const good = (n: number, from: number) => Array.from({ length: n }, (_, i) => ok(from + i * S));
     expect(nextHealth(h, [...good(1, at + S)], at + S, P, undefined).health.state).toBe('failed');
     const five = good(5, at + S);
-    expect(nextHealth(h, five, at + 6 * S, P, undefined).health.state).toBe('failed');       // five good, but only 6 s after failing: under the 120 s dwell
-    const later = nextHealth(h, good(5, at + 130 * S), at + 135 * S, P, undefined);
-    expect(later.transition).toEqual({ from: 'failed', to: 'healthy', trigger: 'recovered' });
+    expect(nextHealth(h, five, at + 6 * S, P, undefined).health.state).toBe('failed');       // five good, but a moment apart
+    // five good a moment apart do not count however long ago the provider failed: the run itself must span the minimum time
+    expect(nextHealth(h, good(5, at + 500 * S), at + 505 * S, P, undefined).health.state).toBe('failed');
+    const spaced = Array.from({ length: 5 }, (_, i) => ok(at + 500 * S + i * 30 * S));         // 0, 30, 60, 90, 120 s
+    expect(nextHealth(h, spaced, at + 620 * S, P, undefined).transition).toEqual({ from: 'failed', to: 'healthy', trigger: 'recovered' });
   });
   it('restarts the run of good samples at any bad one, and does not count a slow success as good', () => {
     const { h, at } = fail();
@@ -64,19 +66,20 @@ describe('health: failing over, and trusting again only slowly', () => {
   it('is not failed again at once by the errors that failed it before: only what happened since counts', () => {
     const { h, at } = fail();
     const t = at + 200 * S;
-    const back = nextHealth(h, [...[100, 101, 102].map((s) => err(s * S)), ...Array.from({ length: 5 }, (_, i) => ok(t + i * S))], t + 5 * S, P, undefined);
+    const goods = Array.from({ length: 5 }, (_, i) => ok(t + i * 30 * S));
+    const back = nextHealth(h, [...[100, 101, 102].map((s) => err(s * S)), ...goods], t + 125 * S, P, undefined);
     expect(back.health.state).toBe('healthy');
-    const again = nextHealth(back.health, [err(100 * S), err(101 * S), err(102 * S), ok(t)], t + 6 * S, P, undefined);
+    const again = nextHealth(back.health, [err(100 * S), err(101 * S), err(102 * S), ...goods], t + 126 * S, P, undefined);
     expect(again.health.state).toBe('healthy');
   });
   it('is not failed again by the errors that failed it, even when the dwell is shorter than the error window', () => {
     const q = { ...P, recoveryDwellMs: 10 * S };
     const failed = nextHealth({ ...HEALTHY }, [err(100 * S), err(101 * S), err(102 * S)], 102 * S, q, undefined).health;
-    const goods = Array.from({ length: 5 }, (_, i) => ok(113 * S + i * S));
-    const back = nextHealth(failed, [err(100 * S), err(101 * S), err(102 * S), ...goods], 118 * S, q, undefined);
+    const goods = Array.from({ length: 5 }, (_, i) => ok(103 * S + i * 3 * S));      // 103..115 s: spans the 10 s minimum
+    const back = nextHealth(failed, [err(100 * S), err(101 * S), err(102 * S), ...goods], 116 * S, q, undefined);
     expect(back.health.state).toBe('healthy');
     // the three old errors are still inside the 60 s window, but they belong to before it was trusted again
-    expect(nextHealth(back.health, [err(100 * S), err(101 * S), err(102 * S), ...goods], 119 * S, q, undefined).health.state).toBe('healthy');
+    expect(nextHealth(back.health, [err(100 * S), err(101 * S), err(102 * S), ...goods], 117 * S, q, undefined).health.state).toBe('healthy');
   });
   it('fails over at once when funding runs out, whatever the samples say, and stays failed over until topped up', () => {
     const r = nextHealth({ ...HEALTHY }, [ok(1 * S)], 1 * S, P, false);

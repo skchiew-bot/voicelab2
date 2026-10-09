@@ -2,11 +2,12 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type pg from 'pg';
 import { z } from 'zod';
 import { withActor, type Actor } from '../db.js';
+import { hangUpCalls, type CallDeps } from '../store/calls.js';
 import { chargeExtraChannels, expireQueued, getEntitlement, providerLoad, setEntitlement } from '../store/concurrency.js';
 import { fundingStatus, setThresholds } from '../store/funding-monitor.js';
 import { getFallbackPlan, getPolicy, getRoutes, listFailovers, providerHealthViews, recordSample, setFallbackPlan, setPolicy, setRoutes } from '../store/resilience.js';
 
-interface Ctx { pool: pg.Pool; internal(req: FastifyRequest): Promise<{ userId: string; actor: Actor }> }
+interface Ctx { pool: pg.Pool; callDeps: CallDeps; internal(req: FastifyRequest): Promise<{ userId: string; actor: Actor }> }
 const id = z.string().uuid();
 
 /** Phase 4 settings and views. All staff-only. */
@@ -82,7 +83,10 @@ export function registerResilienceRoutes(app: FastifyInstance, ctx: Ctx): void {
   });
   app.post('/internal/queue/expire', async (req) => {
     const b = z.object({ maxWaitSeconds: z.number().int().min(1).max(86_400).default(300) }).parse(req.body ?? {});
-    return run(req, (c, u) => expireQueued(c, u, b.maxWaitSeconds));
+    const out = await run(req, (c, u) => expireQueued(c, u, b.maxWaitSeconds));
+    // Their lines are ended outside the transaction; the provider's report of the end then costs the time they were held.
+    const hungUp = await hangUpCalls(ctx.callDeps, out.hangups);
+    return { expired: out.expired, hungUp };
   });
 
   // ---- funding monitor

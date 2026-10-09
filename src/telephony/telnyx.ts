@@ -1,5 +1,5 @@
 import { createPublicKey, verify } from 'node:crypto';
-import { redactNumbers, HOLD_MESSAGE, TEST_CALL_MESSAGE, type Action, type Fetch, type NormalizedEvent } from './types.js';
+import { ProviderRefused, redactNumbers, HOLD_MESSAGE, TEST_CALL_MESSAGE, type Action, type Fetch, type NormalizedEvent } from './types.js';
 
 const API = 'https://api.telnyx.com/v2';
 
@@ -31,10 +31,11 @@ export async function telnyxPlaceCall(
     client_state: Buffer.from(e.callId).toString('base64'),
   });
   const id = r.json?.data?.call_control_id;
-  if (!r.ok || !id) {
+  if (!r.ok) {
     const detail = r.json?.errors?.[0]?.detail;
-    throw new Error(`Telnyx refused the call (HTTP ${r.status})${detail ? `: ${redactNumbers(String(detail))}` : ''}`);
+    throw new ProviderRefused(`Telnyx refused the call (HTTP ${r.status})${detail ? `: ${redactNumbers(String(detail))}` : ''}`);
   }
+  if (!id) throw new Error(`Telnyx answered (HTTP ${r.status}) without a call id`);
   return { providerCallId: id };
 }
 
@@ -103,7 +104,8 @@ export function telnyxNextActions(ev: NormalizedEvent, inboundRouted: boolean, q
   if (ev.kind === 'answered') {
     return [{ type: 'telnyx', action: 'speak', callControlId: id, body: { payload: queued ? HOLD_MESSAGE : TEST_CALL_MESSAGE, voice: 'female', language: 'en-US' } }];
   }
-  if (ev.kind === 'speak_ended' && queued) return []; // a caller waiting for a channel is not hung up on
+  // A caller waiting for a channel is not hung up on: the hold message is said again.
+  if (ev.kind === 'speak_ended' && queued) return [{ type: 'telnyx', action: 'speak', callControlId: id, body: { payload: HOLD_MESSAGE, voice: 'female', language: 'en-US' } }];
   if (ev.kind === 'speak_ended') return [{ type: 'telnyx', action: 'hangup', callControlId: id }];
   return [];
 }

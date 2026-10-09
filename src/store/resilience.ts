@@ -39,9 +39,11 @@ export async function setPolicy(c: pg.PoolClient, actorId: string | null, patch:
 // -------------------------------------------------------------------------------------------- funding
 /** False when a provider's recorded balance has run out in any currency; undefined when no funding is recorded for it. */
 export async function fundedState(c: pg.PoolClient, providerId: string): Promise<boolean | undefined> {
-  const rows = (await c.query('SELECT currency, sum(amount) AS balance FROM provider_funding_entries WHERE provider_id = $1 GROUP BY currency', [providerId])).rows;
-  if (rows.length === 0) return undefined;
-  return rows.every((r) => Number(r.balance) > 0);
+  // Compared as exact decimals in the database, not as floating point.
+  const r = (await c.query(
+    `SELECT count(*)::int AS currencies, coalesce(bool_and(balance > 0), true) AS funded
+       FROM (SELECT currency, sum(amount) AS balance FROM provider_funding_entries WHERE provider_id = $1 GROUP BY currency) b`, [providerId])).rows[0];
+  return r.currencies === 0 ? undefined : r.funded;
 }
 
 // ------------------------------------------------------------------------------------------ failover log
@@ -104,16 +106,21 @@ export async function recordSample(
   const at = e.at ?? new Date();
   await c.query('INSERT INTO provider_samples (provider_id, kind, latency_ms, call_id, probe, at) VALUES ($1,$2,$3,$4,$5,$6)',
     [e.providerId, e.kind, e.latencyMs ?? null, e.callId ?? null, e.probe ?? false, at]);
-  return applyHealth(c, e.providerId, at, await fundedState(c, e.providerId), e.tenantId, e.callId);
+  // Once a provider is out of funding it stays so until a top-up says otherwise: a stray sample (a probe, a late reply) must not lift it.
+  const funded = (await loadHealth(c, e.providerId)).state === 'unfunded' ? undefined : await fundedState(c, e.providerId);
+  return applyHealth(c, e.providerId, at, funded, e.tenantId, e.callId);
 }
 
 /**
  * Re-check a provider's funding without a new attempt: after a top-up, a ledger change, or on a schedule.
  * An empty balance fails the provider over immediately; a top-up puts it on probation.
  */
-export async function syncFunding(c: pg.PoolClient, providerId: string, at = new Date()) {
+export async function syncFunding(c: pg.PoolClient, providerId: string, e: { at?: Date; topUp?: boolean } = {}) {
   await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`health:${providerId}`]);
-  return applyHealth(c, providerId, at, await fundedState(c, providerId));
+  const funded = await fundedState(c, providerId);
+  // A provider that said it has no credit is released only by a top-up, not by any other ledger entry.
+  const stays = funded === true && !e.topUp && (await loadHealth(c, providerId)).state === 'unfunded';
+  return applyHealth(c, providerId, e.at ?? new Date(), stays ? undefined : funded);
 }
 
 /** A provider said it has no credit left. That is believed at once and not retried, whatever our own ledger says. */

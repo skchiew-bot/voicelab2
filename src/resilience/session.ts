@@ -13,6 +13,8 @@ export interface VoiceRuntime {
   speak(text: string): Promise<{ latencyMs: number }>;
   /** Told what the call has said and collected so far, when this provider takes the call over. */
   resume?(packet: HandoverPacket): Promise<void>;
+  /** A cheap health check, used to find out whether a failed provider has recovered. */
+  ping?(): Promise<{ latencyMs: number }>;
 }
 
 export class FundingExhausted extends Error {
@@ -57,6 +59,7 @@ export interface SessionResult {
 
 const asInternal = <T>(d: SessionDeps, fn: (c: pg.PoolClient) => Promise<T>) => withActor(d.pool, { kind: 'internal' }, fn);
 export const DEFAULT_BRIDGE = 'One moment please.';
+const BRIDGE_TRIES = 3;
 
 /**
  * Say a call's lines through the best working voice provider, and keep the call going when that provider fails:
@@ -100,9 +103,11 @@ export async function speakLines(d: SessionDeps, input: SpeakInput): Promise<Ses
       if (!next) return null;
       const packet = d.handover ? await d.handover() : undefined;
       if (packet) await d.runtime(next)?.resume?.(packet).catch(() => undefined);
-      const b = await attempt(next, input.bridge ?? DEFAULT_BRIDGE);
+      // One error on the bridge does not condemn the provider: it is tried again while it is still trusted.
+      let b = await attempt(next, input.bridge ?? DEFAULT_BRIDGE);
+      for (let i = 1; i < BRIDGE_TRIES && !(b.played && b.healthy) && b.healthy; i++) b = await attempt(next, input.bridge ?? DEFAULT_BRIDGE);
       if (b.played && b.healthy) return next;
-      tried.add(next); from = next; trigger = b.trigger ?? 'hard_errors';   // the bridge failed too: look further
+      tried.add(next); from = next; trigger = b.trigger ?? 'hard_errors';   // it could not say it: look further
     }
   };
 
@@ -154,4 +159,24 @@ async function totalFailure(d: SessionDeps, input: SpeakInput, result: SessionRe
     await logFailover(c, { scope: 'fallback', tenantId: input.tenantId, callId: input.callId, runId: input.runId, from: last, trigger: 'all_providers_failed', detail: { steps: steps.map((s) => s.kind), done, failed } });
     await recordEvent(c, { tenantId: input.tenantId, callId: input.callId, type: 'failover.fallback', payload: { steps: steps.map((s) => s.kind), done, failed } });
   });
+}
+
+/**
+ * Try the voice providers that have failed over, so they can earn their way back. Each probe counts as an attempt; the
+ * hysteresis rules decide when a run of good ones is enough. A deployment runs this on a schedule: nothing else sends a
+ * failed provider any traffic. A provider that is out of funding is not probed (a top-up is what brings it back).
+ */
+export async function probeProviders(d: SessionDeps): Promise<{ providerId: string; kind: 'ok' | 'error' | 'dead_air'; state: string }[]> {
+  const now = d.now ?? (() => new Date());
+  const failed = await asInternal(d, async (c) => [...(await healthMap(c)).entries()].filter(([, s]) => s === 'failed').map(([id]) => id));
+  const out: { providerId: string; kind: 'ok' | 'error' | 'dead_air'; state: string }[] = [];
+  for (const providerId of failed) {
+    const rt = d.runtime(providerId);
+    if (!rt?.ping) continue;
+    let kind: 'ok' | 'error' | 'dead_air' = 'error'; let latencyMs: number | undefined;
+    try { latencyMs = (await rt.ping()).latencyMs; kind = classify({ latencyMs }, await asInternal(d, getPolicy)); } catch { /* an error is a sample like any other */ }
+    const h = await asInternal(d, (c) => recordSample(c, { providerId, kind, latencyMs, probe: true, at: now() }));
+    out.push({ providerId, kind, state: h.state });
+  }
+  return out;
 }

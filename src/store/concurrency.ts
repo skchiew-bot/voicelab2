@@ -4,7 +4,8 @@ import { toScaled, fromScaled, mulDiv } from '../money.js';
 import { audit } from './audit.js';
 import { recordEvent } from './events.js';
 
-const ACTIVE = `('dialing', 'ringing', 'in_progress')`;
+// A caller waiting in the queue has been answered, so they hold a channel at the provider and count against its ceiling.
+const ACTIVE = `('queued', 'dialing', 'ringing', 'in_progress')`;
 
 export interface Load { providerId: string; active: number; ceiling: number | null }
 
@@ -68,7 +69,11 @@ export async function promoteQueued(c: pg.PoolClient, tenantId: string): Promise
   const next = (await c.query(
     `SELECT id, project_id FROM calls WHERE tenant_id = $1 AND direction = 'inbound' AND status = 'queued' ORDER BY queued_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`, [tenantId])).rows[0];
   if (!next) return null;
-  await c.query(`UPDATE calls SET status = 'in_progress', answered_at = coalesce(answered_at, now()) WHERE id = $1`, [next.id]);
+  // Served from now on: the hold is not billed to the client. Beyond the client's channels, the agreed premium applies.
+  await c.query(
+    `UPDATE calls SET status = 'in_progress', answered_at = coalesce(answered_at, now()), credit_from = now(),
+            credit_multiplier = CASE WHEN $2::numeric IS NOT NULL THEN $2::numeric ELSE credit_multiplier END WHERE id = $1`,
+    [next.id, adm.admit === 'premium' ? adm.creditMultiplier : null]);
   await recordEvent(c, { tenantId, projectId: next.project_id ?? undefined, callId: next.id, type: 'call.dequeued', payload: {} });
   return next.id as string;
 }
@@ -79,14 +84,15 @@ export async function promoteQueued(c: pg.PoolClient, tenantId: string): Promise
  */
 export async function expireQueued(c: pg.PoolClient, actorId: string | null, maxWaitSeconds: number) {
   const rows = (await c.query(
-    `SELECT id, tenant_id, project_id FROM calls WHERE status = 'queued' AND queued_at < now() - make_interval(secs => $1) ORDER BY queued_at LIMIT 200 FOR UPDATE SKIP LOCKED`, [maxWaitSeconds])).rows;
+    `SELECT id, tenant_id, project_id, provider_id, provider_call_id FROM calls WHERE status = 'queued' AND queued_at < now() - make_interval(secs => $1) ORDER BY queued_at LIMIT 200 FOR UPDATE SKIP LOCKED`, [maxWaitSeconds])).rows;
   for (const r of rows) {
-    await c.query(`UPDATE calls SET status = 'unanswered', ended_at = now(), end_reason = 'queue_timeout', cost_status = 'not_applicable' WHERE id = $1`, [r.id]);
+    // The caller is on the line until they are hung up on; the provider's time is costed when the end is reported (no credits).
+    await c.query(`UPDATE calls SET status = 'unanswered', ended_at = now(), end_reason = 'queue_timeout', no_credit = true WHERE id = $1`, [r.id]);
     await c.query(`INSERT INTO callback_requests (tenant_id, call_id, reason) VALUES ($1,$2,'waited too long for a channel')`, [r.tenant_id, r.id]);
     await recordEvent(c, { tenantId: r.tenant_id, projectId: r.project_id ?? undefined, callId: r.id, type: 'call.queue_timeout', payload: { maxWaitSeconds } });
   }
   if (rows.length) await audit(c, actorId, 'queue.expired', 'calls', null, { count: rows.length });
-  return { expired: rows.length };
+  return { expired: rows.length, hangups: rows.filter((r) => r.provider_call_id).map((r) => ({ providerId: r.provider_id as string, providerCallId: r.provider_call_id as string, callId: r.id as string, tenantId: r.tenant_id as string })) };
 }
 
 /**

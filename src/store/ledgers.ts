@@ -15,7 +15,7 @@ export async function addFundingEntry(
   );
   await audit(c, actorId, 'funding.add', 'provider', e.providerId, { kind: e.kind, amount: e.amount, currency: e.currency });
   // An empty balance fails the provider over at once; a top-up puts it on probation.
-  await syncFunding(c, e.providerId);
+  await syncFunding(c, e.providerId, { topUp: e.kind === 'topup' });
   return rows[0];
 }
 

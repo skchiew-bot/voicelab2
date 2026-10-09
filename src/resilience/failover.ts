@@ -72,10 +72,13 @@ export function nextHealth(
     const trigger = failing(since, now, p);
     return trigger ? to('failed', trigger, REASONS[trigger]) : { health: h };
   }
-  // failed: count the run of good samples, ending at the first bad one
-  let streak = 0;
-  for (const s of [...since].sort((a, b) => a.at - b.at)) streak = s.kind === 'ok' && (s.latencyMs === undefined || s.latencyMs <= p.latencyThresholdMs) ? streak + 1 : 0;
-  if (streak >= p.recoveryOkSamples && now - h.since >= p.recoveryDwellMs) return to('healthy', 'recovered', 'Recovered: a run of good attempts over the minimum time.');
+  // failed: the run of good samples, ending at the first bad one. It must be long enough AND span the minimum time, so
+  // five good replies in a row a moment apart do not count as having recovered.
+  let streak = 0; let runStart = 0;
+  for (const s of [...since].sort((a, b) => a.at - b.at)) {
+    if (s.kind === 'ok' && (s.latencyMs === undefined || s.latencyMs <= p.latencyThresholdMs)) { if (streak === 0) runStart = s.at; streak++; } else streak = 0;
+  }
+  if (streak >= p.recoveryOkSamples && now - runStart >= p.recoveryDwellMs) return to('healthy', 'recovered', 'Recovered: a run of good attempts over the minimum time.');
   return { health: { ...h, okStreak: streak } };
 }
 

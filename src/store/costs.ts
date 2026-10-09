@@ -58,6 +58,10 @@ export interface CallCostInput {
   occurredAt: Date;
   /** What the client's credits are multiplied by (an overburst premium the client agreed to), if any. */
   creditMultiplier?: string;
+  /** False for a call that was never served (a caller who gave up in the queue): provider cost is recorded, credits are not drawn. */
+  drawCredits?: boolean;
+  /** Seconds at the start of the call that are not billed to the client (time spent waiting in the queue). */
+  creditSkipSeconds?: number;
   /** One entry per provider that served part of the call. */
   usage: { providerId: string; usage: Usage }[];
 }
@@ -100,7 +104,7 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
       minimumChargeSeconds: version.minimum_charge_seconds,
       rounding: version.rounding,
     });
-    if (provider.kind === 'telephony' && billed !== null && creditSeconds === null) creditSeconds = billed;
+    if (provider.kind === 'telephony' && billed !== null && creditSeconds === null) creditSeconds = input.drawCredits === false ? null : Math.max(0, billed - Math.ceil(input.creditSkipSeconds ?? 0));
 
     const burst = item.usage.burst && version.burst_premium_multiplier ? version.burst_premium_multiplier : null;
     const comps = (await c.query(

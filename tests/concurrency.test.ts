@@ -3,7 +3,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withActor } from '../src/db.js';
 import { parseKey } from '../src/secrets.js';
 import { loadProvider, processWebhook, type CallDeps } from '../src/store/calls.js';
+import { promoteQueued } from '../src/store/concurrency.js';
 import { dncKeyFrom } from '../src/store/dnc.js';
+import { twimlHold } from '../src/telephony/twilio.js';
 import type { NormalizedEvent } from '../src/telephony/types.js';
 
 type Env = Awaited<ReturnType<typeof import('./helpers.js').setupDb>>;
@@ -43,7 +45,12 @@ async function freshTenant(name: string, numbers: [string, string][]) {
   return t;
 }
 const clearActive = () => env.pool.query(`UPDATE calls SET status = 'completed', ended_at = coalesce(ended_at, now()) WHERE status IN ('dialing', 'ringing', 'in_progress', 'queued')`);
-const resetHealth = () => env.pool.query('DELETE FROM provider_health');
+// Test clean-up only: samples are append-only, so the trigger is switched off for a moment to forget what earlier tests did.
+const resetHealth = async () => {
+  await env.pool.query('ALTER TABLE provider_samples DISABLE TRIGGER provider_samples_immutable');
+  await env.pool.query('DELETE FROM provider_samples'); await env.pool.query('DELETE FROM provider_health');
+  await env.pool.query('ALTER TABLE provider_samples ENABLE TRIGGER provider_samples_immutable');
+};
 
 beforeAll(async () => {
   env = await (await import('./helpers.js')).setupDb();
@@ -211,7 +218,7 @@ describe('inbound entitlement and the waiting queue', () => {
     const answered = await send(ev('answered', 'in3'));
     expect(answered.actions[0]).toMatchObject({ action: 'speak', body: { payload: expect.stringContaining('busy') } });
     expect((await status('in3')).status).toBe('queued');                        // answering the hold does not start service
-    expect((await send(ev('speak_ended', 'in3'))).actions).toEqual([]);          // and finishing the hold message does not hang up
+    expect((await send(ev('speak_ended', 'in3'))).actions).toEqual([expect.objectContaining({ action: 'speak', body: expect.objectContaining({ payload: expect.stringContaining('busy') }) })]);   // the hold message plays again; it never hangs up
     expect((await get('/internal/control-tower')).json().alerts.some((a: { code: string }) => a.code === 'calls_queued')).toBe(true);
   });
 
@@ -238,7 +245,9 @@ describe('inbound entitlement and the waiting queue', () => {
     for (const id of ['in8', 'in9']) { await send(ev('initiated', id)); await send(ev('answered', id)); }      // both channels in use
     await send(ev('initiated', 'in10')); await send(ev('initiated', 'in13'));
     await env.pool.query(`UPDATE calls SET queued_at = now() - interval '10 minutes' WHERE provider_call_id = 'in10'`);
-    expect((await post('/internal/queue/expire', { maxWaitSeconds: 300 })).json()).toEqual({ expired: 1 });
+    env.provider.calls.length = 0;
+    expect((await post('/internal/queue/expire', { maxWaitSeconds: 300 })).json()).toEqual({ expired: 1, hungUp: 1 });
+    expect(env.provider.calls.some((x) => x.url.endsWith('/actions/hangup'))).toBe(true);   // the line is ended, not left on hold
     expect(await status('in10')).toMatchObject({ status: 'unanswered', end_reason: 'queue_timeout' });
     expect((await status('in13')).status).toBe('queued');                         // not waited long enough
     const cb = (await env.pool.query(`SELECT reason FROM callback_requests WHERE call_id = (SELECT id FROM calls WHERE provider_call_id = 'in10')`)).rows;
@@ -301,5 +310,140 @@ describe('funding-health monitor', () => {
     expect(await level()).toBe('empty');
     expect((await env.pool.query('SELECT state FROM provider_health WHERE provider_id = $1', [p])).rows[0].state).toBe('unfunded');
     expect((await put(`/internal/providers/${p}/funding-thresholds`, { currency: 'USD', warnBelow: '5', criticalBelow: '10' })).statusCode).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------- found in review
+describe('found in review: queued callers', () => {
+  let deps: CallDeps; let telnyx: Awaited<ReturnType<typeof loadProvider>>; let tenant: string;
+  const OUR = '+60300000081';
+  const key = () => parseKey(env.config.VOICELAB_SECRET_KEY);
+  const ev = (kind: NormalizedEvent['kind'], providerCallId: string, extra: Partial<NormalizedEvent> = {}): NormalizedEvent => ({
+    key: randomUUID(), providerCallId, kind, direction: 'inbound', occurredAt: new Date(), transient: { to: OUR, from: '+60129990001' }, ...extra,
+  });
+  const send = (e: NormalizedEvent) => processWebhook(deps, telnyx!, e);
+  const callRow = async (pcid: string) => (await env.pool.query('SELECT * FROM calls WHERE provider_call_id = $1', [pcid])).rows[0];
+  const credits = async (pcid: string) => Number((await env.pool.query(`SELECT coalesce(sum(credits), 0) AS c FROM credit_entries WHERE ref = 'call:' || (SELECT id::text FROM calls WHERE provider_call_id = $1)`, [pcid])).rows[0].c);
+
+  beforeAll(async () => {
+    tenant = await freshTenant('Queue Review Co', [[telnyxId, OUR]]);
+    deps = { pool: env.pool, key: key(), dncKey: dncKeyFrom(key()), http: env.provider.fetch, baseUrl: BASE };
+    telnyx = await withActor(env.pool, { kind: 'internal' }, (c) => loadProvider(c, telnyxId));
+    await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1 }));
+  });
+
+  it('costs the provider time of a caller who gave up in the queue, and draws no credits for it', async () => {
+    await clearActive();
+    await send(ev('initiated', 'q1')); await send(ev('answered', 'q1'));
+    await send(ev('initiated', 'q2')); await send(ev('answered', 'q2'));
+    expect((await callRow('q2')).status).toBe('queued');
+    await send(ev('ended', 'q2', { durationSeconds: 45, endReason: 'canceled' }));
+    const q2 = await callRow('q2');
+    expect(q2).toMatchObject({ status: 'unanswered', end_reason: 'abandoned_in_queue', no_credit: true, cost_status: 'recorded' });
+    expect(Number((await get(`/internal/calls/${q2.id}/cost`)).json().total_usd)).toBeGreaterThan(0);   // the provider did bill the hold
+    expect(await credits('q2')).toBe(0);
+  });
+
+  it('bills a caller who waited and was then served only from the moment they were served', async () => {
+    await clearActive();
+    await send(ev('initiated', 'w1')); await send(ev('answered', 'w1'));
+    await send(ev('initiated', 'w2', { occurredAt: new Date(Date.now() - 100_000) }));
+    await send(ev('answered', 'w2', { occurredAt: new Date(Date.now() - 100_000) }));          // on hold for the last 100 s
+    await send(ev('ended', 'w1', { durationSeconds: 30, endReason: 'completed' }));              // a channel frees: w2 is served now
+    expect((await callRow('w2')).status).toBe('in_progress');
+    await send(ev('ended', 'w2', { durationSeconds: 160, endReason: 'completed' }));             // 160 s on the line, about 60 of them served
+    const c = await credits('w2');
+    expect(c).toBeLessThan(0);
+    expect(-c).toBeGreaterThan(0.9); expect(-c).toBeLessThanOrEqual(1);                          // about one minute at 1 credit a minute, not 160 s
+  });
+
+  it('counts a caller on hold against the provider\'s ceiling, so an outbound dial does not make it three legs on a ceiling of two', async () => {
+    await clearActive();
+    await send(ev('initiated', 'c1')); await send(ev('answered', 'c1'));
+    await send(ev('initiated', 'c2')); await send(ev('answered', 'c2'));                          // queued, on hold
+    const cap = (await get('/internal/capacity')).json().find((c: { providerId: string }) => c.providerId === telnyxId);
+    expect(cap).toMatchObject({ active: 2, ceiling: 2 });
+    const t = await freshTenant('Hold Dial Co', [[telnyxId, '+60300000091'], [twilioId, '+60300000092']]);
+    env.provider.calls.length = 0;
+    await must(dial(t));
+    expect(dials().map(usedProvider)).toEqual([twilioId]);                                         // Telnyx is full, hold included
+    await clearActive();
+  });
+
+  it('ends a timed-out caller\'s line, and costs the time they were held when the provider reports the end, without credits', async () => {
+    await clearActive();
+    await send(ev('initiated', 'x1')); await send(ev('answered', 'x1'));
+    await send(ev('initiated', 'x2')); await send(ev('answered', 'x2'));
+    await env.pool.query(`UPDATE calls SET queued_at = now() - interval '10 minutes' WHERE provider_call_id = 'x2'`);
+    env.provider.calls.length = 0;
+    const out = (await post('/internal/queue/expire', { maxWaitSeconds: 300 })).json();
+    expect(out).toEqual({ expired: 1, hungUp: 1 });
+    expect(env.provider.calls.filter((x) => x.url.endsWith('/actions/hangup'))).toHaveLength(1);
+    expect(await callRow('x2')).toMatchObject({ status: 'unanswered', end_reason: 'queue_timeout', cost_status: 'pending', no_credit: true });
+    await send(ev('ended', 'x2', { durationSeconds: 400, endReason: 'completed' }));              // the provider reports the hangup
+    const x2 = await callRow('x2');
+    expect(x2).toMatchObject({ status: 'unanswered', cost_status: 'recorded' });
+    expect(Number(x2.duration_seconds)).toBe(400);
+    expect(await credits('x2')).toBe(0);
+    await send(ev('ended', 'x2', { key: randomUUID(), durationSeconds: 400, endReason: 'completed' } as never));   // a second report changes nothing
+    expect((await env.pool.query(`SELECT count(*)::int AS n FROM call_costs WHERE call_id = $1`, [x2.id])).rows[0].n).toBe(1);
+    await clearActive();
+  });
+
+  it('keeps the agreed premium when a waiting caller is promoted beyond the channels', async () => {
+    await clearActive();
+    await send(ev('initiated', 'p1')); await send(ev('answered', 'p1'));
+    await send(ev('initiated', 'p2'));
+    expect((await callRow('p2')).status).toBe('queued');
+    await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1, overburstMultiplier: '1.5' }));
+    const promoted = await withActor(env.pool, { kind: 'internal' }, (c) => promoteQueued(c, tenant));
+    expect(promoted).toBe((await callRow('p2')).id);
+    expect(await callRow('p2')).toMatchObject({ status: 'in_progress', credit_multiplier: '1.500' });
+    await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1 }));
+    await clearActive();
+  });
+
+  it('plays the hold message again for a Twilio caller instead of ending the call', () => {
+    const xml = twimlHold('https://voicelab.test/webhooks/twilio/p/voice?callId=abc&x=1');
+    expect(xml).toContain('<Say>');
+    expect(xml).toContain('<Redirect method="POST">https://voicelab.test/webhooks/twilio/p/voice?callId=abc&amp;x=1</Redirect>');
+    expect(xml).not.toContain('<Hangup');
+  });
+});
+
+describe('found in review: telephony retry', () => {
+  it('does not dial again after a timeout or an unreadable reply, because the first call may have been placed', async () => {
+    await clearActive(); await resetHealth();
+    const t = await freshTenant('Timeout Co', [[telnyxId, '+60300000101'], [twilioId, '+60300000102']]);
+    env.provider.state.respond = (url) => { if (url.endsWith('/v2/calls')) throw new Error('socket hang up'); return new Response(JSON.stringify({ sid: `CA_t_${++sid}` }), { status: 201 }); };
+    env.provider.calls.length = 0;
+    const r = await dial(t);
+    expect(r.statusCode).toBe(502);
+    expect(dials()).toHaveLength(1);                                   // one attempt, not two
+    env.provider.state.respond = (url) => { if (url.endsWith('/v2/calls')) return new Response('{"data":{}}', { status: 200 }); return new Response(JSON.stringify({ sid: `CA_t_${++sid}` }), { status: 201 }); };
+    env.provider.calls.length = 0;
+    expect((await dial(t)).statusCode).toBe(502);
+    expect(dials()).toHaveLength(1);
+    answer(); await clearActive(); await resetHealth();
+  });
+
+  it('keeps to the provider the client asked for, and does not move an overburst call to a provider where it would be over the ceiling too', async () => {
+    await clearActive(); await resetHealth();
+    const t = await freshTenant('Retry Co', [[telnyxId, '+60300000111'], [twilioId, '+60300000112']]);
+    failTelnyx = true; env.provider.calls.length = 0;
+    // restricted to Telnyx: a refusal is a refusal, and Twilio is not used
+    expect((await dial(t, { providerId: telnyxId })).statusCode).toBe(502);
+    expect(dials().map(usedProvider)).toEqual([telnyxId]);
+
+    // every provider full, client agreed to a premium: the call goes out as burst. Telnyx then refuses it, and Twilio has no room
+    // either, so the premium call is not moved to a provider where it would be inside a ceiling.
+    failTelnyx = false; await clearActive();
+    await must(put(`/internal/tenants/${t}/entitlement`, { inboundChannels: 1, overburstMultiplier: '1.5' }));
+    for (let i = 0; i < 5; i++) await must(dial(t));
+    failTelnyx = true; env.provider.calls.length = 0;
+    const over = await dial(t);
+    expect(over.statusCode).toBe(502);
+    expect(dials().map(usedProvider)).toEqual([telnyxId]);
+    failTelnyx = false; await clearActive(); await resetHealth();
   });
 });

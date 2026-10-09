@@ -5,8 +5,8 @@ import { withActor } from '../db.js';
 import { AppError } from '../errors.js';
 import { decryptSecrets } from '../secrets.js';
 import { telnyxCommand, telnyxNextActions, telnyxPlaceCall, type TelnyxCreds } from '../telephony/telnyx.js';
-import { twilioPlaceCall, type TwilioCreds } from '../telephony/twilio.js';
-import { redactNumbers, type Action, type NormalizedEvent } from '../telephony/types.js';
+import { twilioHangup, twilioPlaceCall, type TwilioCreds } from '../telephony/twilio.js';
+import { ProviderRefused, redactNumbers, type Action, type NormalizedEvent } from '../telephony/types.js';
 import { audit } from './audit.js';
 import { recordCallCost } from './costs.js';
 import { getEntitlement, inboundAdmission, isFull, promoteQueued, providerLoad } from './concurrency.js';
@@ -203,17 +203,21 @@ export async function placeOutboundCall(d: CallDeps, actorId: string, input: Pla
       // The provider failed to place the call. Count it against the provider, and try another if the pool chose this one.
       const next = await asInternal(d, async (c) => {
         await recordSample(c, { providerId: p.id, kind: 'error', callId, tenantId: input.tenantId });
-        if (!setup.pooled || attempt >= MAX_DIAL_TRIES) return null;
+        // Only a definite "no" from the provider is tried elsewhere. A timeout or a reply we could not read may mean the
+        // call was placed, and a second call to the same person from another number would be worse than a failed one.
+        if (!(err instanceof ProviderRefused) || !setup.pooled || attempt >= MAX_DIAL_TRIES) return null;
+        await c.query(`SELECT pg_advisory_xact_lock(hashtext('capacity'))`);
         const ids = (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' AND status = 'active'`)).rows.map((r) => r.id as string);
         const health = await healthMap(c, ids);
         const unhealthy = new Set(ids.filter((id) => (health.get(id) ?? 'healthy') !== 'healthy' || tried.has(id)));
         const load = await providerLoad(c, ids);
         const full = new Set(ids.filter((id) => isFull(load.get(id)!)));
-        const choice = await chooseDid(c, { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, contactHash: chash!, unhealthy, full });
+        const choice = await chooseDid(c, { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, contactHash: chash!, providerId: input.providerId, unhealthy, full });
         if (!choice.ok) return null;
         const provider = await loadProvider(c, choice.providerId);
         if (!provider || !['twilio', 'telnyx'].includes(provider.adapter_key)) return null;
-        await c.query('UPDATE calls SET provider_id = $2, from_number_id = $3 WHERE id = $1', [callId, choice.providerId, choice.phoneNumberId]);
+        // The new provider has room (full ones were passed over), so any premium decided for the first one no longer applies.
+        await c.query('UPDATE calls SET provider_id = $2, from_number_id = $3, burst = false, credit_multiplier = NULL WHERE id = $1', [callId, choice.providerId, choice.phoneNumberId]);
         await logFailover(c, { scope: 'telephony', tenantId: input.tenantId, callId, from: p.id, to: choice.providerId, trigger: 'provider_error', detail: { reason } });
         await recordEvent(c, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'failover.telephony', payload: { from: p.id, to: choice.providerId } });
         return { provider, from: choice.e164 };
@@ -234,6 +238,7 @@ const RANK: Record<string, number> = { queued: 0, dialing: 0, ringing: 1, in_pro
 interface CallRow {
   id: string; tenant_id: string; project_id: string | null; provider_id: string; direction: 'inbound' | 'outbound';
   status: string; started_at: Date; answered_at: Date | null; ended_at: Date | null; provider_call_id: string | null;
+  end_reason: string | null; cost_status: string;
 }
 
 async function findCall(c: pg.PoolClient, providerId: string, ev: NormalizedEvent, hint?: string): Promise<CallRow | null> {
@@ -256,6 +261,7 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
   }
   const id = randomUUID();
   // A client has a number of simultaneous inbound channels. Beyond them a call waits, or is taken at the premium the client agreed to.
+  await c.query(`SELECT pg_advisory_xact_lock(hashtext('capacity'))`);   // the same lock outbound dials use, so the two cannot both take the last channel
   const adm = await inboundAdmission(c, n.tenant_id);
   // Separately, the provider charges a premium for calls above its own concurrency limit; the call is marked so its cost says so.
   const load = (await providerLoad(c, [providerId])).get(providerId)!;
@@ -284,6 +290,10 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
     await recordCallCost(c, actorId, {
       callId, tenantId: call.tenant_id, projectId: call.project_id ?? undefined, direction: call.direction,
       occurredAt: call.started_at, creditMultiplier: call.credit_multiplier ?? undefined,
+      // A caller who gave up in the queue was never served: the provider time is costed, no credits are drawn. A caller who
+      // waited and was then served pays credits only from the moment they were.
+      drawCredits: !call.no_credit,
+      creditSkipSeconds: call.credit_from && call.answered_at ? Math.max(0, (new Date(call.credit_from).getTime() - new Date(call.answered_at).getTime()) / 1000) : 0,
       usage: [{ providerId: call.provider_id, usage: { seconds: Number(call.duration_seconds ?? 0), burst: call.burst } }],
     });
     await c.query(`UPDATE calls SET cost_status = 'recorded', cost_error = NULL WHERE id = $1`, [callId]);
@@ -331,15 +341,25 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
       call.answered_at = call.answered_at ?? ev.occurredAt;
       await moveTo('in_progress'); await log('call.answered'); break;
     case 'ended': {
-      if (call.ended_at) break; // already finished; a late duplicate must not reopen or re-price it
+      if (call.ended_at) {
+        // A caller who was timed out of the queue is hung up on afterwards: when the provider reports the end, the time
+        // they spent on the line is costed (provider side only; they were never served, so no credits).
+        if (call.end_reason === 'queue_timeout' && call.cost_status === 'pending') {
+          const held = ev.durationSeconds ?? (call.answered_at ? Math.max(0, (ev.occurredAt.getTime() - call.answered_at.getTime()) / 1000) : 0);
+          await c.query('UPDATE calls SET duration_seconds = $2 WHERE id = $1', [call.id, held]);
+          await log('call.ended', { status: call.status, reason: 'queue_timeout', durationSeconds: held });
+          await costCall(c, null, call.id);
+        }
+        break; // otherwise already finished; a late duplicate must not reopen or re-price it
+      }
       const wasQueued = call.status === 'queued';   // hung up while waiting: never served, whatever the hold message cost
       const answered = call.answered_at !== null || (ev.durationSeconds ?? 0) > 0;
       const seconds = ev.durationSeconds
         ?? (call.answered_at ? Math.max(0, (ev.occurredAt.getTime() - call.answered_at.getTime()) / 1000) : 0);
       const status = wasQueued ? 'unanswered' : answered ? 'completed' : ev.endReason === 'failed' ? 'failed' : 'unanswered';
       await c.query(
-        `UPDATE calls SET status = $2, ended_at = $3, duration_seconds = $4, end_reason = $5 WHERE id = $1`,
-        [call.id, status, ev.occurredAt, seconds, wasQueued ? 'abandoned_in_queue' : ev.endReason ?? 'completed'],
+        `UPDATE calls SET status = $2, ended_at = $3, duration_seconds = $4, end_reason = $5, no_credit = $6 WHERE id = $1`,
+        [call.id, status, ev.occurredAt, seconds, wasQueued ? 'abandoned_in_queue' : ev.endReason ?? 'completed', wasQueued],
       );
       call.status = status;
       await log('call.ended', { status, reason: ev.endReason ?? 'completed', durationSeconds: seconds });
@@ -399,3 +419,21 @@ export const listCalls = async (c: pg.PoolClient, o: { limit: number; status?: s
             duration_seconds, end_reason, cost_status FROM calls
       WHERE ($1::text IS NULL OR status = $1) AND ($2::uuid IS NULL OR tenant_id = $2)
       ORDER BY started_at DESC LIMIT $3`, [o.status ?? null, o.tenantId ?? null, o.limit])).rows;
+
+/** Hang up calls that are still on the line (callers timed out of the queue). A failure is recorded, not fatal. */
+export async function hangUpCalls(d: CallDeps, calls: { providerId: string; providerCallId: string; callId: string; tenantId: string }[]) {
+  let hungUp = 0;
+  for (const k of calls) {
+    try {
+      const p = await asInternal(d, (c) => loadProvider(c, k.providerId));
+      if (!p) continue;
+      if (p.adapter_key === 'telnyx') await telnyxCommand(credentials<TelnyxCreds>(p, d.key), d.http, { type: 'telnyx', action: 'hangup', callControlId: k.providerCallId });
+      else if (p.adapter_key === 'twilio') await twilioHangup(credentials<TwilioCreds>(p, d.key), d.http, k.providerCallId);
+      else continue;
+      hungUp++;
+    } catch (err) {
+      await asInternal(d, (c) => recordEvent(c, { tenantId: k.tenantId, callId: k.callId, type: 'call.command_failed', payload: { action: 'hangup', reason: redactNumbers((err as Error).message) } }));
+    }
+  }
+  return hungUp;
+}

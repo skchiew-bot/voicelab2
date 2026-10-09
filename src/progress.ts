@@ -85,6 +85,8 @@ export const PHASES: PhaseProgress[] = [
       'A caller waiting in the inbound queue hears a hold message; nothing yet starts the workflow when their turn comes',
       'Funding is still not deducted as calls are costed, so the monitor warns from entered balances only',
       'Failures are detected from errors at dial time and from reported samples, not yet from provider webhooks',
+      'A failed provider recovers only through probes (`probeProviders` must be scheduled; a telephony provider has no probe yet)',
+      'Hanging up a timed-out queued caller on Twilio uses a request written from memory, unchecked against the live service',
     ],
   },
   {

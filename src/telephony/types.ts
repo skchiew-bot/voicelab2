@@ -32,5 +32,8 @@ export const TEST_CALL_MESSAGE = 'This is a Voice Lab test call. Goodbye.';
 /** Said to an inbound caller who is waiting for a free channel. */
 export const HOLD_MESSAGE = 'All of our lines are busy. Please stay on the line and we will be with you shortly.';
 
+/** The provider answered and said no (an HTTP error status). Unlike a timeout, this means it did not place the call. */
+export class ProviderRefused extends Error {}
+
 /** Provider error text can quote the numbers involved. Strip anything that looks like one. */
 export const redactNumbers = (text: string): string => text.replace(/\+?\d[\d\s().-]{6,}\d/g, '[number]');

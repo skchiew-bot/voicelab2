@@ -355,7 +355,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   });
 
   registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
-  registerResilienceRoutes(app, { pool, internal });
+  registerResilienceRoutes(app, { pool, internal, callDeps });
   registerStitchingRoutes(app, { pool, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
 
   // ------------------------------------------------- control tower
@@ -456,7 +456,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     if (!voice) return reply.status(204).send();
     const known = ev ? await callKnown(callDeps, provider.id, ev.providerCallId) : false;
     const queued = known && ev ? await callQueued(callDeps, provider.id, ev.providerCallId) : false;
-    return reply.type('text/xml').send(known ? (queued ? twimlHold() : twimlTestCall()) : twimlReject());
+    return reply.type('text/xml').send(known ? (queued ? twimlHold(`${callDeps.baseUrl}/webhooks/twilio/${provider.id}/voice${callId ? `?callId=${callId}` : ''}`) : twimlTestCall()) : twimlReject());
   };
   app.post('/webhooks/twilio/:providerId/status', twilioHook(false));
   app.post('/webhooks/twilio/:providerId/voice', twilioHook(true));

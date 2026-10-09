@@ -200,9 +200,11 @@ describe('hysteresis', () => {
     tick(5); await probe(A, 'ok');
     expect((await healthOf(A))!.state).toBe('failed');                           // one good probe: not yet
     for (let i = 0; i < 4; i++) { tick(2); await probe(A, 'ok'); }
-    expect((await healthOf(A))!.state).toBe('failed');                           // five good probes, but too soon after failing
-    tick(200); for (let i = 0; i < 5; i++) { tick(1); await probe(A, 'ok'); }
-    expect((await healthOf(A))!.state).toBe('healthy');                          // a run of good attempts over the minimum time
+    expect((await healthOf(A))!.state).toBe('failed');                           // five good probes, but a moment apart
+    tick(500); for (let i = 0; i < 5; i++) { tick(1); await probe(A, 'ok'); }
+    expect((await healthOf(A))!.state).toBe('failed');                           // still not: long after failing, but the run itself is only seconds long
+    tick(500); for (let i = 0; i < 5; i++) { tick(40); await probe(A, 'ok'); }
+    expect((await healthOf(A))!.state).toBe('healthy');                          // a run of good attempts spanning the minimum time
 
     const after = voices[A]!.said.length;
     voices[B]!.said.length = 0;
@@ -264,5 +266,53 @@ describe('total failure: the call is never dropped dead', () => {
     const r = await speakLines(session(), { tenantId: t, callId: callId(), lines: LINES });
     expect(r.outcome).toBe('fallback');
     expect(telephony.log.some((l) => l.startsWith('holding:'))).toBe(true);
+  });
+});
+
+describe('found in review', () => {
+  it('tries the bridge again on a provider that is still trusted, instead of giving the call up after one blip', async () => {
+    await reset();
+    voices[A]!.mode = 'dead';
+    const b = voices[B]!; const orig = b.speak.bind(b);
+    let bridgeCalls = 0;
+    b.speak = async (t: string) => { if (t === b.bridge && ++bridgeCalls === 1) { b.attempts++; throw new Error('blip'); } return orig(t); };
+    const r = await speakLines(session(), { tenantId, callId: callId(), lines: LINES });
+    expect(r.outcome).toBe('completed');                                       // B is fine; one error on the bridge does not condemn it
+    expect(b.said).toEqual(['One moment please.', ...LINES]);
+    expect(voices[C]!.attempts).toBe(0);
+  });
+
+  it('keeps a provider that said it has no credit out of use until it is topped up, whatever samples arrive', async () => {
+    await reset();
+    await must(post(`/internal/providers/${C}/funding`, { kind: 'topup', amount: '20', currency: 'USD' }));   // our ledger shows money
+    voices[C]!.mode = 'no_credit';
+    await must(put(`/internal/tenants/${tenantId}/routes/voice`, { providerIds: [C, B] }));
+    await speakLines(session(), { tenantId, callId: callId(), lines: ['hi'] });
+    expect(await healthOf(C)).toMatchObject({ state: 'unfunded' });
+    for (let i = 0; i < 6; i++) { tick(60); await must(post(`/internal/providers/${C}/samples`, { kind: 'ok', latencyMs: 100 })); }
+    expect(await healthOf(C)).toMatchObject({ state: 'unfunded' });             // good probes do not lift it: the provider said it has no credit
+    await must(post(`/internal/providers/${C}/funding`, { kind: 'adjustment', amount: '1', currency: 'USD' }));
+    expect(await healthOf(C)).toMatchObject({ state: 'unfunded' });             // nor does an entry that is not a top-up
+    await must(post(`/internal/providers/${C}/funding`, { kind: 'topup', amount: '50', currency: 'USD' }));
+    expect(await healthOf(C)).toMatchObject({ state: 'failed' });               // a top-up puts it on probation
+    await must(put(`/internal/tenants/${tenantId}/routes/voice`, { providerIds: [A, B, C] }));
+  });
+
+  it('lets a failed provider earn its way back by probing, and does not probe one that is out of funding', async () => {
+    await reset();
+    voices[A]!.mode = 'dead';
+    await speakLines(session(), { tenantId, callId: callId(), lines: LINES });
+    expect((await healthOf(A))!.state).toBe('failed');
+    const { probeProviders } = await import('../src/resilience/session.js');
+    voices[A]!.mode = 'ok';
+    (voices[A] as VoiceRuntime & { ping?: () => Promise<{ latencyMs: number }> }).ping = async () => ({ latencyMs: 150 });
+    for (let i = 0; i < 4; i++) { tick(5); await probeProviders(session()); }
+    expect((await healthOf(A))!.state).toBe('failed');                          // good, but a few seconds apart
+    for (let i = 0; i < 6; i++) { tick(30); await probeProviders(session()); }
+    expect((await healthOf(A))!.state).toBe('healthy');                         // good over the minimum time
+    // one that is out of funding is left alone
+    await env.pool.query(`INSERT INTO provider_health (provider_id, state, reason) VALUES ($1, 'unfunded', 'x') ON CONFLICT (provider_id) DO UPDATE SET state = 'unfunded'`, [B]);
+    (voices[B] as VoiceRuntime & { ping?: () => Promise<{ latencyMs: number }> }).ping = async () => { throw new Error('should not be probed'); };
+    expect((await probeProviders(session())).map((p) => p.providerId)).not.toContain(B);
   });
 });

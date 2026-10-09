@@ -28,6 +28,15 @@ npm test                  # needs a local Postgres; see tests/helpers.ts
 npm run typecheck
 ```
 
+## Calls
+
+Set `PUBLIC_BASE_URL` (the https address providers use to reach this server), then point each provider at it:
+
+- **Twilio:** the TwiML App Voice URL is `<base>/webhooks/twilio/<providerId>/voice`, and its status callback is `<base>/webhooks/twilio/<providerId>/status`. The provider needs the **Auth Token** saved, because Twilio signs events with it.
+- **Telnyx:** the Voice API Application's webhook URL is `<base>/webhooks/telnyx/<providerId>`. Save the application's ID and the **webhook signing public key** on the provider.
+
+Register the numbers you own with `POST /internal/numbers`; an inbound call is routed to the client that owns the number dialled. Until the workflow engine arrives, every answered call plays a short test message and hangs up, so do not point a real customer-facing number at this yet.
+
 ## Admin console
 
 Staff sign in with an API token. Providers: add one from a form built from the adapter's declared settings, set capabilities, add charging versions, confirm rates, record funding. Clients: add a client, grant credits, add projects, create users (their token is shown once).
@@ -59,3 +68,8 @@ All requests send `Authorization: Bearer <token>`. `/internal/*` is Daythree sta
 | `POST /internal/dnc/numbers`, `POST /internal/dnc/numbers/remove` | Load or remove numbers on a national registry or a client's own list |
 | `POST /internal/dial/check` | Dry run of the pre-dial gate |
 | `POST /internal/dial/gate` | The gate every real outbound dial goes through; logs the decision |
+| `POST /internal/numbers`, `GET /internal/numbers` | Numbers we own at a provider, and which client each belongs to |
+| `POST /internal/calls/outbound` | Place a call. The do-not-call gate runs first; a blocked number never reaches the provider |
+| `GET /internal/calls/:callId` | A call's status, timings and cost state |
+| `POST /internal/calls/:callId/cost/retry` | Re-price a call whose cost could not be recorded |
+| `POST /webhooks/twilio/:providerId/(voice\|status)`, `POST /webhooks/telnyx/:providerId` | Provider callbacks; no token, verified by signature |

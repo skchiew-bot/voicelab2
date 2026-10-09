@@ -24,6 +24,7 @@ services:
       DATABASE_URL: postgres://voicelab:${POSTGRES_PASSWORD}@db:5432/voicelab
       VOICELAB_SECRET_KEY: ${VOICELAB_SECRET_KEY:?run ./scripts/setup.sh first}
       PORT: "3000"
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
     ports:
       - "3000:3000"
 

@@ -35,7 +35,7 @@ export const twilio: Adapter = {
   params: [
     { key: 'accountSid', label: 'Account SID', type: 'string', required: true },
     { key: 'authToken', label: 'Auth Token', type: 'secret', required: false,
-      help: 'Provide this, or an API key SID and secret below.' },
+      help: 'Provide this, or an API key SID and secret below. Call events can only be verified with the Auth Token.' },
     { key: 'apiKeySid', label: 'API key SID', type: 'string', required: false },
     { key: 'apiKeySecret', label: 'API key secret', type: 'secret', required: false },
     { key: 'twimlAppVoiceUrl', label: 'TwiML App Voice URL', type: 'url', required: true,
@@ -73,6 +73,10 @@ export const telnyx: Adapter = {
       help: 'From the Mission Control Portal.' },
     { key: 'webhookUrl', label: 'Webhook URL', type: 'url', required: true },
     { key: 'failoverWebhookUrl', label: 'Failover webhook URL', type: 'url', required: false },
+    { key: 'connectionId', label: 'Voice API Application ID', type: 'string', required: false,
+      help: 'Needed to place outbound calls.' },
+    { key: 'webhookPublicKey', label: 'Webhook signing public key', type: 'string', required: false,
+      help: 'From the Mission Control Portal. Without it, incoming call events are refused.' },
   ],
   defaultCapabilities: {
     inbound_calls: 'native', outbound_calls: 'native', call_transfer: 'native', call_recording: 'native',

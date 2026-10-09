@@ -14,15 +14,18 @@ const ADMIN_URL = process.env.TEST_ADMIN_DATABASE_URL ?? 'postgres://voicelab:vo
  * check succeeds; a test sets `respond` to simulate a rejection or an outage.
  */
 export function fakeProviderApi() {
-  const calls: { url: string; headers: Record<string, string> }[] = [];
+  const calls: { url: string; method: string; headers: Record<string, string>; body: string }[] = [];
   const state = {
     calls,
-    respond: (_url: string): Response | Promise<Response> =>
+    respond: (_url: string, _init?: RequestInit): Response | Promise<Response> =>
       new Response(JSON.stringify({ status: 'active', data: { balance: '12.34', currency: 'USD' } }), { status: 200 }),
   };
   const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    calls.push({ url: String(input), headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)) });
-    return state.respond(String(input));
+    calls.push({
+      url: String(input), method: init?.method ?? 'GET', body: String(init?.body ?? ''),
+      headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)),
+    });
+    return state.respond(String(input), init);
   }) as typeof fetch;
   return { ...state, state, fetch: fetchFn };
 }
@@ -43,6 +46,7 @@ export async function setupDb() {
     DATABASE_URL: url.toString(),
     VOICELAB_SECRET_KEY: randomBytes(32).toString('base64'),
     PORT: 0,
+    PUBLIC_BASE_URL: 'https://voicelab.test',
   };
   const provider = fakeProviderApi();
   const app = buildApp(pool, config, { fetch: provider.fetch });

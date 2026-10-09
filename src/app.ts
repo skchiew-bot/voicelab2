@@ -16,6 +16,9 @@ import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
+import { addNumber, callKnown, costCall, getCall, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
+import { parseTwilio, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
 import { createProvider, getProvider, listProviders, preflight, recheckProvider, setCapability } from './store/providers.js';
 import { createProject, createTenant, createUser, listProjects, listTenants } from './store/tenants.js';
 
@@ -55,6 +58,19 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     if (s.actor.kind !== 'internal') throw new AppError(403, 'Internal access only.');
     return s;
   }
+
+  // Webhooks are signed over the exact bytes sent, so keep the raw JSON body alongside the parsed one.
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    (req as FastifyRequest & { rawBody?: string }).rawBody = body as string;
+    try { done(null, body ? JSON.parse(body as string) : undefined); }
+    catch (e) { done(Object.assign(e as Error, { statusCode: 400 }), undefined); }
+  });
+  app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {
+    done(null, Object.fromEntries(new URLSearchParams(body as string)));
+  });
+
+  const callDeps: CallDeps = { pool, key, dncKey, http, baseUrl: config.PUBLIC_BASE_URL?.replace(/\/$/, '') };
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof AppError) return reply.status(err.status).send({ error: err.message, details: err.details });
@@ -304,6 +320,86 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
       tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), callId: z.string().uuid(), country, to: z.string(),
     }).parse(req.body);
     return withActor(pool, s.actor, (c) => gateOutbound(c, dncKey, body));
+  });
+
+  // ------------------------------------------------ numbers and calls
+  app.post('/internal/numbers', async (req, reply) => {
+    const s = await internal(req);
+    const body = z.object({
+      providerId: z.string().uuid(), e164: z.string(), tenantId: z.string().uuid(),
+      projectId: z.string().uuid().optional(), country, label: z.string().optional(),
+    }).parse(req.body);
+    return reply.status(201).send(await withActor(pool, s.actor, (c) => addNumber(c, s.userId, body)));
+  });
+  app.get('/internal/numbers', async (req) => {
+    const s = await internal(req);
+    return withActor(pool, s.actor, listNumbers);
+  });
+  app.post('/internal/calls/outbound', async (req, reply) => {
+    const s = await internal(req);
+    const body = z.object({
+      tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), providerId: z.string().uuid(),
+      from: z.string(), to: z.string(), country,
+    }).parse(req.body);
+    const result = await placeOutboundCall(callDeps, s.userId, body);
+    return reply.status(result.allowed ? 201 : 200).send(result);
+  });
+  app.get('/internal/calls/:callId', async (req) => {
+    const s = await internal(req);
+    const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
+    return withActor(pool, s.actor, (c) => getCall(c, callId));
+  });
+  // Re-price a call whose cost could not be recorded, e.g. after adding the missing FX rate.
+  app.post('/internal/calls/:callId/cost/retry', async (req) => {
+    const s = await internal(req);
+    const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
+    const outcome = await withActor(pool, s.actor, (c) => costCall(c, s.userId, callId));
+    return { cost_status: outcome };
+  });
+
+  // ------------------------------------------------------- webhooks
+  // No bearer token here: providers cannot send one. Every request is verified by signature,
+  // and anything that cannot be verified is refused.
+  const webhookProvider = async (providerId: string, adapter: string) => {
+    const p = await withActor(pool, { kind: 'internal' }, (c) => loadProvider(c, providerId));
+    if (!p || p.adapter_key !== adapter) throw new AppError(404, 'Unknown provider.');
+    if (!callDeps.baseUrl) throw new AppError(503, 'PUBLIC_BASE_URL is not set.');
+    return p;
+  };
+  const twilioHook = (voice: boolean) => async (req: FastifyRequest, reply: import('fastify').FastifyReply) => {
+    const { providerId } = z.object({ providerId: z.string().uuid() }).parse(req.params);
+    const { callId } = z.object({ callId: z.string().uuid().optional() }).parse(req.query);
+    const provider = await webhookProvider(providerId, 'twilio');
+    const creds = credentials<TwilioCreds>(provider, key);
+    if (!creds.authToken) throw new AppError(503, 'This Twilio provider has no Auth Token, so call events cannot be verified.');
+    const params = (req.body ?? {}) as Record<string, string>;
+    if (!verifyTwilioSignature(creds.authToken, callDeps.baseUrl + req.url, params, req.headers['x-twilio-signature'] as string | undefined)) {
+      throw new AppError(403, 'Bad signature.');
+    }
+    const ev = parseTwilio(params, callId, voice);
+    if (ev) await processWebhook(callDeps, provider, ev, callId);
+    if (!voice) return reply.status(204).send();
+    const known = ev ? await callKnown(callDeps, provider.id, ev.providerCallId) : false;
+    return reply.type('text/xml').send(known ? twimlTestCall() : twimlReject());
+  };
+  app.post('/webhooks/twilio/:providerId/status', twilioHook(false));
+  app.post('/webhooks/twilio/:providerId/voice', twilioHook(true));
+
+  app.post('/webhooks/telnyx/:providerId', async (req, reply) => {
+    const { providerId } = z.object({ providerId: z.string().uuid() }).parse(req.params);
+    const provider = await webhookProvider(providerId, 'telnyx');
+    const creds = credentials<TelnyxCreds>(provider, key);
+    if (!creds.webhookPublicKey) throw new AppError(503, 'This Telnyx provider has no webhook signing public key, so call events cannot be verified.');
+    const ok = verifyTelnyxSignature({
+      publicKeyBase64: creds.webhookPublicKey,
+      signatureBase64: req.headers['telnyx-signature-ed25519'] as string | undefined,
+      timestamp: req.headers['telnyx-timestamp'] as string | undefined,
+      rawBody: (req as FastifyRequest & { rawBody?: string }).rawBody ?? '',
+    });
+    if (!ok) throw new AppError(403, 'Bad signature.');
+    const ev = parseTelnyx(req.body);
+    if (ev) await processWebhook(callDeps, provider, ev);
+    return reply.status(200).send({ ok: true });
   });
 
   // --------------------------------------------------- client portal

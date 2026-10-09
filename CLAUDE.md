@@ -16,6 +16,9 @@ Provider-agnostic voice orchestration platform. The blueprint is the source of t
 - Provider secrets are encrypted and never returned by the API, logged or audited.
 - Cost records, FX, rate cards and do-not-call lists are internal only; clients see credits drawn and nothing about provider cost or margin.
 - Every outbound dial must go through `gateOutbound` (`src/store/dnc.ts`) before the provider is called. The gate fails closed. Phone numbers are never stored, logged or audited in clear.
+- Webhooks are verified by signature before anything is read, and fail closed (no key, no verification, no processing). They are idempotent: a retried delivery changes nothing.
+- A finished call is priced once. Calls move forward only; a late or duplicate event must not reopen or re-price one.
+- Our own numbers (`phone_numbers`) are stored; customers' numbers are not. Scrub provider error text with `redactNumbers` before it is stored, logged or returned.
 - Money is exact: use `src/money.ts` (BigInt, 1e-8) and `src/billing.ts`, never floating point. A call that cannot be priced is refused, not recorded with a guess.
 - Tests never call real provider APIs. Provider HTTP goes through the injected `fetch`; use `fakeProviderApi` in `tests/helpers.ts`. When a test's setup calls an endpoint, assert it succeeded.
 

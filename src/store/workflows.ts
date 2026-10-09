@@ -177,10 +177,13 @@ export async function deployments(c: pg.PoolClient, workflowId: string) {
     `SELECT d.id, d.environment, d.kind, d.created_at, v.id AS version_id, v.major, v.minor
        FROM workflow_deployments d JOIN workflow_versions v ON v.id = d.version_id WHERE d.workflow_id = $1 ORDER BY d.id DESC`, [workflowId])).rows;
   const live: Record<string, string | null> = { staging: null, production: null };
+  // What a rollback would go back to, per environment.
+  const previous: Record<string, string | null> = { staging: null, production: null };
+  const label = (id: string | undefined) => { const row = rows.find((r) => r.version_id === id); return row ? `${row.major}.${row.minor}` : null; };
   for (const env of ['staging', 'production'] as const) {
-    const id = await liveVersionId(c, workflowId, env);
-    const row = rows.find((r) => r.version_id === id);
-    live[env] = row ? `${row.major}.${row.minor}` : null;
+    const stack = liveStack(await history(c, workflowId, env));
+    live[env] = label(stack[stack.length - 1]);
+    previous[env] = label(stack[stack.length - 2]);
   }
-  return { live, history: rows.map((r) => ({ id: r.id, environment: r.environment, kind: r.kind, version: `${r.major}.${r.minor}`, created_at: r.created_at })) };
+  return { live, previous, history: rows.map((r) => ({ id: r.id, environment: r.environment, kind: r.kind, version: `${r.major}.${r.minor}`, created_at: r.created_at })) };
 }

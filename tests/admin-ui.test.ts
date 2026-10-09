@@ -33,7 +33,7 @@ const field = (scope: Page | Locator, label: string) => {
   const page = 'goto' in scope ? scope : scope.page(); // `has` is matched relative to each label, so build it from the page
   return scope.locator('label.field')
     .filter({ has: page.locator('span.label').filter({ hasText: new RegExp(`^${label}`) }) })
-    .locator('input, select').first();
+    .locator('input, select, textarea').first();
 };
 
 const goProviders = (page: Page) => page.getByRole('link', { name: 'Providers', exact: true }).click();
@@ -416,17 +416,125 @@ describe.skipIf(!run)('admin UI', () => {
 
   it('fits a phone screen on every page, with no sideways scrolling of the page', async () => {
     const provider = (await env.pool.query('SELECT id FROM providers ORDER BY created_at LIMIT 1')).rows[0].id;
+    const tenant = (await env.call(env.staffToken, 'POST', '/internal/tenants', { name: 'Phone Width Co' })).json().id;
+    const workflow = (await env.call(env.staffToken, 'POST', `/internal/tenants/${tenant}/workflows`, {
+      name: 'phone_width', definition: { start: 'a', nodes: { a: { type: 'speak', speech: 'fixed', text: 'Hello', transitions: [{ to: 'b' }] }, b: { type: 'end', outcome: 'x' } } } })).json().workflow.id;
     const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
     await signIn(page, env.staffToken);
     await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
-    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls']) {
+    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`]) {
       await page.goto(`${base}#/${route}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
       expect(width, `#/${route} is ${width}px wide on a 390px screen`).toBeLessThanOrEqual(390);
     }
     await page.close();
+  }, 60_000);
+
+  it('creates the debt-collection template for a client from a form', async () => {
+    const t = (await env.call(env.staffToken, 'POST', '/internal/tenants', { name: 'UI Template Co' })).json().id;
+    const page = await browser.newPage();
+    await signIn(page, env.staffToken);
+    await page.getByRole('link', { name: 'Workflows', exact: true }).click();
+    const form = page.getByRole('form', { name: 'Start from a template' });
+    await field(form, 'Client').selectOption({ label: 'UI Template Co' });
+    await field(form, 'Template').selectOption({ label: 'Debt collection (Malaysia)' });
+    await expect(form).toContainText('Bahasa Malaysia');
+    await expect(form).toContainText('Creates: collections, verify_identity, partial_payment, human_transfer');
+    await form.getByRole('button', { name: 'Create from template' }).click();
+    await expect(form.getByRole('status')).toContainText('Created collections, verify_identity, partial_payment, human_transfer');
+    for (const name of ['collections', 'verify_identity', 'partial_payment', 'human_transfer']) {
+      await expect(page.getByRole('row', { name: new RegExp(`^${name} UI Template Co 1\\.0`) })).toBeVisible();
+    }
+    void t;
+    await page.close();
   });
+
+  it('takes a workflow through editing, the publishing gates, a rollback and a test call, all from the console', async () => {
+    const st = env.staffToken;
+    const tenant = (await env.call(st, 'POST', '/internal/tenants', { name: 'UI Flow Co' })).json().id;
+    const def = (wording: string) => ({
+      start: 'ask', nodes: {
+        ask: { type: 'speak', speech: 'fixed', text: wording, listen: { captureAs: 'who' }, transitions: [{ to: 'meet' }] },
+        meet: { type: 'speak', speech: 'hybrid', text: 'Nice to meet you, {{who}}.', transitions: [{ to: 'end' }] },
+        end: { type: 'end', outcome: 'met' },
+      },
+    });
+    const wfId = (await env.call(st, 'POST', `/internal/tenants/${tenant}/workflows`, { name: 'greeter', definition: def('What is your name?') })).json().workflow.id;
+
+    const page = await browser.newPage();
+    await signIn(page, st);
+    await page.goto(`${base}#/workflows/${wfId}`);
+    await expect(page.getByRole('heading', { name: 'greeter', level: 1 })).toBeVisible();
+    const versions = page.getByLabel('Versions');
+    await expect(versions.getByRole('row', { name: /^1\.0 initial ready/ })).toBeVisible();
+    await expect(page.getByLabel('Outline')).toContainText('“What is your name?”');
+
+    // the gates, in order: production is refused before staging; then staging works
+    await versions.getByRole('button', { name: 'Put 1.0 in production' }).click();
+    await expect(versions.getByRole('alert')).toContainText('not live in staging');
+    await versions.getByRole('button', { name: 'Put 1.0 in staging' }).click();
+    await expect(versions.getByRole('status')).toContainText('Version 1.0 is now live in staging');
+    await versions.getByRole('button', { name: 'Put 1.0 in production' }).click();
+    await expect(versions.getByRole('alert')).toContainText('no clean simulation');
+
+    // a simulation: a failing script first, then a passing one
+    const sim = page.getByLabel('Simulation');
+    const runSim = async (scenarios: unknown) => { await field(sim, 'Scenarios').fill(JSON.stringify(scenarios)); await sim.getByRole('button', { name: 'Run simulation' }).click(); };
+    await runSim([{ name: 'wrong hope', variables: {}, replies: ['Wei'], expect: { outcome: 'refused' } }]);
+    await expect(sim.getByRole('alert')).toContainText('0 of 1 passed');
+    await expect(sim).toContainText('Expected the outcome "refused" but got "met"');
+    await runSim([{ name: 'meets', variables: {}, replies: ['Wei'], expect: { outcome: 'met', says: ['Nice to meet you, Wei'] } }]);
+    await expect(sim.getByRole('status')).toContainText('1 of 1 passed. This version can now go to production');
+    await versions.getByRole('button', { name: 'Put 1.0 in production' }).click();
+    await expect(versions.getByRole('status')).toContainText('live in production');
+
+    // a wording change is a minor version, and goes live the same way
+    const edit = page.locator('section[aria-label="Edit"]');
+    await field(edit, 'Definition').fill(JSON.stringify(def('Hello! What should I call you?'), null, 2));
+    await edit.getByRole('button', { name: 'Save as a new version' }).click();
+    await expect(edit.getByRole('status').filter({ hasText: 'Saved as version' })).toContainText('Saved as version 1.1 (minor change)');
+    await versions.getByRole('button', { name: 'Put 1.1 in staging' }).click();
+    await runSim([{ name: 'meets', variables: {}, replies: ['Wei'], expect: { outcome: 'met' } }]);
+    await expect(sim.getByRole('status')).toContainText('1 of 1 passed');
+    await versions.getByRole('button', { name: 'Put 1.1 in production' }).click();
+    await expect(versions.getByRole('status')).toContainText('Version 1.1 is now live in production');
+
+    // and can be rolled back
+    await versions.getByRole('button', { name: 'Roll production back to 1.0' }).click();
+    await expect(versions.getByRole('status')).toContainText('Production is back on version 1.0');
+    await expect(page.getByText('Live in production: 1.0')).toBeVisible();
+
+    // a dangling path is caught when checking, can be saved as work in progress, and cannot be published
+    const broken = def('What is your name?'); (broken.nodes.ask.transitions as { to: string }[])[0]!.to = 'nowhere';
+    await field(edit, 'Definition').fill(JSON.stringify(broken, null, 2));
+    await edit.getByRole('button', { name: 'Check for problems' }).click();
+    await expect(edit.getByRole('alert')).toContainText('3 problems to fix before this can be published');
+    await expect(edit.getByRole('alert')).toContainText('"nowhere", which does not exist');
+    await expect(edit.getByRole('alert')).toContainText('Nothing leads to "meet"'); // cutting the path also strands what came after it
+    await edit.getByRole('button', { name: 'Save as a new version' }).click();
+    await expect(edit.getByRole('status').filter({ hasText: 'Saved as version' })).toContainText('cannot be published yet');
+    await expect(versions.getByRole('row', { name: /^2\.0 major 3 problems/ })).toBeVisible();
+    await versions.getByRole('button', { name: 'Put 2.0 in staging' }).click();
+    await expect(versions.getByRole('alert')).toContainText('cannot be published');
+    await expect(versions.getByRole('alert')).toContainText('"nowhere", which does not exist');
+    await expect(page.getByText('Live in staging: 1.1')).toBeVisible(); // unchanged
+
+    // invalid JSON is said plainly
+    await field(edit, 'Definition').fill('{ not json');
+    await edit.getByRole('button', { name: 'Save as a new version' }).click();
+    await expect(edit.getByRole('alert')).toContainText('not valid JSON');
+
+    // a test call against what is live in staging
+    const call = page.getByLabel('Test call');
+    await call.getByRole('button', { name: 'Start the call' }).click();
+    await expect(call.getByLabel('Transcript')).toContainText('Hello! What should I call you?');
+    await field(call.getByRole('form', { name: 'Reply' }), 'What the caller says').fill('Aisha');
+    await call.getByRole('button', { name: 'Send' }).click();
+    await expect(call.getByLabel('Transcript')).toContainText('Nice to meet you, Aisha.');
+    await expect(call.getByLabel('Transcript')).toContainText('The call ended: met');
+    await page.close();
+  }, 90_000);
 
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();

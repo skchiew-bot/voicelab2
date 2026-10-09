@@ -7,6 +7,8 @@ import { ControlTower } from './ControlTower';
 import { Compliance } from './Compliance';
 import { Numbers } from './Numbers';
 import { Providers } from './Providers';
+import { WorkflowDetail } from './WorkflowDetail';
+import { Workflows } from './Workflows';
 import { Rates } from './Rates';
 import { Tenants } from './Tenants';
 
@@ -67,13 +69,15 @@ export function App() {
   if (!signedIn) return <Login onDone={() => setSignedIn(true)} />;
 
   const providerId = /^#\/providers\/([\w-]+)$/.exec(hash)?.[1];
-  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
+  const workflowId = /^#\/workflows\/([\w-]+)$/.exec(hash)?.[1];
+  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers', 'workflows'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
 
   return (
     <div className="shell">
       <nav>
         <strong>Voice Lab</strong>
         <a href="#/tower" aria-current={section === 'tower' ? 'page' : undefined}>Control Tower</a>
+        <a href="#/workflows" aria-current={section === 'workflows' ? 'page' : undefined}>Workflows</a>
         <a href="#/providers" aria-current={section === 'providers' ? 'page' : undefined}>Providers</a>
         <a href="#/tenants" aria-current={section === 'tenants' ? 'page' : undefined}>Clients</a>
         <a href="#/rates" aria-current={section === 'rates' ? 'page' : undefined}>Rates</a>
@@ -89,6 +93,7 @@ export function App() {
           : section === 'numbers' ? <Numbers />
           : section === 'compliance' ? <Compliance />
           : section === 'calls' ? <Calls />
+          : section === 'workflows' ? (workflowId ? <WorkflowDetail id={workflowId} /> : <Workflows />)
           : section === 'providers' ? (providerId ? <ProviderDetail id={providerId} /> : <Providers />)
           : <ControlTower />}
       </main>

@@ -36,7 +36,7 @@ Token cost is a build requirement, not a Phase 6 detail. Every AI task in every 
 | API and call service | Fastify plus WebSockets | Twilio TwiML and Telnyx event webhooks, and media streams. |
 | Database | PostgreSQL | Ledgers, rate versions, workflows and the call-event log need strong consistency and an audit trail. Row-level security enforces tenant isolation and the split between the two ledgers. |
 | Queues and live state | Redis, with BullMQ for jobs | Concurrency counters, call state, pub/sub for live panels, batch jobs (distillation, QA scoring, usage reconciliation). |
-| Control Tower and client portal | React (Next.js) | Live panels over WebSocket or server-sent events. Two separate apps over the same API, with separate permissions. |
+| Control Tower and client portal | React single-page apps (Vite), served by the API | Live panels over WebSocket or server-sent events. Two separate apps over the same API, with separate permissions. Chosen over Next.js so there is still one thing to deploy; revisit if server-side rendering is needed. |
 | Recordings and pre-recorded audio | S3-compatible object storage | Stitching audio, per-language recordings, call recordings. |
 | Secrets | Provider credentials encrypted at rest with a managed key | Credentials are keyed in through the UI and must never sit in plain text. |
 | Provider adapters | Typed adapter interface per provider | Each adapter declares its own parameter set; the UI builds its form from it. A new provider is a new adapter, not a UI change. |
@@ -96,9 +96,10 @@ Built and tested:
 - Partitioned call-event log, audit log and model-config table.
 - Encrypted provider credentials (AES-256-GCM); the API never returns them.
 - Docker Compose and a setup script with a health check.
+- **Admin console** (`/admin/`, React single-page app served by the API): staff sign-in; add a provider from a form built from the adapter declaration; edit capabilities; add and confirm charging versions; record provider funding; add clients, projects, users and credits. Driven end to end in a real browser by `tests/admin-ui.test.ts`. Exit criterion 1 is now met through the UI.
 
 Not built yet:
-- **The admin UI.** Exit criterion 1 is met at the API level only; the form that renders from `GET /internal/adapters` is still to do, as are the tenant switcher and the Control Tower shell.
+- Tenant switcher and the Control Tower shell.
 - Redis and the job queue (nothing in Phase 0 needs them yet).
 - Finer roles and permissions beyond internal admin, tenant admin and tenant user.
 - The Docker install path has not been run end to end; its compose file validates, but it needs a real run.

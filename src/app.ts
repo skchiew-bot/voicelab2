@@ -1,3 +1,7 @@
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import type pg from 'pg';
 import { z, ZodError } from 'zod';
@@ -13,7 +17,9 @@ import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from 
 import { createProvider, getProvider, listProviders, setCapability } from './store/providers.js';
 import { createProject, createTenant, createUser, listProjects, listTenants } from './store/tenants.js';
 
-interface Session { userId: string; actor: Actor }
+interface Session { userId: string; email: string; actor: Actor }
+
+const adminDist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'admin', 'dist');
 
 const money = z.string().regex(/^-?\d+(\.\d+)?$/, 'Use a decimal number as text, e.g. "12.50".');
 const currency = z.string().length(3).transform((s) => s.toUpperCase());
@@ -25,11 +31,12 @@ export function buildApp(pool: pg.Pool, config: Config): FastifyInstance {
   async function authenticate(req: FastifyRequest): Promise<Session> {
     const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1];
     if (!token) throw new AppError(401, 'Missing bearer token.');
-    const { rows } = await pool.query('SELECT id, tenant_id, role FROM users WHERE token_hash = $1', [hashToken(token)]);
+    const { rows } = await pool.query('SELECT id, email, tenant_id, role FROM users WHERE token_hash = $1', [hashToken(token)]);
     const u = rows[0];
     if (!u) throw new AppError(401, 'Invalid token.');
     return {
       userId: u.id,
+      email: u.email,
       actor: u.role === 'internal_admin' ? { kind: 'internal' } : { kind: 'client', tenantId: u.tenant_id },
     };
   }
@@ -58,6 +65,12 @@ export function buildApp(pool: pg.Pool, config: Config): FastifyInstance {
     return { ok: true, migrations: rows[0].migrations };
   });
 
+  // Who am I: the admin UI uses this to validate a pasted token and pick its menus.
+  app.get('/me', async (req) => {
+    const s = await authenticate(req);
+    return { email: s.email, role: s.actor.kind === 'internal' ? 'internal_admin' : 'client' };
+  });
+
   // --------------------------------------------------------- adapters
   // The admin UI builds its provider form from this; nothing is hardcoded there.
   app.get('/internal/adapters', async (req) => {
@@ -75,6 +88,16 @@ export function buildApp(pool: pg.Pool, config: Config): FastifyInstance {
   app.get('/internal/tenants', async (req) => {
     const s = await internal(req);
     return withActor(pool, s.actor, listTenants);
+  });
+  app.get('/internal/tenants/:tenantId/projects', async (req) => {
+    const s = await internal(req);
+    const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(req.params);
+    return withActor(pool, s.actor, async (c) => (await listProjects(c)).filter((p) => p.tenant_id === tenantId));
+  });
+  app.get('/internal/tenants/:tenantId/credits', async (req) => {
+    const s = await internal(req);
+    const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(req.params);
+    return withActor(pool, s.actor, (c) => creditSummary(c, tenantId));
   });
   app.post('/internal/tenants/:tenantId/projects', async (req, reply) => {
     const s = await internal(req);
@@ -190,6 +213,13 @@ export function buildApp(pool: pg.Pool, config: Config): FastifyInstance {
     if (s.actor.kind !== 'client') throw new AppError(403, 'Client access only.');
     return withActor(pool, s.actor, listProjects);
   });
+
+  // ------------------------------------------------------- admin UI
+  // Built with `npm run build:admin`. Served from the same process so there is one thing to deploy.
+  if (existsSync(adminDist)) {
+    app.register(fastifyStatic, { root: adminDist, prefix: '/admin/' });
+    app.get('/admin', (_req, reply) => reply.redirect('/admin/'));
+  }
 
   return app;
 }

@@ -5,7 +5,8 @@ Provider-agnostic voice orchestration platform. The blueprint is the source of t
 ## Commands
 
 - `npm test` runs unit and database tests (needs local Postgres; each test file gets a throwaway database).
-- `npm run typecheck` runs `tsc --noEmit`. Run both before pushing.
+- `npm run typecheck` checks the API and the admin UI. Run both before pushing.
+- `npm run build:admin` builds the admin UI (`admin/`, Vite + React) that the API serves at `/admin/`. `tests/admin-ui.test.ts` drives it in Chromium and is skipped where none is installed (`CHROMIUM_PATH`).
 - `npm run migrate` applies `migrations/*.sql`. Migrations are append-only: add a new file, never edit an applied one.
 
 ## Invariants (do not break)

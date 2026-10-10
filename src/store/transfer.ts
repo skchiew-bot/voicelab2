@@ -139,6 +139,9 @@ export async function afterRelay(d: TransferDeps, providerId: string, callId: st
     const run = (await c.query(`SELECT status, outcome, error FROM workflow_runs WHERE call_id = $1 AND kind = 'live'`, [callId])).rows[0] as
       { status: string; outcome: string | null; error: string | null } | undefined;
     const handoff = run?.status === 'ended' && run.outcome === 'handoff_human' && run.error === null;
+    // The relay has already fallen back on this call (holding line said, callback recorded): a call falls back once, and
+    // a caller told they will be called back is not then put through as well.
+    if (call.relay_failed) return twimlHangup();
     if (!present) {
       if (handoff) await event(c, call, 'transfer.not_attempted', { reason: 'caller_gone' });
       return twimlHangup();
@@ -155,7 +158,7 @@ export async function afterRelay(d: TransferDeps, providerId: string, callId: st
       return plan.twiml;
     }
     // A conversation that finished, or one the relay has already fallen back on (callback recorded, holding line said).
-    if (call.relay_failed || (run?.status === 'ended' && run.outcome !== 'abandoned' && run.error === null)) return twimlHangup();
+    if (run?.status === 'ended' && run.outcome !== 'abandoned' && run.outcome !== 'error' && run.error === null) return twimlHangup();
     // The session ended with the conversation unfinished and the caller still on the line: never a dead line.
     await c.query('UPDATE calls SET relay_failed = true WHERE id = $1', [callId]);
     await event(c, call, 'relay.fallback', { steps: ['record_callback_request', 'holding_message'], by: 'session_ended' });

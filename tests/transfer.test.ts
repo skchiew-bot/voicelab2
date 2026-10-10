@@ -380,4 +380,12 @@ describe('a live caller passed to a person', () => {
     expect((await relayEnded(callSid, callId, {}, ASK)).body).toContain('<Say>');
     expect(await callbacks(callId)).toEqual(['the live call could not carry on']);
   });
+
+  it('does not ring the agent for a call the relay has already fallen back on, even if its run ended in a handoff', async () => {
+    const { callSid, callId } = await handedOver();
+    await env.pool.query('UPDATE calls SET relay_failed = true WHERE id = $1', [callId]);
+    expect((await relayEnded(callSid, callId)).body).toBe(HANGUP);
+    expect(await callRow(callId)).toMatchObject({ transfer_status: null });
+    expect(await callbacks(callId)).toEqual([]);
+  });
 });

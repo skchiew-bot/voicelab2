@@ -18,7 +18,7 @@ import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from 
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, gateOutbound, normalizeE164, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
 import { addNumber, callKnown, callQueued, costCall, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
-import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, type RelayDeps, type RelaySession } from './store/relay.js';
+import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, type RelayDeps, type RelaySession } from './store/relay.js';
 import { recordingAudio } from './store/recordings.js';
 import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
 import { accept, afterDial, afterRelay, transferUrl, twimlHangup, twimlHoldingThenHangup, whisper } from './store/transfer.js';
@@ -677,15 +677,38 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     }, (socket, req) => {
       const providerId = (req.params as { providerId: string }).providerId;
       let session: RelaySession | null = null;
+      let closed = false;
       let queue: Promise<void> = Promise.resolve();
       const send = (out: RelayOutbound[]) => { for (const m of out) if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(m)); };
       // The relay must say which call it is for straight away; a connection that does not is closed.
       const setupTimer = setTimeout(() => { if (!session) socket.close(1008, 'No setup'); }, 10_000);
+      // Something below failed outright (the database, say): the callback is still attempted and the caller still hears a
+      // holding line, never silence; then the line is closed.
+      const fallBack = async () => {
+        const out = session ? await relayFailed(relayDeps, session).then((r) => r.send).catch(() => null) : null;
+        send(out ?? [{ type: 'text', token: DEFAULT_FALLBACK.holdingMessage, last: true }, { type: 'end' }]);
+        socket.close();
+      };
+      // A connection standing by while another starts the call, or carrying on a call whose reply is still being applied,
+      // looks again every few seconds, so it is never left silent for long. A closed connection stops looking, and never
+      // takes the call over.
+      let standbyTimer: NodeJS.Timeout | undefined;
+      const armStandby = () => {
+        if (closed) return;
+        standbyTimer = setTimeout(() => {
+          queue = queue.then(async () => {
+            if (!session || closed) return;
+            const r = await standbyCheck(relayDeps, session);
+            send(r.send);
+            if (r.again) armStandby();
+          }).catch(fallBack);
+        }, STANDBY_POLL_MS);
+      };
       socket.on('message', (data: Buffer) => {
         const m = parseRelay(data.toString('utf8'));
         if (!m) return;
-        // The question the call was on when these words arrived (before setup has finished, worked out once it has).
-        const askedAt = session ? session.version : undefined;
+        // The question the call was on when these words arrived; null if this connection was not yet serving the call.
+        const askedAt = session?.runId ? session.version : null;
         // One message at a time, in order: a turn finishes before the next is looked at.
         queue = queue.then(async () => {
           if (m.type === 'setup') {
@@ -693,21 +716,20 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
             clearTimeout(setupTimer);
             const r = await openRelay(relayDeps, providerId, m);
             session = r.session;
+            if (session && closed) session.closed = true;
             send(r.send);
             if (!session) socket.close(1008, 'Unknown call');
+            // Standing by, or carried on from a call another connection was serving: look again until there is something to say.
+            else if (!session.ended && r.send.length === 0) armStandby();
             return;
           }
           if (session) send(await onRelayMessage(relayDeps, session, m, askedAt));
-        // Something below failed outright (the database, say): the callback is still attempted and the caller still hears a
-        // holding line, never silence; then the line is closed.
-        }).catch(async () => {
-          const out = session ? await relayFailed(relayDeps, session).then((r) => r.send).catch(() => null) : null;
-          send(out ?? [{ type: 'text', token: DEFAULT_FALLBACK.holdingMessage, last: true }, { type: 'end' }]);
-          socket.close();
-        });
+        }).catch(fallBack);
       });
       socket.on('close', () => {
-        clearTimeout(setupTimer);
+        closed = true;
+        if (session) session.closed = true;
+        clearTimeout(setupTimer); clearTimeout(standbyTimer);
         queue = queue.then(() => (session ? closeRelay(relayDeps, session) : undefined)).catch(() => undefined);
       });
     });

@@ -43,7 +43,8 @@ export const PHASES: PhaseProgress[] = [
       'A call the workflow passes to a person (its own handoff or an escalation) is put through to the client\'s agent phone, showing one of our own numbers, with a whisper of the reason and ticket reference after which the agent presses 1 to take the call (so a voicemail is never taken for a person); if no one takes it, or the call ends with the dial\'s outcome unknown, a callback request is recorded and the caller hears the holding message. Tested only against fakes: Twilio\'s transfer requests are taken from its published packages (the dial-ended status values are assumed) and are unchecked against a live call. Staff set the agent number through the API (no console screen yet); the agent\'s time on the call is not yet costed or counted against the provider\'s concurrency ceiling',
       'Twilio\'s per-minute charge for the speech relay is not in the rate card until an operator adds it; the relay speaks in the one language set on the provider',
       'Telnyx automatic reconciliation (the reconciliation sweep now runs every hour as a scheduled job)',
-      'Voice usage (characters, tokens) is not yet fed into cost records',
+      'Voice usage (characters, tokens) is not yet fed into cost records, including lines the voice link says again when a reconnected line takes a call over (recorded on the call, not yet priced)',
+      'When the server running a call\'s start or reply dies, a reconnected line can wait up to 60 to 90 seconds with nothing to say before the caller hears the holding line; there is no interim "one moment" line yet',
     ],
   },
   {

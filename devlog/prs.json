@@ -253,10 +253,10 @@
  {
   "number": 11,
   "title": "Dev Control Tower: activity log, lessons register with guard tests, dashboard",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/11",
   "created_at": "2026-10-10T00:20:00Z",
-  "merged_at": null,
+  "merged_at": "2026-10-10T01:11:00Z",
   "findings": [
    {
     "severity": "Medium",

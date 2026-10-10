@@ -252,15 +252,18 @@ export async function abandonStaleRuns(d: RunDeps, actorId: string | null, e: { 
   });
 }
 
-/** End a run nobody will come back to, wiping what it held sensitive. The row must be locked by the caller. */
-export async function abandonRow(c: pg.PoolClient, r: { id: string; state: RunState }) {
+/**
+ * End a run nobody will come back to, wiping what it held sensitive. The row must be locked by the caller. `note` goes on
+ * the end step, such as a reply cut off part-way, whose effects on a client's system are then unknown (L-002).
+ */
+export async function abandonRow(c: pg.PoolClient, r: { id: string; state: RunState }, note: Record<string, Json> = {}) {
   const state = r.state;
   const ended: RunState = { ...state, status: 'ended', outcome: 'abandoned', node: null, awaiting: undefined, vars: Object.fromEntries(Object.entries(state.vars).filter(([k]) => !state.sensitive.includes(k))) };
   await c.query(
     `UPDATE workflow_runs SET state = $2, sealed = NULL, status = 'ended', outcome = 'abandoned', claimed_at = NULL, ended_at = now(), updated_at = now(), state_version = state_version + 1 WHERE id = $1`,
     [r.id, JSON.stringify(ended)]);
   const last = (await c.query('SELECT coalesce(max(seq), 0) AS n FROM workflow_run_steps WHERE run_id = $1', [r.id])).rows[0].n as number;
-  await persistSteps(c, r.id, last + 1, [{ type: 'end', workflow: state.workflow, payload: { outcome: 'abandoned' } }]);
+  await persistSteps(c, r.id, last + 1, [{ type: 'end', workflow: state.workflow, payload: { outcome: 'abandoned', ...note } }]);
 }
 
 /**

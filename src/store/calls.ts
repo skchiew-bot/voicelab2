@@ -348,7 +348,12 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
       // waited and was then served pays credits only from the moment they were.
       drawCredits: !call.no_credit,
       creditSkipSeconds: call.credit_from && call.answered_at ? Math.max(0, (new Date(call.credit_from).getTime() - new Date(call.answered_at).getTime()) / 1000) : 0,
-      usage: [{ providerId: call.provider_id, usage: { seconds: Number(call.duration_seconds ?? 0), burst: call.burst } }],
+      // A call put through to a person has a second leg at the provider, from us to the agent: its cost is ours as well.
+      // Credits follow the caller's own call, which already includes their time with the agent.
+      usage: [
+        { providerId: call.provider_id, usage: { seconds: Number(call.duration_seconds ?? 0), burst: call.burst } },
+        ...(Number(call.transfer_seconds ?? 0) > 0 ? [{ providerId: call.provider_id, usage: { seconds: Number(call.transfer_seconds) }, direction: 'outbound' as const }] : []),
+      ],
     });
     await c.query(`UPDATE calls SET cost_status = 'recorded', cost_error = NULL WHERE id = $1`, [callId]);
     return 'recorded';

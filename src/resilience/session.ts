@@ -2,6 +2,7 @@ import type pg from 'pg';
 import { withActor } from '../db.js';
 import type { HandoverPacket } from '../store/runs.js';
 import { recordEvent } from '../store/events.js';
+import { routingHealth } from '../store/control-actions.js';
 import { addCallbackRequest, getFallbackPlan, getRoutes, healthMap, logFailover, markUnfunded, recordSample } from '../store/resilience.js';
 import { classify, pickRoute } from './failover.js';
 import { DEFAULT_FALLBACK, fallbackLadder, type FallbackStep } from './fallback.js';
@@ -74,7 +75,7 @@ export async function speakLines(d: SessionDeps, input: SpeakInput): Promise<Ses
   const tried = new Set<string>();
   const event = (type: string, payload: Record<string, unknown>) =>
     asInternal(d, (c) => recordEvent(c, { tenantId: input.tenantId, callId: input.callId, type, payload, occurredAt: now() }));
-  const choose = () => asInternal(d, async (c) => pickRoute(routes, await healthMap(c, routes.map((r) => r.providerId)), tried));
+  const choose = () => asInternal(d, async (c) => pickRoute(routes, await routingHealth(c, routes.map((r) => r.providerId)), tried));
 
   /** One attempt to say something through one provider. Records it, and says whether it played and whether the provider is still trusted. */
   const attempt = async (providerId: string, text: string): Promise<{ played: boolean; healthy: boolean; trigger?: string }> => {

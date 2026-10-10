@@ -1005,6 +1005,27 @@ describe.skipIf(!run)('admin UI', () => {
     await ctx.close();
   }, 60_000);
 
+  it('takes an action from the Control Tower only with a reason, and shows it in the change log', async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 1000 } });
+    await signIn(page, env.staffToken);
+    const card = page.getByLabel('Take action');
+    await card.getByLabel('Action').selectOption('set_pace');
+    await card.getByLabel(/^Dials a minute/).fill('1,000');
+    await expect(card.getByRole('button', { name: 'Do it' })).toBeDisabled();                  // no reason, no action
+    await card.getByLabel(/^Why/).fill('Ramping up the new campaign.');
+    await card.getByRole('button', { name: 'Do it' }).click();
+    await expect(card.getByRole('alert')).toContainText('digits only');                         // "1,000" is never read as "no limit"
+    await expect(card).toContainText('Dialling pace: no limit');
+    await card.getByLabel(/^Dials a minute/).fill('30');
+    await card.getByRole('button', { name: 'Do it' }).click();
+    await expect(card.getByRole('status')).toContainText('Done');
+    await expect(card).toContainText('Dialling pace: 30 dials a minute');
+    await page.goto(`${base}#/change-log`);
+    await expect(page.getByLabel('Changes').getByRole('row').filter({ hasText: 'control.set_pace' }).first()).toContainText('Ramping up the new campaign.');
+    expect((await env.call(env.staffToken, 'POST', '/internal/control-tower/actions', { action: 'set_pace', perMinute: null, reason: 'Back to no limit.' })).statusCode).toBe(200);
+    await page.close();
+  });
+
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();
     await signIn(page, env.staffToken);

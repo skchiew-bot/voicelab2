@@ -29,6 +29,7 @@ import type { HttpDeps } from './workflows/integrations.js';
 import { controlTower } from './store/control-tower.js';
 import { changeLog, changeLogQuery } from './store/change-log.js';
 import { controlTowerPanels } from './store/panels.js';
+import { actionSchema, controlState, runAction } from './store/control-actions.js';
 import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
 import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
 import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
@@ -429,6 +430,15 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   app.get('/internal/control-tower/panels', async (req) => {
     const s = await internal(req);
     return withActor(pool, s.actor, (c) => controlTowerPanels(c, (panel, err) => req.log.warn({ panel, err: err instanceof Error ? err.name : 'error' }, 'a Control Tower panel could not be worked out')));
+  });
+  app.get('/internal/control-tower/controls', async (req) => {
+    const s = await internal(req);
+    return withActor(pool, s.actor, (c) => controlState(c));
+  });
+  app.post('/internal/control-tower/actions', async (req) => {
+    const s = await internal(req);
+    const b = actionSchema.parse(req.body);
+    return withActor(pool, s.actor, (c) => runAction(c, s.userId, b));
   });
   app.get('/internal/change-log', async (req) => {
     const s = await internal(req);

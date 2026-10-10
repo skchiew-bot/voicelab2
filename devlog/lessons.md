@@ -51,7 +51,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/control-tower-panels.test.ts` › "names a funding balance in an alert to the last decimal place, never through a floating-point number"
 
 ### L-005: Something that never happened gets no status as if it had
-- **Seen:** 9 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10). A call never answered was recorded as a customer hang-up or a system drop; a QA run with nothing scored was stored as 0; a later normal end cleared a fault already flagged (Phase 5 independent review, 2026-10-10). A plain no-answer was counted as a missed call in the alert, and a callback the dispatcher was late for used up one of the person's retries though nobody was dialled (Phase 7 independent review, 2026-10-10). A delay flagged appointments it never reached as needing a new time, and told their customers they could not go ahead (Phase 7 appointments independent review, 2026-10-10). The Control Tower's funding runway said "no spend" when the spend was in another currency, and its contact rate read answered calls with no outcome as not contacted (Control Tower panels independent review, 2026-10-10). Draining a client's only provider for planned maintenance failed every dial, so each case callback used up one of the person's retries (Control Tower actions independent review, 2026-10-10).
+- **Seen:** 10 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10). A call never answered was recorded as a customer hang-up or a system drop; a QA run with nothing scored was stored as 0; a later normal end cleared a fault already flagged (Phase 5 independent review, 2026-10-10). A plain no-answer was counted as a missed call in the alert, and a callback the dispatcher was late for used up one of the person's retries though nobody was dialled (Phase 7 independent review, 2026-10-10). A delay flagged appointments it never reached as needing a new time, and told their customers they could not go ahead (Phase 7 appointments independent review, 2026-10-10). The Control Tower's funding runway said "no spend" when the spend was in another currency, and its contact rate read answered calls with no outcome as not contacted (Control Tower panels independent review, 2026-10-10). Draining a client's only provider for planned maintenance failed every dial, so each case callback used up one of the person's retries (Control Tower actions independent review, 2026-10-10). A scheduled job that failed for one client was reported as failing outright, and a job no longer in the code would have been reported overdue for ever (Phase 0 scheduler independent review, 2026-10-10).
 - **Rule:** Give "never started" or "unknown" its own state (such as `not_applicable`, or `null` rather than 0) and keep it out of failure counts, alerts, retries and anything that recommends an action.
 - **Guards:**
   - `tests/phase3.test.ts` › "will not lock a DID because of a call that never went out"
@@ -65,6 +65,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/appointments.test.ts` › "does not push an appointment into the officer's time off, and does not flag one the delay never reaches"
   - `tests/control-tower-panels.test.ts` › "give funding runway from the recorded balance and the last week's spend, exactly, counting a reconciled call once"
   - `tests/control-actions.test.ts` › "holds dials back instead of failing them, so a case callback keeps its retries, and voice providers cannot be drained to nothing"
+  - `tests/scheduler.test.ts` › "says only some clients failed when that is what happened, and never alerts on a job this code no longer runs"
 
 ### L-006: One bad record must not take a whole feature down
 - **Seen:** 4 times. One unreadable secret returned a 500 for the whole Control Tower ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). One provider priced in a currency with no exchange rate made every pooled dial fail ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). A very large number gave a 500 instead of a 400 ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). One script's audio failure aborted the whole sweep, so drift screening stopped for everyone (Phase 6 independent review, 2026-10-10).
@@ -77,18 +78,20 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/learning.test.ts` › "does not stop the sweep when one script's audio fails, and names what it could not judge"
 
 ### L-007: Bill only for what was served
-- **Seen:** A caller who hung up in the queue was charged credits, and a served caller was billed for their time on hold. A promoted caller lost their agreed premium ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)).
+- **Seen:** 2 times. A caller who hung up in the queue was charged credits, and a served caller was billed for their time on hold. A promoted caller lost their agreed premium ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). The new scheduler ran extra channel charges every day, billing a past month at today's entitlement, so a client added or upgraded mid-month would have paid for the whole month (Phase 0 scheduler independent review, 2026-10-10).
 - **Rule:** Credits start when service starts. Provider time is still costed internally. Carry agreed terms through every state change.
 - **Guards:**
   - `tests/concurrency.test.ts` › "costs the provider time of a caller who gave up in the queue, and draws no credits for it"
   - `tests/concurrency.test.ts` › "bills a caller who waited and was then served only from the moment they were served"
   - `tests/concurrency.test.ts` › "keeps the agreed premium when a waiting caller is promoted beyond the channels"
+  - `tests/scheduler.test.ts` › "does not schedule extra channel charges, which would bill a past month at today's entitlement"
 
 ### L-008: Key a rule on the real-world thing, not the database row
-- **Seen:** The DID lock was keyed by row, so the same number registered at a second provider could be shown again to a contact it had failed for ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)).
+- **Seen:** 2 times. The DID lock was keyed by row, so the same number registered at a second provider could be shown again to a contact it had failed for ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). Every overdue scheduled job shared one alert key, so a second job going wrong raised no new alert and no email (Phase 0 scheduler independent review, 2026-10-10).
 - **Rule:** Ask what the person or provider actually sees (the number, the contact), and key on that.
 - **Guards:**
   - `tests/phase3.test.ts` › "locks the caller ID the contact sees, even when the same number is registered at two providers"
+  - `tests/scheduler.test.ts` › "raises each job as its own alert, so a second job going wrong is a new alert and a new email"
 
 ### L-009: A privacy rule must hold across every boundary
 - **Seen:** 3 times. A child workflow could speak or send a parent's sensitive value. Phone numbers nested in values, or written in local form, got through ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). Free text a person types (a decision note, a close reason, a callback note) could have stored a customer's number in an append-only table (Phase 7 independent review, 2026-10-10). A policy answer's reason repeated the value of a call variable (a phone number passing as an amount) into an append-only table (Phase 7 knowledge independent review, 2026-10-10).
@@ -233,10 +236,11 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/learning.test.ts` › "leaves a low-confidence pass for a person, who can approve it; it stays approved, still live, until its audio exists"
 
 ### L-028: Measure a promised time from the promise, not from the last time it was moved
-- **Seen:** A callback held back by a quiet hour or a call limit had its time overwritten, so the lateness limit was measured from the new time and a callback locked for 11:00 could be placed days later (Phase 7 independent review, 2026-10-10).
+- **Seen:** 2 times. A callback held back by a quiet hour or a call limit had its time overwritten, so the lateness limit was measured from the new time and a callback locked for 11:00 could be placed days later (Phase 7 independent review, 2026-10-10). The case dispatcher, now a scheduled job, placed at most twenty callbacks a minute, so a backlog locked to one time would have been missed (Phase 0 scheduler independent review, 2026-10-10).
 - **Rule:** Keep the time something was promised for separate from when it is next tried. Deferring changes the second, never the first, and anything past its allowed lateness is missed, however many times it was held back.
 - **Guards:**
   - `tests/cases.test.ts` › "measures lateness from the time a callback was locked to, however long it was held back"
+  - `tests/scheduler.test.ts` › "works through a backlog in batches while each batch is full, and stops at its bound"
 
 ### L-029: An event can arrive before the record that expects it
 - **Seen:** 2 times. A provider's end-of-call report was processed before the dispatcher had recorded the call against its case, so the outcome was dropped and the retry chain stopped for good (Phase 7 independent review, 2026-10-10). A relay connection that arrived while another was still starting the call stood by and never looked again, so if the starter died the caller heard silence; and a start that finished after the call had already fallen back still wrote a run (live call voice link re-check, 2026-10-10).
@@ -325,6 +329,14 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** When a provider's signature does not cover the thing being acted on, add a key of your own for that thing (here, one made for each call and handed to the provider in the TwiML), and refuse anything without it.
 - **Guards:**
   - `tests/relay.test.ts` › "serves no call it is not: the id of another call, the wrong Twilio call, a malformed id, or a missing or wrong call key ends the line and starts nothing"
+
+### L-042: Background work stops when asked and gives back what it holds
+- **Seen:** The first scheduler kept running every remaining job and client after a shutdown began, so a deploy would have been killed part-way through provider work (Phase 0 scheduler independent review, 2026-10-10). Its lock was then held on a pooled connection for the whole run, while the job took more connections from the same pool (lesson L-040, found on merging main, 2026-10-10).
+- **Rule:** A loop of background work checks a stop flag before each unit of work, and counts what it did not reach as not done. Hold nothing across the work: claim it with a lease in one short statement, give the lease back when done, and let a dead worker's lease run out.
+- **Guards:**
+  - `tests/scheduler.test.ts` › "on stop, starts no further job or client and waits only for the one running; the clients not reached make the run partly"
+  - `tests/scheduler.test.ts` › "holds no database connection while a job runs, so a job can use every connection there is"
+  - `tests/scheduler.test.ts` › "runs a job again once the lease of a server that died mid-run has run out, and not before"
 
 ### L-043: Take a person's words as an answer only to a question they heard
 - **Seen:** A relay connection that took a call over applied the caller's first words as the answer to a question that had gone to the connection that dropped, so a "yes" could become consent to something never heard; words said over the greeting were taken as the answer to the first question (live call voice link hardening review, 2026-10-10).

@@ -35,7 +35,7 @@ Token cost is a build requirement, not a Phase 6 detail. Every AI task in every 
 | Language | TypeScript everywhere | One language across call service, UI and adapters. Node handles many long-lived WebSocket media streams well. |
 | API and call service | Fastify plus WebSockets | Twilio TwiML and Telnyx event webhooks, and media streams. |
 | Database | PostgreSQL | Ledgers, rate versions, workflows and the call-event log need strong consistency and an audit trail. Row-level security enforces tenant isolation and the split between the two ledgers. |
-| Queues and live state | Redis, with BullMQ for jobs | Concurrency counters, call state, pub/sub for live panels, batch jobs (distillation, QA scoring, usage reconciliation). |
+| Queues and live state | PostgreSQL (decided 2026-10-10; Redis dropped until something needs it) | Scheduled jobs run in the app under per-job advisory locks; concurrency counters and call state are already in Postgres under locks. |
 | Control Tower and client portal | React single-page apps (Vite), served by the API | Live panels over WebSocket or server-sent events. Two separate apps over the same API, with separate permissions. Chosen over Next.js so there is still one thing to deploy; revisit if server-side rendering is needed. |
 | Recordings and pre-recorded audio | S3-compatible object storage | Stitching audio, per-language recordings, call recordings. |
 | Secrets | Provider credentials encrypted at rest with a managed key | Credentials are keyed in through the UI and must never sit in plain text. |
@@ -100,10 +100,10 @@ Built and tested:
 - **Tenant switcher:** one client chosen in the console's menu bar is followed by every screen that works on one client, and is remembered in the browser. A remembered client that no longer exists is never treated as chosen.
 - **Read-only staff** (`internal_viewer`): can open every internal screen but change nothing. The API refuses anything but a read, and the database transaction is read-only as well. A test runs every internal route as a read-only user.
 - **Users screen:** admins add staff (admin or read only) and disable any user. A new admin added this way cannot sign in until a different admin approves them, so one admin cannot make a second identity to pass a "different person" approval. A disabled token stops working at once. Disabling cannot be undone and nobody can disable themselves, so the platform is never left without an admin, even when two admins act at once. Users are never deleted.
+- **Scheduled jobs, built in** (owner decision, 2026-10-10: a scheduler on Postgres, no Redis): the app runs every sweep itself, on each server where `SCHEDULER` is on (the default). Each job runs on one server at a time, under a per-job lock, and a run longer than its interval is never started twice. One client's failure does not stop the job for the others, and each run's counts are recorded (never error text). The Control Tower raises an alert when a job keeps failing, is turned off, or is overdue, which also catches the case where no server is running jobs at all. A **Jobs** screen shows each job's last run and lets an admin turn it off, change how often it runs, or run it now, each with a reason that the change log shows. The sweep endpoints remain for running a job by hand. Extra channel charges are deliberately not scheduled: they bill a past month at today's entitlement, which has no history, so an operator runs them.
 - **Install path run end to end:** `scripts/setup.sh` built the image, started Postgres and the app, applied every migration, created the first admin and passed the health check. Running it again upgrades in place and leaves the admin as it was. The run found and fixed a crash on a fresh install: an empty `PUBLIC_BASE_URL` was refused. It was run in a cloud sandbox with the sandbox's certificate added to the image build, not on a real host.
 
 Not built yet:
-- Redis and the job queue (nothing in Phase 0 needs them yet; the sweeps later phases added must be scheduled by the deployment).
 - The client portal reads only credits and projects, so client admins and client users can do the same things.
 
 **Exit criteria**
@@ -155,7 +155,7 @@ Not built yet:
 - **Proof against the live services.** The Twilio and Telnyx request formats, status values and signature schemes were written from the providers' published behaviour, and their docs were not reachable while building, so they have not been checked against the real services. Exit criterion 1 (test calls on both) is not met until someone runs real test calls with live accounts, public URLs and `PUBLIC_BASE_URL` set.
 - **Talking to a caller.** The voice providers (OpenAI, ElevenLabs) are not connected to calls, so there is no voicebot yet. Do not point a real number at this: callers hear a test message and the call ends.
 - **A known gap in call control:** if the server stops in the instant between storing a Telnyx event and sending its reply command, that command is not re-sent (a retried event is skipped as a duplicate), so a call could sit unanswered.
-- **Automatic reconciliation for Telnyx**, and a schedule for the sweep (`POST /internal/reconcile/run` must be called, for example from a cron job). The sweep records each try, tries the longest-waiting call first, skips calls that never connected, and leaves a call for a person after 8 tries. The Twilio call-record fields used (`duration`, `price`, `price_unit`) were written from memory, like the rest of call control, and are unverified against the live service.
+- **Automatic reconciliation for Telnyx**, (the sweep now runs every hour as a scheduled job). The sweep records each try, tries the longest-waiting call first, skips calls that never connected, and leaves a call for a person after 8 tries. The Twilio call-record fields used (`duration`, `price`, `price_unit`) were written from memory, like the rest of call control, and are unverified against the live service.
 - **Feeding usage into the cost record.** The record accepts seconds, characters and tokens; no live call yet supplies them.
 
 **Exit criteria**
@@ -273,7 +273,7 @@ Not built or not proven:
 - **A queued inbound caller hears a hold message;** nothing yet starts the workflow when their turn comes.
 - **Funding is not deducted as calls are costed**, so the monitor works from entered balances.
 - **Failures come from errors at dial time and reported samples,** not yet from provider webhooks or measured dead air on a live call.
-- **Nothing sends a failed provider traffic, so recovery needs probes.** `probeProviders` tries failed voice providers and must be run on a schedule by the deployment; a failed telephony provider has no probe yet and recovers only when samples are reported through the API. A recovered provider must show a run of good attempts spanning the minimum time.
+- **Nothing sends a failed provider traffic, so recovery needs probes.** `probeProviders` tries failed voice providers; it is not yet a scheduled job, because no voice provider is connected to the app for it to probe; a failed telephony provider has no probe yet and recovers only when samples are reported through the API. A recovered provider must show a run of good attempts spanning the minimum time.
 - **The held-back dials and the orphan events:** a dial held back for capacity leaves its gate and DID-check events in the event log under an id that never becomes a call.
 - **Hanging up a timed-out queued caller** uses a Twilio call-update request written from memory and unchecked against the live service.
 - Per-client voice routes, fallback plans and entitlements are set through the API; the console shows the result but does not edit them yet.
@@ -315,7 +315,7 @@ Built and tested against fakes (no real call has been through it):
 Not built or not proven:
 - **No real call has been replayed.** Provider events are simulated, and call audio is not recorded.
 - **Who hung up** is inferred from where the workflow was, because what the providers report has not been checked against the live services.
-- **The watchdog must be scheduled** by the deployment.
+- **The watchdog runs every five minutes** as a scheduled job.
 - **A model for turns the word lists cannot read, and for QA judgement, is not connected:** those parts are tested with stand-ins and otherwise left out (the scorecard says when it is incomplete).
 - **The council** is a later phase: ticket council notes begin as "not requested".
 - The financial assessment counts speech spoken live, lines and steps, and escalations in the rehearsal; call length and telephony cost are not estimated.
@@ -349,7 +349,7 @@ Built and tested against fakes (no real call, council model or voice provider ha
 Not built or not proven:
 - **No real council, distiller or voice provider is connected.** Reviews, distilling by a model and recording are exercised with stand-ins.
 - Clustering is by word overlap, not embeddings, and every threshold is an untuned default.
-- The sweep that finishes approved scripts and screens for drift must be scheduled by the deployment.
+- The sweep that finishes approved scripts and screens for drift runs every hour as a scheduled job.
 - Drift cannot tell a worse script from a change in who is calling.
 - Evidence is not yet kept apart by environment (staging test calls count), simulations do not use promoted scripts, and a script change reaches a call already under way at its next line.
 
@@ -384,7 +384,7 @@ Closed-loop case management is built and tested against fakes (no real call, num
 
 Not built or not proven:
 - No client number lookup or payment system is connected; messages on other channels are queued, not sent.
-- The dispatcher, payment check and ageing sweep must be scheduled by the deployment.
+- The dispatcher (every minute), payment check (hourly) and ageing sweep (daily) run as scheduled jobs.
 - A workflow does not yet record a promise from what a caller says.
 - All three modules (cases, appointments, knowledge base and policy) are built; see the status blocks above.
 
@@ -483,7 +483,7 @@ Not built yet: changing a concurrency ceiling from the Control Tower (needs appr
 | Decision | Blocks | Owner |
 | --- | --- | --- |
 | Client rate card (per minute, and per feature) | Credits drawn and margin, from Phase 1 onward | TBD |
-| Confirm the proposed technology stack (see Global Requirements): language, plus any changes | Phase 0 | TBD |
+| Confirm the proposed technology stack (see Global Requirements): language, plus any changes | Phase 0 | Owner, 2026-10-10: scheduled jobs run on Postgres inside the app, with no Redis. The rest of the stack is still to confirm |
 | Hosting region (Malaysian data-residency rules for call recordings and debtor data) | Phase 0: where Postgres and storage run | Owner, 2026-10-10: a Malaysian region, so recordings and debtor data stay in the country |
 | Cloud provider | Phase 0 | TBD |
 | How each provider's usage is ingested (per-call API, webhook or invoice) and how long it lags | Accurate cost records in Phase 1 | TBD |

@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { parseKey } from '../src/secrets.js';
 import { failed, mediaLink, mediaLinkValid, MEDIA_LINK_SECONDS, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, STARTING_GRACE_MS, STUCK_REPLY_MS } from '../src/store/relay.js';
-import { startRunSpoken } from '../src/store/runs.js';
+import { replyRunSpoken, startRunSpoken } from '../src/store/runs.js';
 import { parseRelay, relaySettings, sayMessages, twimlRelay } from '../src/telephony/relay.js';
 import type { WorkflowDefinition } from '../src/workflows/definition.js';
 
@@ -99,6 +99,34 @@ async function liveWorkflow(tenant: string, name: string, def: WorkflowDefinitio
   return c.workflow.id as string;
 }
 
+// A workflow whose model-written line can be held part-way, so a reply can be caught while it is being applied.
+const slow: WorkflowDefinition = { start: 'ask', variables: [], nodes: {
+  ask: { type: 'speak', speech: 'fixed', text: 'Shall we go on?', listen: { captureAs: 'a' }, transitions: [{ to: 'think' }] },
+  think: { type: 'speak', speech: 'dynamic', prompt: 'Thank them', text: 'Thank you.', transitions: [{ to: 'more' }] },
+  more: { type: 'speak', speech: 'fixed', text: 'Anything else?', listen: { captureAs: 'b' }, transitions: [{ to: 'done' }] },
+  done: { type: 'end', outcome: 'ok' } } };
+const thinkFirst: WorkflowDefinition = { start: 'think', variables: [], nodes: { think: slow.nodes.think!, more: slow.nodes.more!, done: slow.nodes.done! } };
+const slowIds: Record<string, string> = {};
+async function slowFlow() {
+  slowIds.ask ??= await liveWorkflow(tenantId, 'slow_flow', slow, { replies: ['yes', 'no'], outcome: 'ok' });
+  slowIds.think ??= await liveWorkflow(tenantId, 'think_first_flow', thinkFirst, { replies: ['no'], outcome: 'ok' });
+}
+/** A call answered with the slow workflow (starting at its question, or at its model-written line). */
+async function slowCall(start: 'ask' | 'think' = 'ask') {
+  await slowFlow();
+  await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: slowIds[start] }));
+  const c = await ring();
+  await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+  return c;
+}
+/** A model that writes "Thank you." once released, and says what it cost. */
+function slowDeps() {
+  let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+  const base = relayDeps();
+  const d = { ...base, runs: { ...base.runs, speaker: { generate: async () => { await gate; return { text: 'Thank you.', model: 'fake-model', inputTokens: 11, outputTokens: 7 }; } } } };
+  return { d, base, release };
+}
+
 beforeAll(async () => {
   env = await (await import('./helpers.js')).setupDb();
   tenantId = (await must(post('/internal/tenants', { name: 'Relay Co' }))).json().id;
@@ -148,6 +176,7 @@ const callbacks = async (callId: string) => (await env.pool.query('SELECT count(
 const prompt = (voicePrompt: string, last = true) => ({ type: 'prompt', voicePrompt, lang: 'en-US', last });
 const runOf = async (callId: string) => (await env.pool.query(`SELECT id, status, outcome, state, sealed, kind FROM workflow_runs WHERE call_id = $1`, [callId])).rows;
 const settle = () => new Promise((r) => setTimeout(r, 50));
+const startReply = (runId: string, version: number) => replyRunSpoken(relayDeps().runs, runId, 'yes', version);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** Wait for a condition, for up to `ms`. */
 async function waitFor(check: () => Promise<boolean> | boolean, ms = STANDBY_POLL_MS * 3) {
@@ -373,6 +402,11 @@ describe('a live call through the speech relay', () => {
       expect(new URL(String((again.send[0] as { source: string }).source)).pathname).toBe(`/media/recordings/${recId}`);
       expect(again.send.slice(1)).toEqual([{ type: 'text', token: 'Can you pay this week?', last: true }]);
       expect((await runOf(callId))[0]).toMatchObject({ status: 'awaiting_reply' });       // "yes" was not taken as the answer
+      // words that arrived while the takeover was under way were said before the question was asked again: not applied
+      expect(await onRelayMessage(d, o.session!, prompt('yes') as never, null)).toEqual([]);
+      expect((await runOf(callId))[0]).toMatchObject({ status: 'awaiting_reply' });
+      const said = (await env.pool.query(`SELECT payload FROM call_events WHERE call_id = $1 AND type = 'relay.said_again'`, [callId])).rows;
+      expect(said).toEqual([{ payload: { lines: 2, synthChars: 'Can you pay this week?'.length } }]);   // the recording costs nothing to play again
       expect((await env.pool.query('SELECT relay_owner FROM calls WHERE id = $1', [callId])).rows[0].relay_owner).toBe(o.session!.owner);
       // the answer after that applies, and only the lines since it are said again on a later takeover
       expect(await onRelayMessage(d, o.session!, prompt('yes') as never, o.session!.version)).toEqual([{ type: 'text', token: 'Please say your secret word.', last: true }]);
@@ -467,7 +501,8 @@ describe('a live call through the speech relay', () => {
     const hold = await env.pool.connect();
     try {
       await hold.query('BEGIN'); await hold.query('LOCK TABLE workflow_runs IN ACCESS EXCLUSIVE MODE');
-      await sleep(STANDBY_POLL_MS + 500);                                                         // b's look holds the call's row, waiting on the run
+      // b's look is under way: it holds the call's row and waits on the run
+      expect(await waitFor(async () => (await env.pool.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%FROM workflow_runs WHERE call_id%'`)).rows[0].n > 0)).toBe(true);
       expect(b.got).toEqual([]);
       b.ws.close(); await b.closed; await settle();
       await hold.query('COMMIT');
@@ -476,6 +511,26 @@ describe('a live call through the speech relay', () => {
     expect(await ownerOf(callId)).toBe(before);
     expect((await runOf(callId))[0]).toMatchObject({ status: 'awaiting_reply' });
   }, 30_000);
+
+  it('a reconnect that arrives while a reply is being applied says the next question once it lands, without the caller speaking first', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    const { callSid, callId } = await ring();
+    const a = await connect();
+    a.send(setup(callSid, callId)); await a.until(2);
+    const [run] = await runOf(callId);
+    const v = (await env.pool.query('SELECT state_version FROM workflow_runs WHERE id = $1', [run.id])).rows[0].state_version as number;
+    await env.pool.query(`UPDATE workflow_runs SET status = 'processing', claimed_at = now() WHERE id = $1`, [run.id]);   // a's reply is under way
+    const b = await connect();
+    b.send(setup(callSid, callId)); await settle(); await settle();
+    expect(b.got).toEqual([]);
+    a.ws.close(); await a.closed;
+    // a's reply lands (as a's server would write it); its question went to the line that dropped
+    await env.pool.query(`UPDATE workflow_runs SET status = 'awaiting_reply', claimed_at = NULL WHERE id = $1`, [run.id]);
+    await startReply(run.id, v);
+    expect(await waitFor(() => b.got.length >= 1)).toBe(true);
+    expect(b.got).toEqual([{ type: 'text', token: 'Please say your secret word.', last: true }]);
+    b.ws.close(); await b.closed; await settle();
+  }, 20_000);
 
   it('a connection standing by falls back, never goes silent, when its look fails outright', async () => {
     await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
@@ -493,17 +548,8 @@ describe('a live call through the speech relay', () => {
   }, 20_000);
 
   it('cuts off a reply still being applied when the call falls back: the run ends now, says it was cut off, and the reply cannot land', async () => {
-    const slow: WorkflowDefinition = { start: 'ask', variables: [], nodes: {
-      ask: { type: 'speak', speech: 'fixed', text: 'Shall we go on?', listen: { captureAs: 'a' }, transitions: [{ to: 'think' }] },
-      think: { type: 'speak', speech: 'dynamic', prompt: 'Thank them', text: 'Thank you.', transitions: [{ to: 'done' }] },
-      done: { type: 'end', outcome: 'ok' } } };
-    const slowId = await liveWorkflow(tenantId, 'slow_flow', slow, { replies: ['yes'], outcome: 'ok' });
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: slowId }));
-    const { callSid, callId } = await ring();
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
-    let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
-    const base = relayDeps();
-    const d = { ...base, runs: { ...base.runs, speaker: { generate: async () => { await gate; return 'Thank you.'; } } } };
+    const { callSid, callId } = await slowCall();
+    const { d, base, release } = slowDeps();
     const o = await openRelay(d, twilioId, setup(callSid, callId));
     expect(o.send).toEqual([{ type: 'text', token: 'Shall we go on?', last: true }]);
     const pending = onRelayMessage(d, o.session!, prompt('yes') as never, o.session!.version);
@@ -517,6 +563,40 @@ describe('a live call through the speech relay', () => {
     const steps = (await env.pool.query(`SELECT type FROM workflow_run_steps WHERE run_id = $1 ORDER BY seq`, [run.id])).rows.map((r) => r.type);
     expect(steps).not.toContain('heard');                                                         // nothing of the reply was written
     expect(await callbacks(callId)).toBe(1);
+    // the model the refused reply asked was paid for, so its decision is recorded all the same
+    expect((await env.pool.query(`SELECT model, input_tokens, output_tokens FROM ai_decisions WHERE call_id = $1`, [callId])).rows).toEqual([{ model: 'fake-model', input_tokens: 11, output_tokens: 7 }]);
+  });
+
+  it('records what a model cost on a start refused because the call fell back meanwhile', async () => {
+    await slowFlow();
+    const { callId } = await slowCall('think');
+    await env.pool.query('UPDATE calls SET relay_failed = true WHERE id = $1', [callId]);
+    const { d, release } = slowDeps(); release(); const wf = (await env.pool.query('SELECT workflow_id FROM calls WHERE id = $1', [callId])).rows[0].workflow_id;
+    await expect(startRunSpoken(d.runs, null, { workflowId: wf, environment: 'production', kind: 'live', variables: {}, callId })).rejects.toThrow(/already fallen back/);
+    expect(await runOf(callId)).toHaveLength(0);
+    expect((await env.pool.query(`SELECT model, input_tokens FROM ai_decisions WHERE call_id = $1`, [callId])).rows).toEqual([{ model: 'fake-model', input_tokens: 11 }]);
+  });
+
+  it('a connection that carries on a call mid-reply catches up: it says the new question once the reply lands, and applies the answer after it', async () => {
+    for (const how of ['timer', 'words', 'standby'] as const) {
+      const { callSid, callId } = await slowCall();
+      const { d, release } = slowDeps();
+      const a = await openRelay(d, twilioId, setup(callSid, callId));
+      const pending = onRelayMessage(d, a.session!, prompt('yes') as never, a.session!.version);   // a's reply is being applied
+      expect(await waitFor(async () => (await runOf(callId))[0].status === 'processing')).toBe(true);
+      // a's line drops; Twilio reconnects as b, which resumes the call (or, for 'standby', takes it over by its look)
+      const b = how === 'standby' ? { ...a.session!, owner: '00000000-0000-4000-8000-000000000001', runId: null, version: 0, asking: false }
+        : (await openRelay(d, twilioId, setup(callSid, callId))).session!;
+      if (how !== 'standby') expect(b.runId).toBe(a.session!.runId);
+      expect(await standbyCheck(d, b)).toEqual({ send: [], again: true });                       // a reply is being applied: look later
+      release();
+      expect((await pending).map((m) => m.type)).toEqual(['text', 'text']);                       // a's lines go to the line that dropped
+      const caught = how === 'words' ? { send: await onRelayMessage(d, b, prompt('hello?') as never, b.version), again: false } : await standbyCheck(d, b);
+      expect(caught, how).toEqual({ send: [{ type: 'text', token: 'Thank you.', last: true }, { type: 'text', token: 'Anything else?', last: true }], again: false });
+      expect((await runOf(callId))[0]).toMatchObject({ status: 'awaiting_reply' });            // "hello?" was not taken as the answer
+      expect(await onRelayMessage(d, b, prompt('no') as never, b.version)).toEqual([{ type: 'end' }]);
+      expect((await runOf(callId))[0]).toMatchObject({ status: 'ended', outcome: 'ok' });
+    }
   });
 
   it('ends a run the caller hung up on, wiping what it held sensitive', async () => {

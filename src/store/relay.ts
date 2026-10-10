@@ -23,10 +23,11 @@ export interface RelayDeps { runs: RunDeps; baseUrl: string; now?: () => Date }
 /**
  * One open conversation. `version` is the question the call is on, so a late answer to an earlier one is not applied.
  * `owner` names this connection: the call is served by the connection that last took it over, and only that one may end
- * its run on closing. `started` says this connection started the run, so it asked the first question itself; `closed`
- * says the socket has gone, so it must not take the call over from anyone.
+ * its run on closing. `asking` says this connection itself said the question the call is on (it started the run, or
+ * took the call over or caught up and said it again), so words that arrived before it did are no answer to it.
+ * `closed` says the socket has gone, so it must not take the call over from anyone.
  */
-export interface RelaySession { providerId: string; callId: string; tenantId: string; projectId: string | null; runId: string | null; version: number; ended: boolean; owner: string; started?: boolean; closed?: boolean }
+export interface RelaySession { providerId: string; callId: string; tenantId: string; projectId: string | null; runId: string | null; version: number; ended: boolean; owner: string; asking?: boolean; closed?: boolean }
 
 const asInternal = <T>(d: RelayDeps, fn: (c: pg.PoolClient) => Promise<T>) => withActor(d.runs.pool, { kind: 'internal' }, fn);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -162,12 +163,16 @@ export async function openRelay(d: RelayDeps, providerId: string, setup: Extract
       return { session, send: [] };   // carry on: the next thing the caller says answers the question already asked
     }
     case 'start':
-      session.started = true;
+      session.asking = true;
       try {
         const r = await startRunSpoken(d.runs, null, { workflowId: opening.workflowId, environment: 'production', kind: 'live', variables: {}, callId });
         session.runId = r.view.id; session.version = r.view.version;
         return afterTurn(d, session, r.view, r.speech);
-      } catch { return failed(d, session); }
+      } catch (e) {
+        // A start refused because the call fell back meanwhile ran all the same: what it did to a client's system is unknown.
+        if (e instanceof AppError && e.status === 409) await event(d, session, 'relay.start_refused', { effects: 'unknown' }).catch(() => undefined);
+        return failed(d, session);
+      }
   }
 }
 
@@ -184,7 +189,7 @@ export async function onRelayMessage(d: RelayDeps, session: RelaySession, m: Rel
   // A connection that stood by while another started the call takes it over once the run exists. The caller's words are
   // not applied: the question went to the connection that dropped, so they may never have heard it. It is asked again.
   if (!session.runId) return (await standbyCheck(d, session)).send;
-  if (askedAt === null && session.started) return [];
+  if (askedAt === null && session.asking) return [];
   const asked = askedAt ?? session.version;
   try {
     const r = await replyRunSpoken(d.runs, session.runId!, m.voicePrompt, asked);
@@ -196,6 +201,9 @@ export async function onRelayMessage(d: RelayDeps, session: RelaySession, m: Rel
     const run = await asInternal(d, async (c) => (await c.query(
       `SELECT status, outcome, error, state_version, claimed_at > now() - make_interval(secs => $2) AS fresh FROM workflow_runs WHERE id = $1`, [session.runId, STUCK_REPLY_MS / 1000])).rows[0]);
     if (run?.status === 'ended') return (await endedRun(d, session, run)).send;
+    // Another connection moved the call on while this one was not serving it: the caller has not heard the question it is
+    // on now, so it is said again (their words are not applied to it).
+    if (run?.status === 'awaiting_reply' && run.state_version > session.version) return (await catchUp(d, session)).send;
     if (run?.status === 'awaiting_reply' && run.state_version !== asked) return [];   // the words were for an earlier question
     if (run?.status === 'processing' && run.fresh) return [];                          // another answer is being applied now
     return (await failed(d, session)).send;                                           // stuck: never leave the caller in silence
@@ -203,14 +211,16 @@ export async function onRelayMessage(d: RelayDeps, session: RelaySession, m: Rel
 }
 
 /**
- * A connection standing by while another starts the call looks again. If the run now exists it takes the call over and
+ * A connection with nothing to say looks again: one that resumed or took over a call catches up (see `catchUp`); one
+ * standing by while another starts the call looks for the run. If the run now exists it takes the call over and
  * says the last lines again (the connection that started the call has gone, so the caller may not have heard them); a
  * run that broke or was abandoned meanwhile gets the fallback. While the start is within its time, `again` means look
  * later; past it with no run, the start died (what it did is unknown, so it is not done again) and the caller gets the
  * fallback. Everything is read in one transaction holding the call's row.
  */
 export async function standbyCheck(d: RelayDeps, session: RelaySession): Promise<{ send: RelayOutbound[]; again: boolean }> {
-  if (session.ended || session.closed || session.runId) return { send: [], again: false };
+  if (session.ended || session.closed) return { send: [], again: false };
+  if (session.runId) return catchUp(d, session);
   type Run = { id: string; state_version: number; status: string; outcome: string | null; error: string | null; stuck: boolean };
   const found = await asInternal(d, async (c) => {
     const call = (await c.query(`SELECT relay_failed, relay_claimed_at > now() - make_interval(secs => $2) AS claim_fresh FROM calls WHERE id = $1 FOR UPDATE`,
@@ -224,7 +234,7 @@ export async function standbyCheck(d: RelayDeps, session: RelaySession): Promise
     // The socket closed while this look was under way: it must not take the call from whoever serves it now.
     if (session.closed) return { kind: 'closed' as const };
     await c.query('UPDATE calls SET relay_owner = $2, relay_claimed_at = now() WHERE id = $1', [session.callId, session.owner]);
-    return { kind: 'adopted' as const, run: r, lines: r.status === 'ended' ? [] : await lastLines(c, r.id) };
+    return { kind: 'adopted' as const, run: r, lines: r.status === 'awaiting_reply' ? await lastLines(c, r.id) : [] };
   });
   if (found.kind === 'waiting') return { send: [], again: true };
   if (found.kind === 'closed') return { send: [], again: false };
@@ -233,7 +243,42 @@ export async function standbyCheck(d: RelayDeps, session: RelaySession): Promise
   session.runId = found.run.id; session.version = found.run.state_version;
   if (found.run.status === 'ended') return { send: (await endedRun(d, session, found.run)).send, again: false };
   if (found.run.stuck) return { send: (await failed(d, session)).send, again: false };
-  return { send: say(d, found.lines), again: false };
+  if (found.run.status !== 'awaiting_reply') return { send: [], again: true };   // a reply is being applied: say its question once it has
+  return { send: await sayAgain(d, session, found.lines), again: false };
+}
+
+/**
+ * A connection that resumed or took over a call whose reply was still being applied, or that another connection has moved
+ * on since, catches up: once the run is waiting again, it says the lines since the caller last spoke. `again` means a
+ * reply is still being applied, so look later.
+ */
+async function catchUp(d: RelayDeps, session: RelaySession): Promise<{ send: RelayOutbound[]; again: boolean }> {
+  const found = await asInternal(d, async (c) => {
+    const run = (await c.query(
+      `SELECT status, outcome, error, state_version, (status = 'processing' AND claimed_at < now() - make_interval(secs => $2)) AS stuck
+         FROM workflow_runs WHERE id = $1`, [session.runId, STUCK_REPLY_MS / 1000])).rows[0] as { status: string; outcome: string | null; error: string | null; state_version: number; stuck: boolean } | undefined;
+    const behind = run?.status === 'awaiting_reply' && run.state_version > session.version;
+    return { run, lines: behind ? await lastLines(c, session.runId!) : null };
+  });
+  const run = found.run;
+  if (!run) return { send: [], again: false };
+  if (run.status === 'ended') return { send: (await endedRun(d, session, run)).send, again: false };
+  if (run.stuck) return { send: (await failed(d, session)).send, again: false };
+  if (run.status !== 'awaiting_reply') return { send: [], again: true };
+  if (!found.lines) return { send: [], again: false };
+  session.version = run.state_version;
+  return { send: await sayAgain(d, session, found.lines), again: false };
+}
+
+/**
+ * Say lines again. They are new speech for the voice provider, so the characters it speaks are recorded on the call (the
+ * lines themselves are in the run's steps already); recordings cost nothing to play again.
+ */
+async function sayAgain(d: RelayDeps, session: RelaySession, lines: SpokenLine[]): Promise<RelayOutbound[]> {
+  session.asking = true;
+  const synthChars = lines.flatMap((l) => l.segments).reduce((n, s) => n + (s.kind === 'synth' ? s.characters : 0), 0);
+  await event(d, session, 'relay.said_again', { lines: lines.length, synthChars }).catch(() => undefined);
+  return say(d, lines);
 }
 
 /**

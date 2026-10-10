@@ -663,8 +663,9 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
         send(out ?? [{ type: 'text', token: DEFAULT_FALLBACK.holdingMessage, last: true }, { type: 'end' }]);
         socket.close();
       };
-      // A connection standing by while another starts the call looks again every few seconds, so it is never left silent
-      // for long. A closed connection stops looking, and never takes the call over.
+      // A connection standing by while another starts the call, or carrying on a call whose reply is still being applied,
+      // looks again every few seconds, so it is never left silent for long. A closed connection stops looking, and never
+      // takes the call over.
       let standbyTimer: NodeJS.Timeout | undefined;
       const armStandby = () => {
         if (closed) return;
@@ -692,7 +693,8 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
             if (session && closed) session.closed = true;
             send(r.send);
             if (!session) socket.close(1008, 'Unknown call');
-            else if (!session.runId && !session.ended) armStandby();
+            // Standing by, or carried on from a call another connection was serving: look again until there is something to say.
+            else if (!session.ended && r.send.length === 0) armStandby();
             return;
           }
           if (session) send(await onRelayMessage(relayDeps, session, m, askedAt));

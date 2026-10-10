@@ -164,12 +164,10 @@ export async function startRunSpoken(d: RunDeps, actorId: string | null, e: Star
   try { out = await engineStart(ctx.resolved.entryName, { ...ctx.caseVars, ...e.variables }, deps); }
   catch (err) { if (err instanceof PhoneInVariable) throw new AppError(400, err.message); throw err; }
 
-  return asInternal(d, async (c) => {
+  const id = randomUUID();
+  const written = await asInternal(d, async (c) => {
     // A live call that has already fallen back (its caller heard the holding line) gets no run, however long this start took.
-    if (e.kind === 'live' && e.callId && (await c.query('SELECT relay_failed FROM calls WHERE id = $1 FOR UPDATE', [e.callId])).rows[0]?.relay_failed) {
-      throw new AppError(409, 'This call has already fallen back, so the workflow was not started on it.');
-    }
-    const id = randomUUID();
+    if (e.kind === 'live' && e.callId && (await c.query('SELECT relay_failed FROM calls WHERE id = $1 FOR UPDATE', [e.callId])).rows[0]?.relay_failed) return null;
     const held = seal(out.state, d.key, id);
     await c.query(
       `INSERT INTO workflow_runs (id, tenant_id, workflow_id, version_id, environment, kind, pins, state, sealed, status, outcome, error, ended_at, call_id)
@@ -183,6 +181,17 @@ export async function startRunSpoken(d: RunDeps, actorId: string | null, e: Star
     await audit(c, actorId, 'workflow.run', 'workflow', ctx.wf.id, { run: id, kind: e.kind, environment: e.environment });
     return { view: view(id, out.state, out.records), speech: spokenIn(out.records) };
   });
+  if (written) return written;
+  await recordRefused(d, { tenantId: ctx.wf.tenant_id, callId: e.callId ?? null, runId: id, records: out.records });
+  throw new AppError(409, 'This call has already fallen back, so the workflow was not started on it.');
+}
+
+/**
+ * A start or reply refused at its last step had still run: any model it asked was paid for, so the decisions are recorded
+ * all the same (L-026). Its steps are not: nothing it said was heard. A failure here does not hide the refusal.
+ */
+async function recordRefused(d: RunDeps, e: { tenantId: string; callId: string | null; runId: string; records: StepRecord[] }) {
+  await asInternal(d, (c) => recordStepDecisions(c, e)).catch(() => undefined);
 }
 
 /**
@@ -218,14 +227,14 @@ export async function replyRunSpoken(d: RunDeps, runId: string, text: string, ex
     throw err;
   }
 
-  return asInternal(d, async (c) => {
+  const written = await asInternal(d, async (c) => {
     const held = seal(out.state, d.key, runId);
     const upd = await c.query(
       `UPDATE workflow_runs SET state = $2, sealed = $7, state_version = state_version + 1, status = $3, outcome = $4, error = $5, claimed_at = NULL, updated_at = now(),
               ended_at = CASE WHEN $3 = 'ended' THEN now() END
         WHERE id = $1 AND state_version = $6 AND status = 'processing'`,
       [runId, JSON.stringify(held.state), out.state.status, out.state.outcome ?? null, out.state.error ?? null, ctx.run.state_version, held.sealed]);
-    if (upd.rowCount === 0) throw new AppError(409, 'This call was closed while your reply was being processed. Nothing was changed.');
+    if (upd.rowCount === 0) return null;
     const last = (await c.query('SELECT coalesce(max(seq), 0) AS n FROM workflow_run_steps WHERE run_id = $1', [runId])).rows[0].n as number;
     await persistSteps(c, runId, last + 1, out.records);
     // A call passed to a person gets its ticket in the same step that passed it, so none can be missed.
@@ -234,6 +243,9 @@ export async function replyRunSpoken(d: RunDeps, runId: string, text: string, ex
     if (out.state.escalation || out.state.outcome === 'handoff_human') await ticketForEscalation(c, null, runId);
     return { view: view(runId, out.state, out.records, ctx.run.state_version + 1), speech: spokenIn(out.records) };
   });
+  if (written) return written;
+  await recordRefused(d, { tenantId: ctx.run.tenant_id, callId: ctx.run.call_id ?? null, runId, records: out.records });
+  throw new AppError(409, 'This call was closed while your reply was being processed. Nothing was changed.');
 }
 
 /**

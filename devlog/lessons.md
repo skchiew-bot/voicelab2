@@ -216,17 +216,20 @@ Format, checked by `tests/devlog.test.ts`:
 
   - `tests/staff-roles.test.ts` › "keeps an admin added by another admin out until a different admin approves them, so one admin cannot invent a second approver"
 ### L-025: Derived state is valid only for the thing it was derived from
-- **Seen:** A promoted script was looked up by workflow, node and language only, so after a deploy changed the node callers kept hearing the old script until a scheduled screen ran; a script learned in one journey context was spoken in every context; and the screen that looked for a changed node could be tripped by simulating an undeployed draft (Phase 6 independent review, 2026-10-10).
+- **Seen:** 2 times. A promoted script was looked up by workflow, node and language only, so after a deploy changed the node callers kept hearing the old script until a scheduled screen ran; a script learned in one journey context was spoken in every context; and the screen that looked for a changed node could be tripped by simulating an undeployed draft (Phase 6 independent review, 2026-10-10). A relay connection that resumed a call kept the question number it read when it connected; once a reply landed on the connection that had dropped, every later answer was refused as being for an earlier question and the caller was left in silence (live call voice link hardening re-review, 2026-10-10).
 - **Rule:** Anything learned or derived from a definition (a script, a cache, a score) carries what it was derived from (here the node's hash and the journey context) and is used only when that still matches, checked at the point of use, not by a job that may not be running. A rehearsal of something undeployed never counts as evidence about what is live.
 - **Guards:**
   - `tests/learning.test.ts` › "is not demoted by simulating a draft, but stops being spoken the moment a deploy changes its node"
   - `tests/learning.test.ts` › "speaks a script only in the journey context it was learned in"
+  - `tests/relay.test.ts` › "a connection that carries on a call mid-reply catches up: it says the new question once the reply lands, and applies the answer after it"
+  - `tests/relay.test.ts` › "a reconnect that arrives while a reply is being applied says the next question once it lands, without the caller speaking first"
 
 ### L-026: Record what a model cost, even when its answer is thrown away
-- **Seen:** The script distiller was asked before the check for an existing script, so a scan paid for model calls whose tokens were never written down; council tokens were lost when a person decided first (Phase 6 independent review, 2026-10-10).
+- **Seen:** 2 times. The script distiller was asked before the check for an existing script, so a scan paid for model calls whose tokens were never written down; council tokens were lost when a person decided first (Phase 6 independent review, 2026-10-10). A live call's start or reply refused at its last step (the call had fallen back) threw away the model decisions it had paid for, and lines said again on a takeover were never counted as speech (live call voice link hardening re-review, 2026-10-10).
 - **Rule:** Check whether the answer is needed before asking a model, and record the model, tier and tokens of every call that is made, in its own step, whether or not the answer is used.
 - **Guards:**
   - `tests/learning.test.ts` › "does not ask a model to write a script for a node that already has one in review, and refuses to approve a script that fails the rules"
+  - `tests/relay.test.ts` › "records what a model cost on a start refused because the call fell back meanwhile"
 
 ### L-027: A human override must pass the same rule checks as the automatic path
 - **Seen:** A person could approve a script that the rule checks had already failed, and the approval was reported as an error after it had committed (Phase 6 independent review, 2026-10-10).
@@ -339,7 +342,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/scheduler.test.ts` › "runs a job again once the lease of a server that died mid-run has run out, and not before"
 
 ### L-043: Take a person's words as an answer only to a question they heard
-- **Seen:** A relay connection that took a call over applied the caller's first words as the answer to a question that had gone to the connection that dropped, so a "yes" could become consent to something never heard; words said over the greeting were taken as the answer to the first question (live call voice link hardening review, 2026-10-10).
+- **Seen:** 2 times. A relay connection that took a call over applied the caller's first words as the answer to a question that had gone to the connection that dropped, so a "yes" could become consent to something never heard; words said over the greeting were taken as the answer to the first question (live call voice link hardening review, 2026-10-10). Then a connection that took a call over by its timer still applied words that had arrived while it was doing so (live call voice link hardening re-review, 2026-10-10).
 - **Rule:** Apply an answer only to a question this side knows was put to the person on the line they are on. When that is in doubt (a takeover, words that arrived before the question was sent), ask again instead of applying them.
 - **Guards:**
   - `tests/relay.test.ts` › "lets a standing-by connection take the call over once the run exists: it says the last lines again, recordings included, and does not apply words said before the caller heard them"

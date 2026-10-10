@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { decryptSecrets } from '../secrets.js';
+import { appointmentSummary } from './appointments.js';
 import { caseSummary } from './cases.js';
 import { fundingStatus } from './funding-monitor.js';
 import { healthMap } from './resilience.js';
@@ -145,6 +146,10 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   const cs = await caseSummary(c);
   if (cs.decisionRequired > 0) add('medium', 'cases_decision', `${cs.decisionRequired} case${cs.decisionRequired === 1 ? ' needs' : 's need'} a decision before ${cs.decisionRequired === 1 ? 'it' : 'they'} can be called again.`, '#/cases');
   if (cs.missedOrUnknown > 0) add('medium', 'cases_missed', `${cs.missedOrUnknown} case call${cs.missedOrUnknown === 1 ? ' was' : 's were'} missed or left with an unknown outcome in the last 7 days.`, '#/cases');
+  // Appointments a delay pushed past closing, and messages nobody has delivered.
+  const ap = await appointmentSummary(c);
+  if (ap.needsReschedule > 0) add('medium', 'appointments_rebook', `${ap.needsReschedule} appointment${ap.needsReschedule === 1 ? ' needs' : 's need'} a new time after a delay.`, '#/appointments');
+  if (ap.unsentOverAnHour > 0) add('medium', 'appointments_unsent', `${ap.unsentOverAnHour} appointment message${ap.unsentOverAnHour === 1 ? ' has' : 's have'} waited over an hour to be delivered.`, '#/appointments');
   const queued = (await c.query(`SELECT count(*)::int AS n FROM calls WHERE status = 'queued'`)).rows[0].n as number;
   if (queued > 0) add('medium', 'calls_queued', `${queued} inbound call${queued === 1 ? ' is' : 's are'} waiting for a free channel.`, '#/calls');
   const deferred = (await c.query(`SELECT count(*)::int AS n FROM failover_events WHERE scope = 'telephony' AND trigger = 'capacity' AND at > now() - interval '1 hour'`)).rows[0].n as number;

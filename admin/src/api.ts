@@ -182,3 +182,8 @@ export interface CaseView {
   bestTimes: { dow: number; hour: number; answered: number; tried: number }[];
 }
 export interface CasesSummary { open: number; decisionRequired: number; needsHuman: number; missedOrUnknown: number }
+
+export interface DiaryRow { id: string; name: string; kind: 'individual' | 'group'; officer_ref: string | null; time_zone: string; active: boolean; members: number }
+export interface AgendaRow { id: string; diary: string; contact_ref: string; kind: 'at_location' | 'field_visit'; starts_at: string; ends_at: string; travel_minutes: number; status: string; fee: string; location: string | null; visit_address: string | null }
+export interface NotificationRow { id: string; appointment_id: string; recipient_kind: string; recipient_ref: string; channel: string; kind: string; body: string; status: string; created_at: string }
+export interface AppointmentSummary { needsReschedule: number; upcoming: number; unsentOverAnHour: number }

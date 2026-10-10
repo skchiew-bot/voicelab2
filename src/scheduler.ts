@@ -56,26 +56,42 @@ export async function drain(batch: () => Promise<unknown>, limit: number, maxBat
 
 const add = (into: Record<string, number>, from: Record<string, number>) => { for (const [k, v] of Object.entries(from)) into[k] = (into[k] ?? 0) + v; };
 
-export function createScheduler(pool: pg.Pool, jobs: Job[], opts: { log?: (message: string) => void } = {}) {
+/** A run is given this long (per client, for a per-client job). The lease is longer, so a run never outlives it unnoticed. */
+export const JOB_DEADLINE_MS = 30 * 60_000;
+/** How long a claimed job is held for its run. A server that dies mid-run frees the job when it runs out. */
+export const LEASE = '1 hour';
+
+class TimedOut extends Error { override name = 'TimedOut'; }
+const within = <T>(p: Promise<T>, ms: number) => new Promise<T>((resolve, reject) => {
+  const t = setTimeout(() => reject(new TimedOut()), ms);
+  p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+});
+
+export function createScheduler(pool: pg.Pool, jobs: Job[], opts: { log?: (message: string) => void; deadlineMs?: number; stopGraceMs?: number } = {}) {
   const log = opts.log ?? ((m: string) => console.error(m));
+  const deadlineMs = opts.deadlineMs ?? JOB_DEADLINE_MS;
   let timer: NodeJS.Timeout | null = null;
   let ticking: Promise<RunResult[]> | null = null;
+  let rowsChecked = false;
   // Set on shutdown: no new job or client is started, so a stop waits only for the work already under way.
   let stopping = false;
 
   async function ensureRows() {
     // A job the app knows but the database does not yet (added after the migration) is due at once, at its own interval.
+    // Once per server is enough.
+    if (rowsChecked) return;
     for (const j of jobs) await pool.query('INSERT INTO scheduled_jobs (name, every_seconds) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING', [j.name, j.everySeconds]);
+    rowsChecked = true;
   }
 
   async function runOne(job: Job): Promise<RunResult | null> {
-    // Claim it in one statement, only if it is due and no run of it is under way: whichever server's update lands first
-    // wins, and the other's finds the row no longer matches. The clock is the database's, read once. The lease is long
-    // enough for any run (the longer of twice the interval and an hour), so a server that dies frees the job by then.
+    // Claim it in one statement, only if it is due and no run of it holds the lease: whichever server's update lands first
+    // wins, and the other's finds the row no longer matches. The clock is the database's, read once. Nothing is held while
+    // the job runs (lesson L-040).
     const claim = await pool.query(
       `WITH t AS (SELECT clock_timestamp() AS now)
        UPDATE scheduled_jobs SET next_run_at = t.now + make_interval(secs => every_seconds), last_started_at = t.now,
-              lease_until = t.now + greatest(make_interval(secs => every_seconds * 2), interval '1 hour')
+              lease_until = t.now + interval '${LEASE}'
          FROM t WHERE name = $1 AND enabled AND next_run_at <= t.now AND (lease_until IS NULL OR lease_until < t.now)
        RETURNING last_started_at, last_started_at::text AS started_exact`, [job.name]);
     if (claim.rowCount === 0) return null;
@@ -85,32 +101,50 @@ export function createScheduler(pool: pg.Pool, jobs: Job[], opts: { log?: (messa
 
     const summary: Record<string, number> = {};
     let outcome: Outcome;
+    let timedOut = false;
+    const attempt = async (tenantId?: string) => {
+      try { add(summary, countsOf(await within(Promise.resolve().then(() => job.run(tenantId)), deadlineMs))); return true; }
+      catch (e) {
+        if (e instanceof TimedOut) timedOut = true;
+        log(`Scheduled job ${job.name} failed${tenantId ? ' for one client' : ''}: ${(e as Error)?.name ?? 'Error'}`);
+        return false;
+      }
+    };
+    let notReached = 0;
     if (job.perTenant) {
       const tenants = (await pool.query('SELECT id FROM tenants ORDER BY id')).rows.map((r) => r.id as string);
       let failed = 0; let reached = 0;
       for (const t of tenants) {
         if (stopping) break; // the clients not reached are counted as not run, so the run is not called a success
         reached++;
-        try { add(summary, countsOf(await job.run(t))); }
-        catch (e) { failed++; log(`Scheduled job ${job.name} failed for one client: ${(e as Error)?.name ?? 'Error'}`); }
+        if (!(await attempt(t))) failed++;
       }
-      summary.clients = tenants.length; summary.clientsFailed = failed; summary.clientsNotReached = tenants.length - reached;
-      outcome = failed === 0 && reached === tenants.length ? 'ok' : failed === tenants.length ? 'failed' : 'partly';
+      notReached = tenants.length - reached;
+      summary.clients = tenants.length; summary.clientsFailed = failed; summary.clientsNotReached = notReached;
+      outcome = failed === 0 && notReached === 0 ? 'ok' : failed === tenants.length ? 'failed' : 'partly';
     } else {
-      try { add(summary, countsOf(await job.run())); outcome = 'ok'; }
-      catch (e) { outcome = 'failed'; log(`Scheduled job ${job.name} failed: ${(e as Error)?.name ?? 'Error'}`); }
+      outcome = (await attempt()) ? 'ok' : 'failed';
     }
+    if (timedOut) summary.timedOut = 1;
 
-    await withActor(pool, { kind: 'internal' }, async (c) => {
+    const finish = () => withActor(pool, { kind: 'internal' }, async (c) => {
       const { rows } = await c.query('SELECT clock_timestamp() AS now');
       await c.query('INSERT INTO job_runs (job, started_at, finished_at, outcome, summary) VALUES ($1,$2,$3,$4,$5)', [job.name, startedAt, rows[0].now, outcome, summary]);
-      // The lease is given back only by the run that holds it (one that outlived its lease may have been followed by another).
+      // Only the run that holds the job writes its status. One that outlived its lease and was followed by another records
+      // its own run, but must not report the newer run as finished.
+      // - A timed-out run may still be working, so it keeps its lease until the lease runs out.
+      // - A run cut short by a shutdown, with nothing failed, is not a failure, and is due again at once.
+      const cutShort = notReached > 0 && outcome !== 'failed' && summary.clientsFailed === 0;
       await c.query(
         `UPDATE scheduled_jobs SET last_finished_at = $2, last_outcome = $3,
-                consecutive_failures = CASE WHEN $3 = 'ok' THEN 0 ELSE consecutive_failures + 1 END,
-                lease_until = CASE WHEN last_started_at = $4::timestamptz THEN NULL ELSE lease_until END
-          WHERE name = $1`, [job.name, rows[0].now, outcome, startedExact]);
+                consecutive_failures = CASE WHEN $3 = 'ok' OR $6 THEN 0 ELSE consecutive_failures + 1 END,
+                lease_until = CASE WHEN $5 THEN lease_until ELSE NULL END,
+                next_run_at = CASE WHEN $6 THEN least(next_run_at, $2) ELSE next_run_at END
+          WHERE name = $1 AND last_started_at = $4::timestamptz`, [job.name, rows[0].now, outcome, startedExact, timedOut, cutShort]);
     });
+    // The bookkeeping is safe to repeat (the start it names is fixed), so one blip is tried again once. If that fails too,
+    // the run stays unfinished, shown as unknown, and the job is freed when its lease runs out.
+    try { await finish(); } catch { await finish(); }
     return { job: job.name, outcome, summary };
   }
 
@@ -133,8 +167,14 @@ export function createScheduler(pool: pg.Pool, jobs: Job[], opts: { log?: (messa
   return {
     tick,
     start(everyMs = 15_000) { stopping = false; if (!timer) { timer = setInterval(() => { void tick(); }, everyMs); timer.unref(); void tick(); } },
-    /** Stops starting work at once, and waits only for the job (or the client) already running. */
-    async stop() { stopping = true; if (timer) clearInterval(timer); timer = null; if (ticking) await ticking.catch(() => {}); },
+    /**
+     * Stops starting work at once, and waits for the job (or the client) already running, for a short grace at most. A run
+     * still going then is left unfinished: shown as unknown, and freed when its lease runs out.
+     */
+    async stop() {
+      stopping = true; if (timer) clearInterval(timer); timer = null;
+      if (ticking) await Promise.race([ticking.catch(() => {}), new Promise((r) => setTimeout(r, opts.stopGraceMs ?? 20_000).unref())]);
+    },
     names: jobs.map((j) => j.name),
   };
 }
@@ -178,9 +218,12 @@ export async function updateJob(c: pg.PoolClient, actorId: string, name: string,
 
 /** Make a job due now; the next scheduler tick on any server runs it. */
 export async function runJobNow(c: pg.PoolClient, actorId: string, name: string, reason: string) {
+  const job = (await c.query('SELECT enabled, lease_until > now() AS running, lease_until FROM scheduled_jobs WHERE name = $1 FOR UPDATE', [name])).rows[0];
+  if (!job) throw new AppError(404, 'No such scheduled job.');
+  if (!job.enabled) throw new AppError(409, 'This job is turned off. Turn it on first.');
+  // A run holds it (or a server died mid-run): "run now" would do nothing until then, so say so rather than seem to work.
+  if (job.running) throw new AppError(409, `A run of this job is under way, or was cut off; it can run again from ${new Date(job.lease_until).toISOString().slice(0, 16).replace('T', ' ')} UTC.`);
   const { rows } = await c.query('UPDATE scheduled_jobs SET next_run_at = now() WHERE name = $1 RETURNING name, enabled, next_run_at', [name]);
-  if (!rows[0]) throw new AppError(404, 'No such scheduled job.');
-  if (!rows[0].enabled) throw new AppError(409, 'This job is turned off. Turn it on first.');
   await audit(c, actorId, 'scheduler.run_now', 'scheduled_job', null, { job: name, reason });
   return rows[0];
 }

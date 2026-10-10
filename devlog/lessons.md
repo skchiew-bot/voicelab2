@@ -300,10 +300,11 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/admin-ui.test.ts` › "follows one chosen client across screens and reloads, and forgets a client that no longer exists"
 
 ### L-037: A test must not depend on the time of day it runs
-- **Seen:** A cases test reset the contact policy to its default quiet hours (21:00 to 08:00 in Kuala Lumpur) and then expected a dial to be allowed, so it passed all day and failed every evening; it surfaced on `main` after merging #25, #26 and #28 at 21:40 Kuala Lumpur time (2026-10-10).
+- **Seen:** 2 times. A cases test reset the contact policy to its default quiet hours (21:00 to 08:00 in Kuala Lumpur) and then expected a dial to be allowed, so it passed all day and failed every evening; it surfaced on `main` after merging #25, #26 and #28 at 21:40 Kuala Lumpur time (2026-10-10). A do-not-call test checked that no event held the fragment "6012", which a timestamp's microseconds can contain, so it failed now and then (found while running the full suite for the scheduler, 2026-10-10).
 - **Rule:** Build every time-based expectation from a clock the test controls, or from windows worked out relative to the current time (as the test does for the "quiet now" case). Never assume the suite runs during office hours or in one time zone.
 - **Guards:**
   - `tests/cases.test.ts` › "applies quiet hours and limits to the gate API too, in the contact's zone"
+  - `tests/dnc.test.ts` › "records dial.blocked with the reason, and dial.allowed otherwise"
 
 ### L-038: Catch an intermittent failure's own error text before guessing at its cause
 - **Seen:** For a whole day a test file was sometimes marked failed with every test in it passing (about 1 run in 6). Guesses (hook timeouts, unhandled errors) went nowhere because the run's output was never kept; looping the suite with the output saved caught it: dropping the test database with `WITH (FORCE)` could not end an autovacuum worker the server was running there, "permission denied to terminate process" (Control Tower email alerts work, 2026-10-10).
@@ -334,12 +335,15 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/relay.test.ts` › "serves no call it is not: the id of another call, the wrong Twilio call, a malformed id, or a missing or wrong call key ends the line and starts nothing"
 
 ### L-042: Background work stops when asked and gives back what it holds
-- **Seen:** The first scheduler kept running every remaining job and client after a shutdown began, so a deploy would have been killed part-way through provider work (Phase 0 scheduler independent review, 2026-10-10). Its lock was then held on a pooled connection for the whole run, while the job took more connections from the same pool (lesson L-040, found on merging main, 2026-10-10).
-- **Rule:** A loop of background work checks a stop flag before each unit of work, and counts what it did not reach as not done. Hold nothing across the work: claim it with a lease in one short statement, give the lease back when done, and let a dead worker's lease run out.
+- **Seen:** 2 times. The first scheduler kept running every remaining job and client after a shutdown began, so a deploy would have been killed part-way through provider work (Phase 0 scheduler independent review, 2026-10-10). Its lock was then held on a pooled connection for the whole run, while the job took more connections from the same pool (lesson L-040, found on merging main, 2026-10-10). A second review of the lease found that a run which outlived its lease still wrote the job's status over the newer run, so a running job showed as finished; nothing bounded a run, so a stuck job could stop every other job on its server and hold up shutdown for ever; and "run now" during a dead server's lease said it was done while nothing would run for up to two days (Phase 0 scheduler lease review, 2026-10-10).
+- **Rule:** A loop of background work checks a stop flag before each unit of work, and counts what it did not reach as not done. Hold nothing across the work: claim it with a lease in one short statement, give the lease back when done, and let a dead worker's lease run out. Only the holder of the lease writes the shared status. Give every unit of work a deadline shorter than the lease, and give stopping a grace period; refuse a request that would quietly wait on a lease.
 - **Guards:**
   - `tests/scheduler.test.ts` › "on stop, starts no further job or client and waits only for the one running; the clients not reached make the run partly"
   - `tests/scheduler.test.ts` › "holds no database connection while a job runs, so a job can use every connection there is"
   - `tests/scheduler.test.ts` › "runs a job again once the lease of a server that died mid-run has run out, and not before"
+  - `tests/scheduler.test.ts` › "lets a run that outlived its lease record itself, but never report the newer run as finished or give back its lease"
+  - `tests/scheduler.test.ts` › "gives up waiting for a run past its deadline, records it as failed, and keeps the lease since the work may still be going"
+  - `tests/scheduler.test.ts` › "stops within its grace period even when a run is stuck, leaving that run unfinished"
 
 ### L-043: Take a person's words as an answer only to a question they heard
 - **Seen:** 2 times. A relay connection that took a call over applied the caller's first words as the answer to a question that had gone to the connection that dropped, so a "yes" could become consent to something never heard; words said over the greeting were taken as the answer to the first question (live call voice link hardening review, 2026-10-10). Then a connection that took a call over by its timer still applied words that had arrived while it was doing so (live call voice link hardening re-review, 2026-10-10).

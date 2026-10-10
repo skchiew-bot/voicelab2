@@ -1,0 +1,42 @@
+# Keeps the repository's branch list honest (lesson L-023): a branch is deleted once its pull request is merged, and the
+# "Run workflow" button sweeps any `claude/` branch already fully contained in main. Only merged work is ever deleted.
+name: Delete merged branches
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  after-merge:
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'claude/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete the merged branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${BRANCH}" || echo "Already gone."
+
+  sweep:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Delete claude/ branches already contained in main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch origin main
+          for b in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin/claude/ | sed 's#^origin/##'); do
+            if [ "$(git rev-list --count "origin/main..origin/$b")" = "0" ]; then
+              echo "Deleting $b (fully merged)"
+              gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$b" || true
+            else
+              echo "Keeping $b (has work not in main)"
+            fi
+          done

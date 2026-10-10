@@ -21,6 +21,7 @@ import { addNumber, callKnown, callQueued, costCall, getCall, listCalls, listNum
 import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, type RelayDeps, type RelaySession } from './store/relay.js';
 import { recordingAudio } from './store/recordings.js';
 import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
+import { afterDial, afterRelay, transferUrl, whisper } from './store/transfer.js';
 import { DEFAULT_FALLBACK } from './resilience/fallback.js';
 import { registerJourneyRoutes } from './routes/journey.js';
 import { registerAppointmentRoutes } from './routes/appointments.js';
@@ -570,11 +571,29 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const queued = known && ev ? await callQueued(callDeps, provider.id, ev.providerCallId) : false;
     // A call with a workflow to run is handed to the speech relay; one without hears the test message.
     const relayed = known && !queued && ev ? await relayTarget(callDeps, provider.id, ev.providerCallId) : null;
-    if (relayed) return reply.type('text/xml').send(twimlRelay(relayUrl(provider.id), relayed, relayCallToken(key, relayed), relaySettings(provider.params)));
+    if (relayed) return reply.type('text/xml').send(twimlRelay(relayUrl(provider.id), relayed, relayCallToken(key, relayed), relaySettings(provider.params), transferUrl(callDeps.baseUrl!, provider.id, 'relay-ended', relayed)));
     return reply.type('text/xml').send(known ? (queued ? twimlHold(`${callDeps.baseUrl}/webhooks/twilio/${provider.id}/voice${callId ? `?callId=${callId}` : ''}`) : twimlTestCall()) : twimlReject());
   };
   app.post('/webhooks/twilio/:providerId/status', twilioHook(false));
   app.post('/webhooks/twilio/:providerId/voice', twilioHook(true));
+
+  // ------------------------------------------------- passing a live caller to a person
+  // Twilio asks here when the relay session ends, when the agent picks up (the whisper) and when the dial to the agent
+  // ends. Each request is verified by Twilio's signature before anything is read, and names the call it is for.
+  const transferSteps = { 'relay-ended': afterRelay, whisper, dialled: afterDial } as const;
+  app.post('/webhooks/twilio/:providerId/transfer/:step', async (req, reply) => {
+    const { providerId, step } = z.object({ providerId: z.string().uuid(), step: z.enum(['relay-ended', 'whisper', 'dialled']) }).parse(req.params);
+    const provider = await webhookProvider(providerId, 'twilio');
+    const creds = credentials<TwilioCreds>(provider, key);
+    if (!creds.authToken) throw new AppError(503, 'This Twilio provider has no Auth Token, so call events cannot be verified.');
+    const params = (req.body ?? {}) as Record<string, string>;
+    if (!verifyTwilioSignature(creds.authToken, callDeps.baseUrl + req.url, params, req.headers['x-twilio-signature'] as string | undefined)) {
+      throw new AppError(403, 'Bad signature.');
+    }
+    const { callId } = z.object({ callId: z.string().uuid() }).parse(req.query);
+    const twiml = await transferSteps[step]({ pool, baseUrl: callDeps.baseUrl! }, provider.id, callId, params);
+    return reply.type('text/xml').send(twiml);
+  });
 
   // ------------------------------------------------- live call voice link
   // Twilio's speech relay connects here once a call with a workflow is answered. The connection is refused before it

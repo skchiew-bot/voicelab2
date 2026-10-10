@@ -43,7 +43,7 @@ describe('cloud session start hook (lessons L-035 and L-020)', () => {
   const HOOK = path.join(root, '.claude/hooks/session-start.sh');
   const servers: (() => void)[] = [];
   afterAll(() => { for (const stop of servers) stop(); });
-  type Opts = { clusters?: string[]; role?: boolean; login?: boolean; installed?: boolean; startFails?: boolean; notRoot?: boolean; slowInstall?: boolean };
+  type Opts = { clusters?: string[]; role?: boolean; login?: boolean; installed?: boolean; startFails?: boolean; notRoot?: boolean; slowInstall?: boolean; hbaBroken?: boolean };
   // Stand-ins for the system's commands, so the test never starts a server or installs anything.
   // Each records how it was called; the state of the "container" lives in files.
   const container = (opts: Opts = {}) => {
@@ -51,7 +51,7 @@ describe('cloud session start hook (lessons L-035 and L-020)', () => {
     const bin = path.join(dir, 'bin'); const state = path.join(dir, 'state'); const project = path.join(dir, 'project');
     for (const d of [bin, state, project]) mkdirSync(d);
     writeFileSync(path.join(state, 'clusters'), (opts.clusters ?? ['16 main 5432 down']).map((c) => `${c} postgres /var/lib/postgresql/x /var/log/postgresql/x.log\n`).join(''));
-    for (const [flag, on] of [['role', opts.role], ['login', opts.login], ['start-fails', opts.startFails], ['not-root', opts.notRoot]] as const) if (on) writeFileSync(path.join(state, flag), '');
+    for (const [flag, on] of [['role', opts.role], ['login', opts.login], ['start-fails', opts.startFails], ['not-root', opts.notRoot], ['hba-broken', opts.hbaBroken]] as const) if (on) writeFileSync(path.join(state, flag), '');
     writeFileSync(path.join(project, 'package-lock.json'), '{}');
     if (opts.installed) { mkdirSync(path.join(project, 'node_modules')); writeFileSync(path.join(project, 'node_modules/.package-lock.json'), '{}'); }
     const stub = (name: string, body: string) => writeFileSync(path.join(bin, name), `#!/bin/bash\nS='${state}'\n${body}\n`, { mode: 0o755 });
@@ -62,7 +62,8 @@ describe('cloud session start hook (lessons L-035 and L-020)', () => {
     stub('runuser', [
       'echo "runuser $*" >> "$S/calls"',
       '[ -f "$S/not-root" ] && { echo "runuser: may not be used by non-root users" >&2; exit 1; }',
-      'case "$*" in *"SELECT 1 FROM pg_roles"*) [ -f "$S/role" ] && echo 1; exit 0 ;; *"CREATE ROLE"*|*"ALTER ROLE"*) touch "$S/role" "$S/login"; exit 0 ;; esac',
+      // Setting up the role makes the login work, unless the server refuses it for another reason.
+      'case "$*" in *"SELECT 1 FROM pg_roles"*) [ -f "$S/role" ] && echo 1; exit 0 ;; *"CREATE ROLE"*|*"ALTER ROLE"*) touch "$S/role"; [ -f "$S/hba-broken" ] || touch "$S/login"; exit 0 ;; esac',
       'exit 1',
     ].join('\n'));
     stub('npm', `echo "npm $*" >> "$S/calls"; ${opts.slowInstall ? 'sleep 1; ' : ''}mkdir -p node_modules; echo {} > node_modules/.package-lock.json`);
@@ -77,12 +78,13 @@ describe('cloud session start hook (lessons L-035 and L-020)', () => {
       return { status: r.status, stdout: r.stdout, stderr: r.stderr, calls: calls().slice(before) };
     };
     const runAsync = () => new Promise<string>((resolve) => {
-      const p = spawn('bash', [HOOK], { env: env({ CLAUDE_CODE_REMOTE: 'true' }) });
+      // A long wait for the lock here: the second run must wait out the first, however slow the machine.
+      const p = spawn('bash', [HOOK], { env: env({ CLAUDE_CODE_REMOTE: 'true', SESSION_SETUP_LOCK_WAIT: '60' }) });
       let out = ''; p.stdout.on('data', (d) => { out += d; }); p.on('close', () => resolve(out));
     });
     const stop = () => { try { process.kill(Number(readFileSync(path.join(state, 'server.pid'), 'utf8'))); } catch { /* none started */ } };
     servers.push(stop);
-    return { run, runAsync, calls, project, log: path.join(dir, 'voicelab-session-setup.log'), has: (f: string) => existsSync(path.join(state, f)) };
+    return { run, runAsync, calls, project, dir, log: path.join(dir, 'voicelab-session-setup.log'), has: (f: string) => existsSync(path.join(state, f)) };
   };
   const login = 'psql -X -h localhost -U voicelab -d postgres -tAqc SELECT 1';
   const roleCheck = "runuser -u postgres -- psql -XtAq -c SELECT 1 FROM pg_roles WHERE rolname = 'voicelab'";
@@ -103,6 +105,7 @@ describe('cloud session start hook (lessons L-035 and L-020)', () => {
       login,
       roleCheck,
       "runuser -u postgres -- psql -Xq -c CREATE ROLE voicelab LOGIN CREATEDB CREATEROLE PASSWORD 'voicelab'",
+      login, // and the tests can now log in
       install,
     ]);
     expect(first.stdout).toBe('Cloud session setup: started Postgres 16, created the voicelab test role, installed the npm dependencies.\n');
@@ -117,9 +120,12 @@ describe('cloud session start hook (lessons L-035 and L-020)', () => {
   it('repairs a test role the tests cannot log in as, and leaves the login alone when the tests are pointed elsewhere', () => {
     const c = container({ clusters: ['16 main 5432 online'], role: true, installed: true });
     expect(c.run()).toMatchObject({
-      calls: [login, roleCheck, "runuser -u postgres -- psql -Xq -c ALTER ROLE voicelab LOGIN CREATEDB CREATEROLE PASSWORD 'voicelab'"],
+      calls: [login, roleCheck, "runuser -u postgres -- psql -Xq -c ALTER ROLE voicelab LOGIN CREATEDB CREATEROLE PASSWORD 'voicelab'", login],
       stdout: "Cloud session setup: repaired the voicelab test role's login.\n",
     });
+    // A login the server still refuses after the repair is reported, not claimed as fixed.
+    const refused = container({ clusters: ['16 main 5432 online'], role: true, installed: true, hbaBroken: true });
+    expect(refused.run().stdout).toContain('could not log in as voicelab even after setting up the role (look at pg_hba.conf and the port)');
     const elsewhere = container({ clusters: ['16 main 5432 online'], installed: true });
     expect(elsewhere.run({ CLAUDE_CODE_REMOTE: 'true', TEST_ADMIN_DATABASE_URL: 'postgres://someone@db.test/postgres' })).toEqual({ status: 0, stdout: '', stderr: '', calls: [] });
   });
@@ -150,5 +156,12 @@ describe('cloud session start hook (lessons L-035 and L-020)', () => {
     const notRoot = container({ clusters: ['16 main 5432 online'], installed: true, notRoot: true });
     expect(notRoot.run()).toMatchObject({ status: 0, calls: [login, roleCheck], stdout: expect.stringContaining('could not check the voicelab test role (as the postgres user)') });
     expect(readFileSync(notRoot.log, 'utf8')).toContain('may not be used by non-root users');
+    // A lock file that cannot be opened is not a run in progress: it sets up without the lock, and says so.
+    const noLock = container();
+    mkdirSync(path.join(noLock.dir, 'voicelab-session-setup.lock'));
+    const unlocked = noLock.run();
+    expect(unlocked.calls).toContain(install);
+    expect(unlocked.stdout).toContain(`Cloud session setup ran without its lock: it could not open ${path.join(noLock.dir, 'voicelab-session-setup.lock')}.`);
+    expect(unlocked.stdout).not.toContain('still running');
   });
 });

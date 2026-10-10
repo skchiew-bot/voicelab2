@@ -13,11 +13,17 @@ set -uo pipefail
 [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || exit 0
 cd "${CLAUDE_PROJECT_DIR:-$(dirname "$0")/../..}" || exit 0
 
-LOG="${TMPDIR:-/tmp}/voicelab-session-setup.log"
+dir="${TMPDIR:-/tmp}"; { [ -d "$dir" ] && [ -w "$dir" ]; } || dir=/tmp
+LOG="$dir/voicelab-session-setup.log"
+{ : >>"$LOG"; } 2>/dev/null || LOG=/dev/null
 # The lock is held on descriptor 9. Commands that can leave a process running (the Postgres server,
 # npm) get it closed (9>&-), or that process would hold the lock for good and every later run wait.
-exec 9>"${TMPDIR:-/tmp}/voicelab-session-setup.lock"
-if ! flock -w "${SESSION_SETUP_LOCK_WAIT:-280}" 9; then
+# A lock file that cannot be opened is not a run in progress: then it runs without the lock, and says so.
+LOCK="$dir/voicelab-session-setup.lock"
+locked=yes
+if ! { exec 9>"$LOCK"; } 2>/dev/null; then
+  locked=no
+elif ! flock -w "${SESSION_SETUP_LOCK_WAIT:-280}" 9; then
   echo "Cloud session setup is still running in another process; run \`CLAUDE_CODE_REMOTE=true .claude/hooks/session-start.sh\` later if database tests or the typecheck fail."
   exit 0
 fi
@@ -43,8 +49,10 @@ else
       if found=$(runuser -u postgres -- psql -XtAq -c "SELECT 1 FROM pg_roles WHERE rolname = 'voicelab'" 2>>"$LOG"); then
         if [ "$found" = "1" ]; then sql="ALTER ROLE voicelab LOGIN CREATEDB CREATEROLE PASSWORD 'voicelab'"; what="repaired the voicelab test role's login"
         else sql="CREATE ROLE voicelab LOGIN CREATEDB CREATEROLE PASSWORD 'voicelab'"; what="created the voicelab test role"; fi
-        if runuser -u postgres -- psql -Xq -c "$sql" >>"$LOG" 2>&1; then did+=("$what")
-        else failed+=("set up the voicelab test role"); fi
+        if ! runuser -u postgres -- psql -Xq -c "$sql" >>"$LOG" 2>&1; then failed+=("set up the voicelab test role")
+        elif ! PGPASSWORD=voicelab PGCONNECT_TIMEOUT=5 psql -X -h localhost -U voicelab -d postgres -tAqc 'SELECT 1' >/dev/null 2>>"$LOG"; then
+          failed+=("log in as voicelab even after setting up the role (look at pg_hba.conf and the port)")
+        else did+=("$what"); fi
       else failed+=("check the voicelab test role (as the postgres user)"); fi
     fi
   fi
@@ -57,6 +65,7 @@ if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.j
 fi
 
 join() { local IFS=';'; echo "$*" | sed 's/;/, /g'; }
+[ "$locked" = yes ] || echo "Cloud session setup ran without its lock: it could not open $LOCK."
 [ ${#did[@]} -eq 0 ] || echo "Cloud session setup: $(join "${did[@]}")."
 [ ${#failed[@]} -eq 0 ] || echo "Cloud session setup could not $(join "${failed[@]}"), so database tests or the typecheck may fail. The details are in $LOG. Run \`CLAUDE_CODE_REMOTE=true .claude/hooks/session-start.sh\` to try again, and tell the owner if it still fails."
 exit 0

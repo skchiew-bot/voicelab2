@@ -10,26 +10,69 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { failureKind, scrub } from '../.claude/hooks/devlog.mjs';
 
-const EVENTS = new Set(['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure']);
+const EVENTS = new Set(['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
+  'Usage', 'Alert', 'SubagentStart', 'SubagentStop', 'Task', 'Incident']);
+const KINDS = new Set(['test', 'typecheck', 'build', 'push', 'commit', 'integrate', 'install', 'other']);
+const TASK_STATUSES = new Set(['planned', 'in_progress', 'testing', 'review', 'blocked', 'done', 'abandoned']);
+const INCIDENT_TYPES = new Set(['agent_regression', 'test_failure', 'review_finding', 'process', 'scope', 'security', 'stop_loss', 'other']);
+
+const id = (v) => (typeof v === 'string' && /^[\w-]{1,80}$/.test(v) ? v : undefined);
+const taskId = (v) => (typeof v === 'string' && /^[A-Za-z][\w.-]{0,39}$/.test(v) ? v : undefined);
+const decimal = (v) => (typeof v === 'string' && /^\d{1,12}\.\d{1,8}$/.test(v) ? v : undefined);
+const nat = (v, max = Number.MAX_SAFE_INTEGER) => (Number.isInteger(v) && v >= 0 && v <= max ? v : undefined);
+const text = (v, max) => (typeof v === 'string' ? scrub(v, max) : undefined);
+const model = (k) => /^[\w.:-]{1,80}$/.test(k);
+
+function tokensOf(raw) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const out = {};
+  for (const [k, t] of Object.entries(raw)) {
+    if (!model(k) || !t || typeof t !== 'object') continue;
+    out[k] = Object.fromEntries(Object.entries({
+      messages: nat(t.messages), input: nat(t.input), output: nat(t.output), cacheRead: nat(t.cacheRead),
+      cacheWrite5m: nat(t.cacheWrite5m), cacheWrite1h: nat(t.cacheWrite1h), costUSD: decimal(t.costUSD),
+    }).filter(([, v]) => v !== undefined));
+  }
+  return out;
+}
+
+function checkpointOf(raw) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const models = {};
+  for (const [k, m] of Object.entries(raw.models ?? {})) {
+    if (!model(k) || !m || typeof m !== 'object') continue;
+    models[k] = Object.fromEntries(Object.entries({
+      input: nat(m.input), output: nat(m.output), thinking: nat(m.thinking), cacheRead: nat(m.cacheRead),
+      cacheWrite: nat(m.cacheWrite), costUSD: typeof m.costUSD === 'string' && /^\d{1,12}\.\d{1,8}$/.test(m.costUSD) ? m.costUSD : undefined,
+    }).filter(([, v]) => v !== undefined));
+  }
+  return Object.fromEntries(Object.entries({
+    costUSD: decimal(raw.costUSD), models, durationMs: nat(raw.durationMs), apiMs: nat(raw.apiMs),
+    linesAdded: nat(raw.linesAdded), linesRemoved: nat(raw.linesRemoved),
+  }).filter(([, v]) => v !== undefined));
+}
 
 /** Rebuild a logged line from known fields only. Returns null for anything unrecognised. */
 export function clean(raw) {
   if (!raw || typeof raw !== 'object' || !EVENTS.has(raw.event) || typeof raw.ts !== 'string') return null;
   const ts = new Date(raw.ts);
   if (Number.isNaN(ts.getTime())) return null;
-  const id = (v) => (typeof v === 'string' && /^[\w-]{1,80}$/.test(v) ? v : undefined);
   const out = { ts: ts.toISOString(), session: id(raw.session) ?? 'unknown', event: raw.event };
   if (id(raw.local_session)) out.local_session = raw.local_session;
+  const set = (k, v) => { if (v !== undefined) out[k] = v; };
+
   if (raw.event === 'SessionStart') {
-    if (id(raw.source)) out.source = raw.source;
-    if (typeof raw.branch === 'string') out.branch = scrub(raw.branch, 100);
+    set('source', id(raw.source));
+    // Branch names look like tokens to the scrubber; keep them when they are plain branch names.
+    if (typeof raw.branch === 'string') out.branch = /^[\w./-]{1,100}$/.test(raw.branch) ? raw.branch : scrub(raw.branch, 100);
     if (/^[0-9a-f]{4,40}$/.test(raw.head ?? '')) out.head = raw.head;
-    if (Number.isInteger(raw.behind_main)) out.behind_main = raw.behind_main;
+    set('behind_main', nat(raw.behind_main));
   }
   if (raw.event === 'PostToolUse' || raw.event === 'PostToolUseFailure') {
     out.tool = scrub(raw.tool, 80);
     out.target = raw.target === '(outside project)' ? raw.target : scrub(raw.target, 160);
     out.ok = raw.event === 'PostToolUse';
+    if (KINDS.has(raw.kind)) out.kind = raw.kind;
     if (typeof raw.ms === 'number') out.ms = raw.ms;
     if (!out.ok) {
       // Older lines kept error text; keep only its category.
@@ -38,7 +81,47 @@ export function clean(raw) {
         : raw.exit !== undefined ? `exit ${Number(raw.exit)}` : failureKind(raw.tool, raw.error, raw.interrupted);
     }
   }
-  if (raw.event === 'SessionEnd' && id(raw.reason)) out.reason = raw.reason;
+  if (raw.event === 'SessionEnd') set('reason', id(raw.reason));
+  if (raw.event === 'Usage') {
+    set('at', raw.at === 'Stop' || raw.at === 'SessionEnd' ? raw.at : undefined);
+    set('transcript', /^[0-9a-f]{12}$/.test(raw.transcript ?? '') ? raw.transcript : undefined);
+    set('tokens', tokensOf(raw.tokens));
+    set('costUSD', decimal(raw.costUSD));
+    set('costBasis', raw.costBasis === 'checkpoint+since' || raw.costBasis === 'transcript-only' ? raw.costBasis : undefined);
+    set('checkpoint', checkpointOf(raw.checkpoint));
+    if (typeof raw.checkpointAt === 'string' && !Number.isNaN(new Date(raw.checkpointAt).getTime())) out.checkpointAt = new Date(raw.checkpointAt).toISOString();
+    if (Array.isArray(raw.unpriced)) out.unpriced = raw.unpriced.filter((m) => typeof m === 'string' && model(m)).slice(0, 10);
+  }
+  if (raw.event === 'Alert') {
+    if (raw.kind !== 'stop-loss' && raw.kind !== 'waste') return null;
+    out.kind = raw.kind;
+    set('rule', id(raw.rule));
+    out.key = scrub(raw.key, 160);
+  }
+  if (raw.event === 'SubagentStart' || raw.event === 'SubagentStop') {
+    set('agentType', text(raw.agentType, 60));
+    set('agentId', id(raw.agentId));
+  }
+  if (raw.event === 'Task') {
+    if (!taskId(raw.id) || !['start', 'update', 'done'].includes(raw.action)) return null;
+    out.id = raw.id; out.action = raw.action;
+    for (const [k, max] of [['title', 120], ['epic', 80], ['workstream', 80], ['phase', 60], ['owner', 60], ['blocker', 160], ['next', 160]]) set(k, text(raw[k], max));
+    if (TASK_STATUSES.has(raw.status)) out.status = raw.status;
+    set('progress', nat(raw.progress, 100));
+    set('attempt', nat(raw.attempt, 99));
+    if (typeof raw.tests === 'string' && /^\d{1,6}\/\d{1,6}$/.test(raw.tests)) out.tests = raw.tests;
+    set('pr', nat(raw.pr));
+  }
+  if (raw.event === 'Incident') {
+    if (typeof raw.id !== 'string' || !/^INC-\d{8}-[0-9a-f]{4}$/.test(raw.id)) return null;
+    out.id = raw.id;
+    out.type = INCIDENT_TYPES.has(raw.type) ? raw.type : 'other';
+    out.severity = ['high', 'medium', 'low'].includes(raw.severity) ? raw.severity : 'medium';
+    for (const [k, max] of [['title', 160], ['impact', 160], ['detectedBy', 80], ['action', 160]]) set(k, text(raw[k], max));
+    if (typeof raw.lesson === 'string' && /^L-\d{3}$/.test(raw.lesson)) out.lesson = raw.lesson;
+    if (typeof raw.policyUpdated === 'boolean') out.policyUpdated = raw.policyUpdated;
+    set('task', taskId(raw.task));
+  }
   return out;
 }
 

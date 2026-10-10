@@ -276,3 +276,213 @@ describe('dashboard report', () => {
     expect(read('devlog/dashboard.html')).toBe(before);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// The d3ngineering-style Control Tower: usage and cost, stop-loss, the board, incidents, report.
+
+/** A throwaway copy of the tooling in its own git repository, so reports run on known data. */
+function makeRepo(config?: (c: Record<string, any>) => void) {
+  const dir = freshDir('repo');
+  for (const f of ['.claude/hooks/devlog.mjs', 'scripts/devlog-flush.mjs', 'scripts/devlog-report.mjs', 'scripts/devlog-task.mjs', 'devlog/lessons.md', 'devlog/dashboard.html']) {
+    mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+    writeFileSync(path.join(dir, f), read(f));
+  }
+  const cfg = JSON.parse(read('devlog/control-tower.json'));
+  config?.(cfg);
+  writeFileSync(path.join(dir, 'devlog/control-tower.json'), JSON.stringify(cfg));
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  git('init', '-q', '-b', 'main');
+  return { dir, git };
+}
+const run = (dir: string, script: string, args: string[], input?: string, env: Record<string, string | undefined> = {}) =>
+  spawnSync('node', [path.join(dir, script), ...args], {
+    input, encoding: 'utf8', cwd: dir,
+    env: { ...process.env, CLAUDE_PROJECT_DIR: dir, CLAUDE_CODE_REMOTE_SESSION_ID: undefined, CLAUDE_CODE_SESSION_ID: 'cli-test', ...env },
+  });
+const spoolLines = (dir: string) => {
+  const d = path.join(dir, 'devlog/.spool');
+  return existsSync(d) ? readdirSync(d).filter((f) => f.endsWith('.jsonl')).flatMap((f) => readFileSync(path.join(d, f), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))) : [];
+};
+
+/** A transcript in Claude Code's real shape: one line per content block, the same message id and usage on each. */
+function transcript(dir: string, entries: ({ id: string; model: string; ts: string; usage: Record<string, unknown>; blocks?: number } | { checkpoint: number; models: Record<string, number> })[], sub?: typeof entries) {
+  const lines = (list: typeof entries) => list.flatMap((e) => ('checkpoint' in e
+    ? [JSON.stringify({ type: 'cost-state', totalCostUSD: e.checkpoint, modelUsage: Object.fromEntries(Object.entries(e.models).map(([m, c]) => [m, { inputTokens: 1, outputTokens: 1, costUSD: c }])) })]
+    : Array.from({ length: e.blocks ?? 2 }, () => JSON.stringify({ type: 'assistant', timestamp: e.ts, requestId: `req_${e.id}`, message: { id: e.id, model: e.model, usage: e.usage } })))).join('\n') + '\n';
+  const tp = path.join(dir, 'transcript.jsonl');
+  writeFileSync(tp, lines(entries));
+  if (sub) { mkdirSync(path.join(dir, 'transcript/subagents'), { recursive: true }); writeFileSync(path.join(dir, 'transcript/subagents/agent-x.jsonl'), lines(sub)); }
+  return tp;
+}
+const U = (input: number, output: number, read = 0, w5 = 0, w1 = 0) => ({ input_tokens: input, output_tokens: output, cache_read_input_tokens: read, cache_creation_input_tokens: w5 + w1, cache_creation: { ephemeral_5m_input_tokens: w5, ephemeral_1h_input_tokens: w1 } });
+
+describe('usage and cost', () => {
+  it('counts each message once, prices tokens exactly, and adds them to Claude Code\'s own checkpoint', () => {
+    const { dir } = makeRepo();
+    const tp = transcript(dir, [
+      { id: 'm1', model: 'claude-opus-5-5', ts: '2026-10-10T00:00:00Z', usage: U(100, 1000), blocks: 4 },
+      { checkpoint: 1.5, models: { 'claude-opus-5-5': 1.5 } },
+      { id: 'm2', model: 'claude-opus-5-5', ts: '2026-10-10T00:05:00Z', usage: U(0, 1_000_000, 1_000_000, 1_000_000, 1_000_000) },
+    ], [{ id: 's1', model: 'claude-haiku-5-5', ts: '2026-10-10T00:06:00Z', usage: U(1_000_000, 0) }]);
+    expect(run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'Stop', session_id: 's', transcript_path: tp })).status).toBe(0);
+    const u = spoolLines(dir).find((l) => l.event === 'Usage');
+    expect(u.tokens['claude-opus-5-5']).toMatchObject({ messages: 2, input: 100, output: 1_001_000, cacheRead: 1_000_000, cacheWrite5m: 1_000_000, cacheWrite1h: 1_000_000 });
+    expect(u.tokens['claude-haiku-5-5']).toMatchObject({ messages: 1, input: 1_000_000 });
+    // After the checkpoint: Opus 1M output $20 + 1M cache read $0.20 + 1M 5m write $5 + 1M 1h write $8; Haiku 1M input $0.10.
+    expect(u.costBasis).toBe('checkpoint+since');
+    expect(u.costUSD).toBe('34.80000000'); // 1.5 + 33.20 + 0.10
+    expect(u.checkpoint.costUSD).toBe('1.500000');
+  });
+
+  it('prices the whole transcript when there is no checkpoint yet, and says so, and never guesses a price', () => {
+    const { dir } = makeRepo();
+    const tp = transcript(dir, [
+      { id: 'a', model: 'claude-sonnet-5-5', ts: '2026-10-10T00:00:00Z', usage: U(1_000_000, 100_000) },
+      { id: 'b', model: 'claude-unknown-9', ts: '2026-10-10T00:01:00Z', usage: U(1_000_000, 0) },
+    ]);
+    run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'Stop', session_id: 's', transcript_path: tp }));
+    const u = spoolLines(dir).find((l) => l.event === 'Usage');
+    expect(u).toMatchObject({ costBasis: 'transcript-only', costUSD: '3.00000000', unpriced: ['claude-unknown-9'] }); // $2 + $1
+    expect(u.tokens['claude-unknown-9'].costUSD).toBeUndefined();
+  });
+
+  it('records the kind of command, never the command itself', () => {
+    const { dir } = makeRepo();
+    run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'PostToolUse', session_id: 's', tool_name: 'Bash', tool_input: { command: 'npx vitest run tests/secret-name.test.ts', description: 'Run tests' } }));
+    expect(spoolLines(dir)[0]).toMatchObject({ kind: 'test', target: 'Run tests' });
+    expect(JSON.stringify(spoolLines(dir))).not.toContain('secret-name');
+  });
+});
+
+describe('stop-loss and wasted effort', () => {
+  const fail = (dir: string, description = 'Run tests') => run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({
+    hook_event_name: 'PostToolUseFailure', session_id: 's', tool_name: 'Bash', tool_input: { command: 'npm test', description }, error: 'Exit code 1',
+  }));
+
+  it('tells Claude to stop and escalate after the budgeted failed test runs in a row, once', () => {
+    const { dir } = makeRepo();
+    expect(fail(dir).status).toBe(0);
+    expect(fail(dir, 'Run tests again').status).toBe(0);
+    const third = fail(dir, 'Run tests once more');
+    expect(third.status).toBe(2); // shown to Claude; the tool already ran
+    expect(third.stderr).toContain('STOP-LOSS TRIGGERED');
+    expect(third.stderr).toContain('3 test runs in a row have failed');
+    fail(dir, 'Run tests a fourth time');
+    expect(spoolLines(dir).filter((l) => l.event === 'Alert' && l.rule === 'failed-test-runs')).toHaveLength(1);
+  });
+
+  it('a passing run resets the streak', () => {
+    const { dir } = makeRepo();
+    fail(dir); fail(dir, 'b');
+    run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'PostToolUse', session_id: 's', tool_name: 'Bash', tool_input: { command: 'npm test', description: 'c' } }));
+    expect(fail(dir, 'd').status).toBe(0);
+  });
+
+  it('warns about reading one file again and again without changing it', () => {
+    const { dir } = makeRepo();
+    const readFile = () => run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'PostToolUse', session_id: 's', tool_name: 'Read', tool_input: { file_path: path.join(dir, 'src/a.ts') } }));
+    for (let i = 0; i < 3; i++) expect(readFile().status).toBe(0);
+    const fourth = readFile();
+    expect(fourth.status).toBe(2);
+    expect(fourth.stderr).toContain('WASTED EFFORT');
+  });
+
+  it('tells the owner when a session goes over its cost budget, comparing amounts exactly', () => {
+    const { dir } = makeRepo((c) => { c.stopLoss.maxSessionCostUSD = '1.00000001'; });
+    const at = (cost: number) => transcript(dir, [{ id: `x${cost}`, model: 'claude-opus-5-5', ts: '2026-10-10T00:00:00Z', usage: U(cost, 0) }]);
+    expect(run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'Stop', session_id: 's', transcript_path: at(250_000) })).stdout).toBe(''); // exactly $1.00
+    const over = run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'Stop', session_id: 's', transcript_path: at(250_001) }));
+    expect(JSON.parse(over.stdout).systemMessage).toContain('STOP-LOSS');
+  });
+});
+
+describe('control board and incident register', () => {
+  it('records task events and incidents, scrubbed, and refuses bad input', () => {
+    const { dir } = makeRepo();
+    expect(run(dir, 'scripts/devlog-task.mjs', ['start', 'T-1', '--title', 'Build the board', '--phase', 'build']).status).toBe(0);
+    expect(run(dir, 'scripts/devlog-task.mjs', ['update', 'T-1', '--progress', '60', '--blocker', 'Waiting on ops@example.test']).status).toBe(0);
+    expect(run(dir, 'scripts/devlog-task.mjs', ['incident', '--type', 'process', '--title', 'Stale branch', '--lesson', 'L-013']).stdout).toMatch(/Recorded INC-\d{8}-[0-9a-f]{4}\./);
+    for (const bad of [['update', 'T-1', '--status', 'finished'], ['update', 'T-1', '--progress', '101'], ['start', 'bad id', '--title', 'x'], ['incident', '--title', 'x', '--lesson', 'L13'], ['update', 'T-1', '--colour', 'red']]) {
+      expect(run(dir, 'scripts/devlog-task.mjs', bad).status, bad.join(' ')).toBe(1);
+    }
+    const events = spoolLines(dir);
+    expect(events.filter((e) => e.event === 'Task')).toHaveLength(2);
+    expect(JSON.stringify(events)).not.toContain('ops@example');
+  });
+
+  it('calls a stop when a task goes over its attempt budget', () => {
+    const { dir } = makeRepo();
+    run(dir, 'scripts/devlog-task.mjs', ['start', 'T-2', '--title', 'Flaky fix']);
+    const r = run(dir, 'scripts/devlog-task.mjs', ['update', 'T-2', '--attempt', '4']);
+    expect(r.stdout).toContain('STOP-LOSS TRIGGERED');
+    expect(spoolLines(dir)).toContainEqual(expect.objectContaining({ event: 'Alert', rule: 'task-attempts', key: 'T-2' }));
+  });
+
+  it('keeps only known fields of board, incident, usage and alert events when flushing', () => {
+    const { dir } = makeRepo();
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    const lines = [
+      { ts: '2026-10-10T00:00:00Z', session: 's', event: 'Task', action: 'start', id: 'T-1', title: 'A', status: 'in_progress', secret: 'x' },
+      { ts: '2026-10-10T00:00:01Z', session: 's', event: 'Incident', id: 'INC-20261010-abcd', type: 'process', title: 'B', lesson: 'L-001', note: 'dropped' },
+      { ts: '2026-10-10T00:00:02Z', session: 's', event: 'Incident', id: 'not-an-id', title: 'C' },
+      { ts: '2026-10-10T00:00:03Z', session: 's', event: 'Usage', costUSD: '1.00000000', tokens: { 'claude-opus-5-5': { input: 1, prompt: 'leak' } }, raw: 'leak' },
+      { ts: '2026-10-10T00:00:04Z', session: 's', event: 'Alert', kind: 'stop-loss', rule: 'failed-test-runs', key: 'k', message: 'leak' },
+    ];
+    writeFileSync(path.join(dir, 'devlog/.spool/s.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    expect(run(dir, 'scripts/devlog-flush.mjs', []).status).toBe(0);
+    const out = readdirSync(path.join(dir, 'devlog/activity')).map((f) => readFileSync(path.join(dir, 'devlog/activity', f), 'utf8')).join('');
+    const parsed = out.trim().split('\n').map((l) => JSON.parse(l));
+    expect(parsed.map((p) => p.event)).toEqual(['Task', 'Incident', 'Usage', 'Alert']);
+    expect(out).not.toMatch(/secret|dropped|leak|not-an-id/);
+  });
+});
+
+describe('control tower report', () => {
+  it('folds the board, splits a session\'s cost between its tasks exactly, links incidents to guarded lessons, and finds logging gaps', () => {
+    const { dir, git } = makeRepo();
+    const commit = (date: string, session: string, msg: string) => {
+      writeFileSync(path.join(dir, `f${date}`), date);
+      git('add', '-A');
+      execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', `${msg}\n\nClaude-Session: https://claude.ai/code/${session}`], { cwd: dir, env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } });
+    };
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    const ev = (o: object) => JSON.stringify({ session: 'session_01A', ...o });
+    writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), [
+      ev({ ts: '2026-10-10T00:00:00Z', event: 'SessionStart', source: 'startup' }),
+      ev({ ts: '2026-10-10T00:01:00Z', event: 'Task', action: 'start', id: 'T-1', title: 'Old title', status: 'in_progress' }),
+      ev({ ts: '2026-10-10T00:02:00Z', event: 'Task', action: 'update', id: 'T-1', title: 'New title', progress: 50 }),
+      ev({ ts: '2026-10-10T00:03:00Z', event: 'Task', action: 'start', id: 'T-2', title: 'Second' }),
+      ev({ ts: '2026-10-10T00:04:00Z', event: 'Task', action: 'done', id: 'T-2', status: 'done', progress: 100 }),
+      ev({ ts: '2026-10-10T00:05:00Z', event: 'Usage', transcript: 'aaaaaaaaaaaa', costUSD: '0.10000001', costBasis: 'checkpoint+since' }),
+      ev({ ts: '2026-10-10T00:06:00Z', event: 'Usage', transcript: 'bbbbbbbbbbbb', costUSD: '0.20000002', costBasis: 'checkpoint+since' }),
+      ev({ ts: '2026-10-10T00:07:00Z', event: 'Usage', transcript: 'aaaaaaaaaaaa', costUSD: '0.20000001', costBasis: 'checkpoint+since' }), // latest for a
+      ev({ ts: '2026-10-10T00:08:00Z', event: 'Incident', id: 'INC-20261010-0001', type: 'process', severity: 'medium', title: 'Stale', lesson: 'L-013' }),
+    ].join('\n') + '\n');
+    commit('2026-10-10T00:09:00Z', 'session_01A', 'Logged work');
+    commit('2026-10-10T02:00:00Z', 'session_01A', 'Work after the hooks stopped');
+    const out = path.join(dir, 'r.json');
+    expect(run(dir, 'scripts/devlog-report.mjs', ['--json', out]).status).toBe(0);
+    const r = JSON.parse(readFileSync(out, 'utf8'));
+    const t1 = r.board.find((t: { id: string }) => t.id === 'T-1');
+    expect(t1).toMatchObject({ title: 'New title', progress: 50, status: 'in_progress' });
+    expect(r.economics.spend.usd).toBe('0.40000003'); // latest per transcript: 0.20000001 + 0.20000002
+    expect(t1.cost.usd).toBe('0.20000001'); // split evenly between T-1 and T-2, in exact units
+    // L-013's guard lives in tests/devlog.test.ts, which this copy lacks: the loop is shown as broken.
+    expect(r.incidents[0]).toMatchObject({ lesson: 'L-013', guarded: false });
+    mkdirSync(path.join(dir, 'tests'), { recursive: true });
+    writeFileSync(path.join(dir, 'tests/devlog.test.ts'), read('tests/devlog.test.ts'));
+    run(dir, 'scripts/devlog-report.mjs', ['--json', out]);
+    expect(JSON.parse(readFileSync(out, 'utf8')).incidents[0]).toMatchObject({ lesson: 'L-013', guarded: true });
+    expect(r.areas.governance.loggingGaps).toEqual([expect.objectContaining({ session: 'session_01A', commits: 1 })]);
+    expect(r.attention.map((a: { text: string }) => a.text).join(' ')).toContain('while not being logged');
+  });
+
+  it('shows RM only from a configured rate, computed exactly', () => {
+    const { dir } = makeRepo((c) => { c.currency.myrPerUsd = '4.5'; c.currency.asOf = '2026-10-10'; });
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), JSON.stringify({ ts: '2026-10-10T00:00:00Z', session: 'session_01B', event: 'Usage', transcript: 'cccccccccccc', costUSD: '0.10000000', costBasis: 'checkpoint+since' }) + '\n');
+    const out = path.join(dir, 'r.json');
+    run(dir, 'scripts/devlog-report.mjs', ['--json', out]);
+    expect(JSON.parse(readFileSync(out, 'utf8')).economics.spend).toEqual({ usd: '0.10000000', myr: '0.45000000' });
+  });
+});

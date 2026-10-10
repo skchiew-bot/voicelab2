@@ -1,0 +1,83 @@
+{
+  "_about": "Dev Control Tower settings, modelled on skchiew-bot/d3ngineering (sections 12, 17-20, 34, 44-46). Edit here; no code change needed.",
+  "stopLoss": {
+    "_about": "Section 18. When a budget is reached the hook tells Claude to stop, summarise the evidence and escalate to the owner.",
+    "maxFailedTestRunsInARow": 3,
+    "maxSameCommandFailures": 3,
+    "maxEditsToOneFile": 25,
+    "maxSessionCostUSD": "40",
+    "maxTaskAttempts": 3
+  },
+  "waste": {
+    "_about": "Section 19. Signs of effort without progress; the hook warns once per file or command per session.",
+    "maxReadsOfOneFileWithoutEdit": 4
+  },
+  "modelTiers": {
+    "_about": "Tiers from the model-selection table in CLAUDE.md, matched against the model id. Premium spend is the high tier.",
+    "high": [
+      "opus"
+    ],
+    "mid": [
+      "sonnet"
+    ],
+    "low": [
+      "haiku"
+    ]
+  },
+  "currency": {
+    "_about": "Costs are priced from token counts with `pricing`, in USD. To also show RM, set myrPerUsd to a current rate as a decimal string, with the date and where it came from.",
+    "myrPerUsd": null,
+    "asOf": null,
+    "source": null
+  },
+  "highRiskPaths": {
+    "_about": "Section 34.6 Governance. A session that edits any of these is shown as high risk.",
+    "patterns": [
+      "^migrations/",
+      "^src/secrets\\.ts$",
+      "^src/store/dnc\\.ts$",
+      "^src/telephony/",
+      "^src/money\\.ts$",
+      "^src/billing\\.ts$",
+      "^\\.claude/",
+      "^CLAUDE\\.md$"
+    ]
+  },
+  "activeWithinMinutes": 30,
+  "pricing": {
+    "_about": "USD per million tokens, used to price each session's tokens exactly. Claude Code's own cost figure is shown beside it as a cross-check. Update when prices change; never hardcode them in code.",
+    "source": "claude-api skill model table (cached 2026-10-06); cache writes at 1.25x input (5 minutes) and 2x input (1 hour)",
+    "asOf": "2026-10-10",
+    "notes": "Haiku 5.5 cache read is derived as 0.1x input (not stated in the source). Haiku 5.5 prompts over 100K tokens cost more ($0.50 / $2.50); that tier is not modelled. Fast mode is not modelled.",
+    "perMTokUSD": {
+      "claude-opus-5-5": {
+        "input": "4",
+        "output": "20",
+        "cacheWrite5m": "5",
+        "cacheWrite1h": "8",
+        "cacheRead": "0.20"
+      },
+      "claude-sonnet-5-5": {
+        "input": "2",
+        "output": "10",
+        "cacheWrite5m": "2.50",
+        "cacheWrite1h": "4",
+        "cacheRead": "0.20"
+      },
+      "claude-haiku-5-5": {
+        "input": "0.10",
+        "output": "0.50",
+        "cacheWrite5m": "0.125",
+        "cacheWrite1h": "0.20",
+        "cacheRead": "0.01"
+      },
+      "claude-fable-5-1": {
+        "input": "10",
+        "output": "50",
+        "cacheWrite5m": "12.50",
+        "cacheWrite1h": "20",
+        "cacheRead": "0.25"
+      }
+    }
+  }
+}

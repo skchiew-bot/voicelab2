@@ -117,10 +117,11 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "no tracked file holds a token in a real provider's key format"
 
 ### L-016: Check an integration against a real payload, not an assumed one
-- **Seen:** 2 times. Twilio and Telnyx request formats were written from memory and are still unverified against the live services ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)). The dev Control Tower hook assumed the hook's `session_id` was the claude.ai session id; in a cloud session it is a local id, so links broke and one session counted twice (session on 2026-10-10).
+- **Seen:** 3 times. Twilio and Telnyx request formats were written from memory and are still unverified against the live services ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)). The dev Control Tower hook assumed the hook's `session_id` was the claude.ai session id; in a cloud session it is a local id, so links broke and one session counted twice (session on 2026-10-10). Session cost was nearly built on the transcript alone; a real transcript showed each message repeated per content block and background calls (the permission classifier) missing, so cost is now Claude Code's own checkpoint plus priced messages after it (session on 2026-10-10).
 - **Rule:** Before building on an outside payload or format, capture one real example and test against its actual shape. Where that is impossible, say so as unverified, in the PR and in `src/progress.ts`.
 - **Guards:**
   - `tests/devlog.test.ts` › "records the claude.ai session id in a cloud session, and the local id elsewhere"
+  - `tests/devlog.test.ts` › "counts each message once, prices tokens exactly, and adds them to Claude Code's own checkpoint"
 
 ### L-017: Record logs by allowlist; anything logged may be published
 - **Seen:** The dev Control Tower hook scrubbed by blocklist and still let through credentials in URLs, `key=value` secrets, tokens split by digit runs, emails, and other tools' raw error text with a customer's name and email, all bound for git (independent review, 2026-10-10).
@@ -141,3 +142,9 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** Hooks and background tools write only to ignored files. Anything meant for git is written by an explicit step (here, `scripts/devlog-flush.mjs`) into new files that never conflict across branches.
 - **Guards:**
   - `tests/devlog.test.ts` › "writes to the spool, which git ignores, so the working tree stays clean"
+
+### L-020: Check that monitoring is running, not just installed
+- **Seen:** After a restart, Claude Code reopened a session with `/home/user` as its project folder, outside the repository, so the repository's hooks never loaded and nothing was logged for half an hour, silently (session on 2026-10-10).
+- **Rule:** A monitor must report its own gaps. The dev Control Tower flags any session that commits while not being logged; when you see that warning, say so and record what ran by hand (for example usage, with the Stop hook command) instead of leaving the gap.
+- **Guards:**
+  - `tests/devlog.test.ts` › "folds the board, splits a session's cost between its tasks exactly, links incidents to guarded lessons, and finds logging gaps"

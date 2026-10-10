@@ -110,6 +110,30 @@ td.mono { white-space: nowrap; }
 .empty { padding: 16px; color: var(--muted); }
 .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 28px; }
 footer { font-size: 0.8rem; color: var(--muted); }
+/* Board, areas and registers */
+.pill.st-in_progress, .pill.st-testing, .pill.st-review { background: var(--info-soft); color: var(--info); }
+.pill.st-done { background: var(--ok-soft); color: var(--ok); }
+.pill.st-blocked, .pill.st-abandoned { background: var(--crit-soft); color: var(--crit); }
+.pill.st-planned { background: var(--strip); color: var(--muted); }
+.prog { display: grid; gap: 3px; min-width: 90px; }
+.prog .track { height: 6px; border-radius: 3px; background: var(--strip); overflow: hidden; }
+.prog .fill { height: 100%; background: var(--accent); }
+.areas { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); gap: 12px; }
+.area { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.area h3 { margin: 0; font-family: var(--f-display); font-size: 1rem; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
+.area h3 small { font-family: var(--f-data); font-weight: 400; font-size: 0.72rem; color: var(--muted); }
+.kv { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; margin: 0; font-size: 0.88rem; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; font-family: var(--f-data); font-variant-numeric: tabular-nums; text-align: right; }
+.agents { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 12px; }
+.agent { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: 4px; padding: 12px 14px; display: grid; gap: 6px; min-width: 0; }
+.agent .row { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.85rem; color: var(--muted); }
+.agent .row b { color: var(--ink); font-weight: 500; font-family: var(--f-data); }
+.note { font-size: 0.82rem; color: var(--muted); margin: 0; }
+td .sub { display: block; color: var(--muted); font-size: 0.8rem; }
+#board table { min-width: 860px; }
+#board td:first-child { min-width: 230px; }
+#board td:last-child { min-width: 200px; }
 @media (max-width: 640px) {
   .strip { grid-template-columns: 64px minmax(0, 1fr); }
   .strip .side { grid-column: 1 / -1; justify-items: start; border-left: 0; border-top: 1px dashed var(--line); grid-auto-flow: column; justify-content: start; }
@@ -123,12 +147,45 @@ footer { font-size: 0.8rem; color: var(--muted); }
   <header>
     <div>
       <h1>Voice Lab Dev Control Tower</h1>
-      <div class="muted">How Claude Code is building Voice Lab: what was done, what went wrong, and what stops it happening again.</div>
+      <div class="muted">How Claude Code is building Voice Lab: the work in flight, what it costs, what went wrong, and what stops it happening again.</div>
     </div>
     <div class="meta" id="meta"></div>
   </header>
   <div class="rail" id="rail" aria-label="Summary"></div>
   <section aria-labelledby="att-h"><h2 id="att-h">Needs attention</h2><ul class="alerts" id="attention"></ul></section>
+  <section aria-labelledby="board-h">
+    <h2 id="board-h">Development control board</h2>
+    <p class="note">Each task, its phase, attempt, progress, tests, blockers and next step, with the models, tokens and cost of the sessions that worked on it. Sessions update it with <code>node scripts/devlog-task.mjs</code>.</p>
+    <div class="tablebox" id="board"></div>
+  </section>
+  <section aria-labelledby="ops-h">
+    <h2 id="ops-h">Agent operations</h2>
+    <div class="agents" id="agents"></div>
+  </section>
+  <section aria-labelledby="areas-h">
+    <h2 id="areas-h">Workload, quality, economics and governance</h2>
+    <div class="areas" id="areas"></div>
+  </section>
+  <section aria-labelledby="reg-h">
+    <h2 id="reg-h">Model performance registry</h2>
+    <div class="tablebox" id="registry"></div>
+    <p class="note" id="pricing-note"></p>
+  </section>
+  <section aria-labelledby="inc-h">
+    <h2 id="inc-h">Incident register and learning loop</h2>
+    <p class="note">Every build failure becomes an incident, a lesson and a guard. A lesson counts as learned only while its guard test is still in place.</p>
+    <div class="tablebox" id="incidents"></div>
+  </section>
+  <section aria-labelledby="sl-h">
+    <h2 id="sl-h">Stop-loss and wasted effort</h2>
+    <p class="note" id="budgets"></p>
+    <div class="tablebox" id="alerts"></div>
+  </section>
+  <section aria-labelledby="perf-h">
+    <h2 id="perf-h">Session performance</h2>
+    <p class="note">Outcomes per session, not lines of code or tokens alone.</p>
+    <div class="tablebox" id="performance"></div>
+  </section>
   <section aria-labelledby="les-h">
     <h2 id="les-h">Lessons and their guards</h2>
     <p class="muted" style="margin:0">Every past mistake, the rule that replaces it, and the tests that fail if it comes back. Amber marks a mistake that has happened more than once.</p>
@@ -156,6 +213,15 @@ const when = (iso) => iso ? iso.slice(0, 16).replace('T', ' ') + ' UTC' : '—';
 // Only links to GitHub and claude.ai are made clickable.
 const safeUrl = (u) => (/^https:\/\/(github\.com|claude\.ai)\//.test(String(u ?? '')) ? esc(u) : '#');
 const md = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+// Money is formatted from its decimal text, never through a float (lesson L-004).
+const fmtMoney = (v) => {
+  const m = /^(-?)(\d+)(?:\.(\d+))?$/.exec(String(v ?? ''));
+  if (!m) return String(v ?? '');
+  const frac = (m[3] ?? '').padEnd(3, '0');
+  let cents = BigInt(m[2]) * 100n + BigInt(frac.slice(0, 2)) + (Number(frac[2]) >= 5 ? 1n : 0n); // round half up, in integers
+  const whole = (cents / 100n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `${m[1]}${whole}.${(cents % 100n).toString().padStart(2, '0')}`;
+};
 const tier = (sev) => /^high/i.test(sev) ? 'h' : /^med/i.test(sev) ? 'm' : 'l';
 
 function render(r) {
@@ -166,8 +232,10 @@ function render(r) {
     ['Guards in place', `${t.guardsOk}/${t.guards}`, t.guardsOk === t.guards ? 'all tests still there' : 'some guards are gone'],
     ['Review findings', t.findings, `${t.findingsFixed} fixed · ${t.highFindings} high`],
     ['PRs merged', t.prsMerged, `${t.commits} commits`],
-    ['Sessions', t.sessions, `${t.toolCalls} logged actions`],
-    ['Failed actions', t.failures, 'from the activity log'],
+    ['Open tasks', t.openTasks, `${r.board.filter((x) => x.blocker).length} blocked`],
+    ['Incidents', t.incidents, 'each tied to a lesson'],
+    ['AI spend', `$${fmtMoney(r.economics.spend.usd)}`, r.economics.partial ? 'some sessions not checkpointed' : 'all sessions metered'],
+    ['Sessions', t.sessions, `${t.toolCalls} logged actions · ${t.failures} failed`],
   ];
   $('rail').innerHTML = rail.map(([k, v, s]) => `<div><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span><span class="s">${esc(s)}</span></div>`).join('');
 
@@ -190,6 +258,59 @@ function render(r) {
     </article>`;
   }).join('');
 
+  const usd = (m) => (m ? `$${fmtMoney(m.usd)}${m.myr ? ` · RM ${fmtMoney(m.myr)}` : ''}` : '—');
+  const pctv = (v) => (v === null || v === undefined ? '—' : `${v}%`);
+  const num = (n) => (n === null || n === undefined ? '—' : Number(n).toLocaleString('en-US'));
+  const mins = (m) => (m === null || m === undefined ? '—' : m >= 120 ? `${Math.round(m / 6) / 10} h` : `${m} min`);
+  const sessionLink = (id, url) => (url ? `<a class="mono" href="${safeUrl(url)}">${esc(String(id).slice(-8))}</a>` : `<span class="mono">${esc(String(id).slice(-8))}</span>`);
+
+  $('board').innerHTML = r.board.length ? `<table><thead><tr><th>Task</th><th>Status</th><th>Progress</th><th class="num">Attempt</th><th class="num">Cost</th><th>Blocker · next</th></tr></thead><tbody>${
+    r.board.map((t) => `<tr>
+      <td><b class="mono">${esc(t.id)}</b> ${esc(t.title)}<span class="sub">${esc([t.epic, t.workstream, t.phase].filter(Boolean).join(' · '))}${t.pr ? ` · <a href="https://github.com/${esc(r.repo)}/pull/${Number(t.pr)}">#${Number(t.pr)}</a>` : ''}</span></td>
+      <td><span class="pill st-${esc(t.status)}">${esc(t.status.replace('_', ' '))}</span></td>
+      <td><div class="prog"><div class="track"><div class="fill" style="width:${Math.max(0, Math.min(100, Number(t.progress) || 0))}%"></div></div><small class="mono">${Number(t.progress) || 0}%</small></div></td>
+      <td class="num">${Number(t.attempt) || 1}<span class="sub">tests ${esc(t.tests ?? '—')}</span></td>
+      <td class="num">${usd(t.cost)}<span class="sub">${num(t.tokens)} tokens · ${mins(t.elapsedMinutes)}</span><span class="sub mono">${esc(t.models.map((m) => m.replace(/^claude-/, '')).join(', ') || '—')}</span></td>
+      <td>${t.blocker ? `<strong>Blocked:</strong> ${esc(t.blocker)}<br>` : ''}${esc(t.next ?? '')}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="empty">No tasks yet. Sessions add them with node scripts/devlog-task.mjs start.</div>';
+
+  const ag = r.areas.agents;
+  $('agents').innerHTML = ag.length ? ag.map((a) => `<article class="agent">
+      <div>${sessionLink(a.session, a.url)} ${a.task ? `<b class="mono">${esc(a.task)}</b> ${esc(a.title)}` : '<span class="muted">No task recorded</span>'}</div>
+      <div class="row"><span>Phase <b>${esc(a.phase ?? '—')}</b></span><span>Progress <b>${a.progress ?? '—'}%</b></span><span>Subagents <b>${a.subagents}</b></span><span>Errors <b>${a.errors}</b></span></div>
+      <div class="row"><span>Models <b>${esc(a.models.join(', ') || '—')}</b></span><span>Tokens <b>${num(a.tokens)}</b></span><span>Cost <b>${usd(a.cost)}</b></span><span>Last <b>${esc(when(a.last))}</b></span></div>
+    </article>`).join('') : '<div class="empty">No session has been active in the last few minutes.</div>';
+
+  const w = r.areas.workload, q = r.areas.quality, g = r.areas.governance, e = r.economics;
+  const area = (title, sub, rows) => `<div class="area"><h3>${esc(title)}<small>${esc(sub)}</small></h3><dl class="kv">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl></div>`;
+  const share = (v) => (v === null ? '—' : v > 0 && v < 0.1 ? '<0.1%' : `${v}%`);
+  const tierRows = Object.entries(e.byTier).map(([k, v]) => [`${k[0].toUpperCase()}${k.slice(1)} tier, priced tokens`, `${usd(v)} (${share(v.share)})`]);
+  $('areas').innerHTML = [
+    area('Workload', '34.1', [['Open tasks', num(w.openTasks)], ['Blocked tasks', num(w.blockedTasks)], ['Open PRs', num(w.openPrs)], ['Incidents, last 7 days', num(w.incidents7d)], ['Security incidents', num(w.securityIncidents)], ['Failed test runs, last 7 days', num(w.failedTestRuns7d)]]),
+    area('Engineering quality', '34.3', [['First-pass task rate', pctv(q.firstPassRate)], ['Test runs passing', `${pctv(q.testPassRate)} of ${num(q.testRuns)}`], ['Lessons repeated', num(q.repeatedLessons)], ['Regressions (incidents)', num(q.regressions)], ['Rollback rate', pctv(q.rollbackRate)], ['PRs rejected', pctv(q.rejectionRate)], ['Review findings per reviewed PR', q.findingsPerPr ?? '—'], ['Over-engineering', 'not measured yet']]),
+    area('AI economics', '34.5', [['Spend', usd(e.spend)], ...tierRows, ['Sessions using the high tier', `${num(e.premiumSessions)} of ${num(e.meteredSessions)}`], ['Cache reads, share of input', pctv(e.cacheReadShare)], ['Saved by caching', usd(e.cacheSaved)], ['Cost per finished task', usd(e.perDoneTask)], ['Failed test runs', num(e.failedTestRuns)], ['Stop-loss / waste alerts', `${num(e.stopLossAlerts)} / ${num(e.wasteAlerts)}`]]),
+    area('Governance', '34.6', [['Merged with owner approval', num(g.approvals)], ['Merged without independent review', g.unreviewedMerged.length ? esc(g.unreviewedMerged.map((n) => `#${n}`).join(' ')) : '0'], ['Stop-loss triggers', num(g.stopLossTriggers)], ['Incidents that changed policy', num(g.policyUpdates)], ['Lesson guards missing', num(g.policyViolations)], ['High-risk sessions', num(g.highRiskSessions.length)], ['Audit completeness', pctv(g.auditCompleteness)], ['Logging gaps', num(g.loggingGaps.length)], ['AI-assisted commits', pctv(r.areas.aiShare)]]),
+  ].join('');
+
+  $('registry').innerHTML = r.registry.length ? `<table><thead><tr><th>Model</th><th>Tier</th><th class="num">Sessions</th><th class="num">Messages</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache read</th><th class="num">Cache write</th><th class="num">Cost</th><th class="num">Per session</th><th class="num">Tool failures</th><th class="num">Tests passing</th></tr></thead><tbody>${
+    r.registry.map((m) => `<tr><td class="mono">${esc(m.model)}</td><td>${esc(m.tier)}</td><td class="num">${num(m.sessions)}</td><td class="num">${num(m.messages)}</td><td class="num">${num(m.input)}</td><td class="num">${num(m.output)}</td><td class="num">${num(m.cacheRead)}</td><td class="num">${num(m.cacheWrite5m + m.cacheWrite1h)}</td><td class="num">${m.priced ? usd(m.cost) : 'no price'}</td><td class="num">${m.priced ? usd(m.costPerSession) : '—'}</td><td class="num">${pctv(m.toolFailureRate)}</td><td class="num">${pctv(m.testPassRate)}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="empty">No token usage recorded yet. It is recorded when a session ends a turn.</div>';
+  $('pricing-note').innerHTML = `Prices: ${esc(e.pricing.source ?? 'not configured')}${e.pricing.asOf ? `, checked ${esc(e.pricing.asOf)}` : ''}. Spend is Claude Code's own figure at its last checkpoint plus priced tokens since${e.partial ? '; some sessions have no checkpoint yet, so background calls (such as the permission classifier) are missing from them' : ''}.${e.currency ? ` RM at ${esc(e.currency.myrPerUsd)} per USD (${esc(e.currency.asOf ?? '')}).` : ' Set a rate in devlog/control-tower.json to show RM.'}`;
+
+  $('incidents').innerHTML = r.incidents.length ? `<table><thead><tr><th>Incident</th><th>Type</th><th>What happened</th><th>Detected by</th><th>Action</th><th>Lesson</th><th>Guard</th></tr></thead><tbody>${
+    r.incidents.map((i) => `<tr><td class="mono">${esc(i.id)}<span class="sub">${esc(day(i.ts))}${i.task ? ` · ${esc(i.task)}` : ''}</span></td><td><span class="pill ${i.severity === 'high' ? 'crit' : i.severity === 'medium' ? 'warn' : ''}">${esc(i.type.replace('_', ' '))}</span></td><td>${esc(i.title)}${i.impact ? `<span class="sub">${esc(i.impact)}</span>` : ''}</td><td>${esc(i.detectedBy ?? '—')}</td><td>${esc(i.action ?? '—')}</td><td>${i.lesson ? `<b class="mono">${esc(i.lesson)}</b><span class="sub">${esc(i.lessonTitle ?? '')}</span>` : '—'}</td><td>${i.guarded === null ? '—' : i.guarded ? '<span class="pill ok">in place</span>' : '<span class="pill crit">missing</span>'}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="empty">No incidents recorded.</div>';
+
+  const b = r.budgets;
+  $('budgets').innerHTML = `Budgets: ${esc(b.maxFailedTestRunsInARow ?? '—')} failed test runs in a row, ${esc(b.maxSameCommandFailures ?? '—')} failures of one command, ${esc(b.maxEditsToOneFile ?? '—')} edits to one file, ${esc(b.maxTaskAttempts ?? '—')} attempts per task, $${esc(b.maxSessionCostUSD ?? '—')} per session. When one is reached the session is told to stop, summarise and escalate.`;
+  $('alerts').innerHTML = r.alerts.length ? `<table><thead><tr><th>When</th><th>Session</th><th>Kind</th><th>Rule</th><th>On</th></tr></thead><tbody>${
+    r.alerts.map((a) => `<tr><td class="mono">${esc(when(a.ts))}</td><td>${sessionLink(a.session, null)}</td><td><span class="pill ${a.kind === 'stop-loss' ? 'crit' : 'warn'}">${esc(a.kind)}</span></td><td>${esc(a.rule)}</td><td>${esc(a.key)}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="empty">No budget has been reached.</div>';
+
+  $('performance').innerHTML = r.areas.performance.length ? `<table><thead><tr><th>Session</th><th>Last active</th><th class="num">Commits</th><th class="num">Tasks done</th><th class="num">Time</th><th class="num">Files reworked</th><th class="num">Test runs (failed)</th><th class="num">Failed actions</th><th class="num">Cost</th></tr></thead><tbody>${
+    r.areas.performance.map((p) => `<tr><td>${sessionLink(p.session, p.url)}</td><td class="mono">${esc(when(p.last))}</td><td class="num">${num(p.outcomes)}</td><td class="num">${num(p.tasksDone)}</td><td class="num">${mins(p.touchMinutes)}</td><td class="num">${num(p.rework)}</td><td class="num">${num(p.tests)} (${num(p.testsFailed)})</td><td class="num">${num(p.failures)}</td><td class="num">${usd(p.cost)}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="empty">No sessions recorded yet.</div>';
+
   const maxF = Math.max(1, ...r.prs.map((p) => p.findings.length));
   $('prs').innerHTML = r.prs.length ? r.prs.slice().reverse().map((p) => {
     const c = { h: 0, m: 0, l: 0 }; p.findings.forEach((f) => c[tier(f.severity)]++);
@@ -202,7 +323,7 @@ function render(r) {
   }).join('') : '<div class="empty">No pull request data in this report. Run /control-tower to include it.</div>';
 
   $('sessions').innerHTML = r.sessions.length ? `<table><thead><tr><th>Session</th><th>Last active</th><th class="num">Commits</th><th class="num">Actions</th><th class="num">Failed</th><th class="num">Files edited</th></tr></thead><tbody>${
-    r.sessions.map((s) => `<tr><td>${s.url ? `<a class="mono" href="${safeUrl(s.url)}">${esc(s.id.slice(-8))}</a>` : `<span class="mono">${esc(s.id.slice(-8))}</span>`}</td><td class="mono">${esc(when(s.last))}</td><td class="num">${s.commits}</td><td class="num">${s.tools}</td><td class="num">${s.failures}</td><td class="num">${s.files}</td></tr>`).join('')}</tbody></table>`
+    r.sessions.map((s) => `<tr><td>${s.url ? `<a class="mono" href="${safeUrl(s.url)}">${esc(s.id.slice(-8))}</a>` : `<span class="mono">${esc(s.id.slice(-8))}</span>`}</td><td class="mono">${esc(when(s.last))}</td><td class="num">${s.commits}</td><td class="num">${s.tools}</td><td class="num">${s.failures}</td><td class="num">${s.filesEdited}</td></tr>`).join('')}</tbody></table>`
     : '<div class="empty">No sessions recorded yet.</div>';
 
   $('failures').innerHTML = r.failures.length ? `<table><thead><tr><th>When</th><th>Action</th><th>Failure</th></tr></thead><tbody>${
@@ -212,7 +333,7 @@ function render(r) {
   $('commits').innerHTML = `<table><thead><tr><th>Date</th><th>Commit</th><th>What changed</th></tr></thead><tbody>${
     r.commits.map((c) => `<tr><td class="mono">${esc(day(c.date))}</td><td class="mono"><a href="https://github.com/${esc(r.repo)}/commit/${esc(c.sha)}">${esc(c.sha)}</a></td><td>${esc(c.subject)}</td></tr>`).join('')}</tbody></table>`;
 
-  $('foot').textContent = 'A snapshot, regenerated each time /control-tower runs. Sources: git history, devlog/activity, devlog/lessons.md and the repository\'s pull requests.';
+  $('foot').textContent = 'A snapshot, regenerated each time /control-tower runs. Modelled on the Control Tower in skchiew-bot/d3ngineering. Sources: git history, devlog/activity, devlog/lessons.md, devlog/control-tower.json and the repository\'s pull requests.';
 }
 
 if (REPORT) render(REPORT);

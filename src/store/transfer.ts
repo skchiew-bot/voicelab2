@@ -18,6 +18,8 @@ import { audit } from './audit.js';
 import { normalizeE164 } from './dnc.js';
 import { recordEvent } from './events.js';
 import { addCallbackRequest, getFallbackPlan } from './resilience.js';
+import { scheduleTransferCallback } from './cases.js';
+import { countryZone, numberZone } from '../telephony/countries.js';
 
 export interface TransferDeps { pool: pg.Pool; baseUrl: string }
 export interface TransferSettings { agentNumber: string; ringSeconds: number; whisper: boolean }
@@ -32,12 +34,26 @@ export async function setTransferSettings(c: pg.PoolClient, actorId: string | nu
   if (!agent) throw new AppError(400, 'The agent number must be a full international number, such as +60312345678.');
   if ((await c.query('SELECT 1 FROM phone_numbers WHERE e164 = $1', [agent])).rowCount) throw new AppError(400, 'The agent number is one of our own numbers; a transfer to it would ring back into Voice Lab.');
   if (!(await c.query('SELECT 1 FROM tenants WHERE id = $1', [tenantId])).rowCount) throw new AppError(404, 'Client not found.');
+  const zones = await clientZones(c, tenantId);
+  if (zones.size === 0) throw new AppError(409, 'This client has none of our numbers yet, so there is no country an agent number may be in. Give the client a number first.');
+  const at = numberZone(agent);
+  if (!at) throw new AppError(400, 'Voice Lab does not know which country this agent number is in, so it is refused. Ask for the country to be added.');
+  if (!zones.has(at)) throw new AppError(400, `The agent number must be in a country where this client has one of our numbers (${[...zones].sort().join(', ')}).`);
   await c.query(
     `INSERT INTO transfer_settings (tenant_id, agent_e164, ring_seconds, whisper) VALUES ($1,$2,$3,$4)
      ON CONFLICT (tenant_id) DO UPDATE SET agent_e164 = $2, ring_seconds = $3, whisper = $4, updated_at = now()`,
     [tenantId, agent, s.ringSeconds, s.whisper]);
   await audit(c, actorId, 'transfer.set', 'tenant', tenantId, { ringSeconds: s.ringSeconds, whisper: s.whisper });
   return getTransferSettings(c, tenantId);
+}
+
+/**
+ * The countries a client's agent line may be in: where the client has one of our numbers. A number the table cannot
+ * place counts for nothing, so an unknown country is never allowed by accident.
+ */
+async function clientZones(c: pg.PoolClient, tenantId: string): Promise<Set<string>> {
+  const rows = (await c.query('SELECT DISTINCT country FROM phone_numbers WHERE tenant_id = $1', [tenantId])).rows as { country: string }[];
+  return new Set(rows.map((r) => countryZone(r.country)).filter((z): z is string => z !== null));
 }
 
 export async function getTransferSettings(c: pg.PoolClient, tenantId: string): Promise<TransferSettings | null> {
@@ -61,13 +77,16 @@ export type TransferStep = 'relay-ended' | 'whisper' | 'accept' | 'dialled';
 export const transferUrl = (baseUrl: string, providerId: string, step: TransferStep, callId: string) =>
   `${baseUrl}/webhooks/twilio/${providerId}/transfer/${step}?callId=${callId}`;
 
-type CallRow = { id: string; tenant_id: string; project_id: string | null; provider_id: string; provider_call_id: string | null; direction: string; status: string; from_number_id: string | null; relay_failed: boolean; transfer_status: string | null; transfer_accepted_at: Date | null; transfer_screened: boolean | null };
+type CallRow = { id: string; tenant_id: string; project_id: string | null; provider_id: string; provider_call_id: string | null; direction: string; status: string; from_number_id: string | null; relay_failed: boolean; transfer_status: string | null; transfer_accepted_at: Date | null; transfer_screened: boolean | null; case_id: string | null };
+
+/** How long after hanging up a caller on a case is called back, at the soonest. Inside quiet hours it is later. */
+export const CALLBACK_AFTER_HANGUP_MS = 15 * 60_000;
 
 /** The call, locked, if it is the one the request is for: on this provider, with the Twilio call id it names. */
 async function lockCall(c: pg.PoolClient, providerId: string, callId: string, callSid: string | undefined): Promise<CallRow> {
   const call = (await c.query(
     `SELECT id, tenant_id, project_id, provider_id, provider_call_id, direction, status, from_number_id, relay_failed, transfer_status,
-            transfer_accepted_at, transfer_screened
+            transfer_accepted_at, transfer_screened, case_id
        FROM calls WHERE id = $1 FOR UPDATE`, [callId])).rows[0] as CallRow | undefined;
   if (!call || call.provider_id !== providerId || !callSid || call.provider_call_id !== callSid) throw new AppError(404, 'Unknown call.');
   return call;
@@ -90,6 +109,17 @@ async function ladder(c: pg.PoolClient, call: CallRow, reason: string, record: b
 }
 
 /**
+ * The caller asked for a person and hung up before reaching one. A caller on a case is called back (within the hour, or
+ * at the first moment after the contact's quiet hours); anyone else is left as a callback request for the client, since
+ * we never keep their number. Called once per call, on the step that records the hang-up.
+ */
+async function callerHungUp(c: pg.PoolClient, call: CallRow) {
+  const at = call.case_id ? await scheduleTransferCallback(c, call.case_id, call.id, new Date(Date.now() + CALLBACK_AFTER_HANGUP_MS)) : null;
+  if (at) { await event(c, call, 'transfer.callback_scheduled', { at: at.toISOString() }); return; }
+  await addCallbackRequest(c, { tenantId: call.tenant_id, callId: call.id, reason: 'the caller asked for a person and hung up before reaching one' });
+}
+
+/**
  * The number the agent sees: the one of ours the call is on. An outbound call was dialled from one of ours; an inbound
  * call came in on one of ours (Twilio's `To`), which must be this client's number on this provider. Never the caller's.
  */
@@ -107,6 +137,9 @@ async function dialPlan(c: pg.PoolClient, d: TransferDeps, call: CallRow, params
   const s = await getTransferSettings(c, call.tenant_id);
   const callerId = await ourNumber(c, call, params);
   if (!s || !callerId) return { twiml: null, why: !s ? 'no_agent_number' : 'no_own_number' } as const;
+  // Checked again at the dial: the client may since have given up its numbers in the agent's country.
+  const at = numberZone(s.agentNumber);
+  if (!at || !(await clientZones(c, call.tenant_id)).has(at)) return { twiml: null, why: 'agent_country' } as const;
   return {
     twiml: twimlDialAgent({
       agent: s.agentNumber, callerId, ringSeconds: s.ringSeconds,
@@ -143,7 +176,11 @@ export async function afterRelay(d: TransferDeps, providerId: string, callId: st
     // a caller told they will be called back is not then put through as well.
     if (call.relay_failed) return twimlHangup();
     if (!present) {
-      if (handoff) await event(c, call, 'transfer.not_attempted', { reason: 'caller_gone' });
+      if (handoff) {
+        await c.query(`UPDATE calls SET transfer_status = 'abandoned' WHERE id = $1`, [callId]);
+        await event(c, call, 'transfer.not_attempted', { reason: 'caller_gone' });
+        await callerHungUp(c, call);
+      }
       return twimlHangup();
     }
     if (handoff) {
@@ -222,9 +259,14 @@ export async function afterDial(d: TransferDeps, providerId: string, callId: str
     const present = !GONE.includes(params.CallStatus ?? '');
     if (call.transfer_status === 'dialing') {
       const next = outcome === 'answered' ? 'answered' : present ? outcome : 'abandoned';
-      await c.query('UPDATE calls SET transfer_status = $2 WHERE id = $1', [callId, next]);
+      // The agent's leg is a call of its own at Twilio: its id and length are kept so it is costed and checked with the
+      // caller's (an id, never a number).
+      const leg = next === 'answered' && /^[A-Za-z0-9_]{2,64}$/.test(params.DialCallSid ?? '') ? params.DialCallSid! : null;
+      const secs = next === 'answered' && /^\d{1,6}$/.test(params.DialCallDuration ?? '') ? Number(params.DialCallDuration) : null;
+      await c.query('UPDATE calls SET transfer_status = $2, transfer_leg_sid = $3, transfer_seconds = $4 WHERE id = $1', [callId, next, leg, secs]);
       await event(c, call, `transfer.${next}`, {});
       if (next === 'unanswered' || next === 'failed') return ladder(c, call, 'the caller asked for a person and no one answered', true);
+      if (next === 'abandoned') await callerHungUp(c, call);
       return twimlHangup();
     }
     // A retried request: say the same thing again, without recording the callback twice.

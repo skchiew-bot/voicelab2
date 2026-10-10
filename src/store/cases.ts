@@ -194,6 +194,17 @@ async function scheduleNext(c: pg.PoolClient, cs: { id: string; tenant_id: strin
   return at;
 }
 
+/**
+ * A caller on a case asked for a person and hung up before reaching one: they are called back, at `from` or, inside the
+ * contact's quiet hours, at the first moment after them. Placed like any other callback (through the gate, within its
+ * lateness or not at all). Once per call. Null when the case is not open, so nothing can be scheduled on it.
+ */
+export async function scheduleTransferCallback(c: pg.PoolClient, caseId: string, callId: string, from: Date): Promise<Date | null> {
+  const cs = (await c.query('SELECT id, tenant_id, time_zone, status FROM cases WHERE id = $1', [caseId])).rows[0];
+  if (!cs || cs.status !== 'open') return null;
+  return scheduleNext(c, cs, from, { kind: 'callback', channel: 'voice', dedupeKey: `transfer-callback:${callId}`, note: 'The caller asked for a person and hung up before reaching one.' });
+}
+
 const cancelActions = (c: pg.PoolClient, caseId: string, why: string, keepThanks = false) =>
   c.query(`UPDATE case_actions SET status = 'cancelled', note = $2, updated_at = now() WHERE case_id = $1 AND status IN ('pending', 'leased') AND ($3::boolean IS FALSE OR kind <> 'thanks')`, [caseId, why, keepThanks]);
 

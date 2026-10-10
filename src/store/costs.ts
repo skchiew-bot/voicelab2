@@ -62,8 +62,11 @@ export interface CallCostInput {
   drawCredits?: boolean;
   /** Seconds at the start of the call that are not billed to the client (time spent waiting in the queue). */
   creditSkipSeconds?: number;
-  /** One entry per provider that served part of the call. */
-  usage: { providerId: string; usage: Usage }[];
+  /**
+   * One entry per provider that served part of the call. Credits follow the first telephony entry (the caller's own
+   * call). `direction` prices an entry as another direction than the call (the outbound leg to an agent on an inbound call).
+   */
+  usage: { providerId: string; usage: Usage; direction?: 'inbound' | 'outbound' }[];
 }
 
 interface Line {
@@ -110,7 +113,7 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
     const comps = (await c.query(
       `SELECT component, unit, rate, currency, billing_line FROM charging_components
         WHERE charging_version_id = $1 AND direction IN ('any', $2) ORDER BY id`,
-      [version.id, input.direction],
+      [version.id, item.direction ?? input.direction],
     )).rows;
 
     for (const comp of comps) {

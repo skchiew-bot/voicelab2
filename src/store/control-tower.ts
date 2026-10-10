@@ -20,7 +20,7 @@ interface ProviderRow {
 }
 
 /** Everything the Control Tower shows, in one read. Alerts are derived from this state, not stored. */
-export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicBaseUrlSet: boolean }) {
+export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicBaseUrlSet: boolean; mailConnected?: boolean }) {
   const providers: ProviderRow[] = (await c.query(
     `SELECT p.id, p.name, p.adapter_key, p.kind, p.status, p.params, p.secret_params, p.credentials_checked_at,
             v.id AS version_id, (cc.charging_version_id IS NOT NULL) AS confirmed,
@@ -159,6 +159,11 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   const deferred = (await c.query(`SELECT count(*)::int AS n FROM failover_events WHERE scope = 'telephony' AND trigger = 'capacity' AND coalesce(detail->>'reason', '') NOT IN ('pace', 'drained') AND at > now() - interval '1 hour'`)).rows[0].n as number;
   if (deferred > 0) add('medium', 'dials_deferred', `${deferred} outbound dial${deferred === 1 ? ' was' : 's were'} held back in the last hour because every provider was at its concurrency limit.`, '#/numbers');
 
+  // People expect alerts by email; with no mail service connected none reach them. Say so where they will look.
+  if (ctx.mailConnected === false) {
+    const subs = (await c.query('SELECT count(*)::int AS n FROM alert_subscriptions WHERE ended_at IS NULL')).rows[0].n as number;
+    if (subs > 0) add('medium', 'email_not_connected', `${subs} ${subs === 1 ? 'person is' : 'people are'} subscribed to alerts by email, but no mail service is connected, so no email is being sent.`, '#/tower');
+  }
   alerts.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
   return {
     generatedAt: new Date().toISOString(), alerts, activeCalls, activeTotal, blocked24h, providers: providerViews, funding,

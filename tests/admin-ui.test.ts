@@ -1044,6 +1044,24 @@ describe.skipIf(!run)('admin UI', () => {
     await page.close();
   }, 30_000);
 
+  it('subscribes a member of staff to alerts by email, and shows that no mail service is connected', async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 1000 } });
+    await signIn(page, env.staffToken);
+    const card = page.getByLabel('Email alerts');
+    await card.getByLabel('Person').selectOption({ label: 'staff@daythree.test' });
+    await card.getByLabel('Which alerts').selectOption('medium');
+    await card.getByRole('button', { name: 'Get alerts by email' }).click();
+    await expect(card.getByLabel('Subscribers')).toContainText('staff@daythree.test');
+    await expect(card.getByLabel('Subscribers')).toContainText('medium and high');
+    await card.getByRole('button', { name: 'Send a test' }).click();
+    await card.getByText('Recent emails').click();
+    await expect(card.getByLabel('Recent emails')).toContainText('not sent: no mail service');     // nothing is connected in these tests
+    await page.reload();
+    await expect(page.getByLabel('Needs attention')).toContainText('no mail service is connected');
+    expect((await env.call(env.staffToken, 'POST', `/internal/alerts/subscriptions/${(await env.call(env.staffToken, 'GET', '/internal/alerts/subscriptions')).json()[0].userId}/end`)).statusCode).toBe(200);
+    await page.close();
+  });
+
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();
     await signIn(page, env.staffToken);

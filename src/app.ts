@@ -29,6 +29,7 @@ import type { HttpDeps } from './workflows/integrations.js';
 import { controlTower } from './store/control-tower.js';
 import { changeLog, changeLogQuery } from './store/change-log.js';
 import { controlTowerPanels } from './store/panels.js';
+import { listDeliveries, listSubscriptions, sendTest, subscribe, subscriptionSchema, sweepAlerts, unsubscribe } from './store/alerts.js';
 import { actionSchema, controlState, runAction } from './store/control-actions.js';
 import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
 import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
@@ -57,6 +58,8 @@ export interface Deps {
   learning?: Omit<import('./store/learning.js').LearnDeps, 'pool'>;
   /** Where to find a number to dial at the moment of a case call, and how to reach a client's payment system. Neither is connected to a live system yet. */
   cases?: Omit<import('./store/cases.js').CaseDeps, 'calls'>;
+  /** Sends Control Tower alerts by email. None is connected until the owner picks a mail service. */
+  mailer?: import('./store/alerts.js').Mailer;
 }
 
 export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): FastifyInstance {
@@ -425,12 +428,27 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   // ------------------------------------------------- control tower
   app.get('/internal/control-tower', async (req) => {
     const s = await internal(req);
-    return withActor(pool, s.actor, (c) => controlTower(c, key, { publicBaseUrlSet: Boolean(callDeps.baseUrl) }));
+    return withActor(pool, s.actor, (c) => controlTower(c, key, { publicBaseUrlSet: Boolean(callDeps.baseUrl), mailConnected: Boolean(deps.mailer) }));
   });
   app.get('/internal/control-tower/panels', async (req) => {
     const s = await internal(req);
     return withActor(pool, s.actor, (c) => controlTowerPanels(c, (panel, err) => req.log.warn({ panel, err: err instanceof Error ? err.name : 'error' }, 'a Control Tower panel could not be worked out')));
   });
+  // ------------------------------------------------- alerts by email
+  const alertDeps = { pool, key, publicBaseUrl: callDeps.baseUrl || undefined, mailer: deps.mailer };
+  app.post('/internal/alerts/sweep', async (req) => { await internal(req); return sweepAlerts(alertDeps); });
+  app.get('/internal/alerts/subscriptions', async (req) => { const s = await internal(req); return withActor(pool, s.actor, (c) => listSubscriptions(c)); });
+  app.put('/internal/alerts/subscriptions', async (req) => { const s = await admin(req); const b = subscriptionSchema.parse(req.body); return withActor(pool, s.actor, (c) => subscribe(c, s.userId, b)); });
+  app.post('/internal/alerts/subscriptions/:userId/end', async (req) => {
+    const s = await admin(req); const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
+    return withActor(pool, s.actor, (c) => unsubscribe(c, s.userId, userId));
+  });
+  app.post('/internal/alerts/subscriptions/:userId/test', async (req) => {
+    const s = await admin(req); const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
+    return sendTest(alertDeps, s.userId, userId);
+  });
+  app.get('/internal/alerts/deliveries', async (req) => { const s = await internal(req); return withActor(pool, s.actor, (c) => listDeliveries(c)); });
+
   app.get('/internal/control-tower/controls', async (req) => {
     const s = await internal(req);
     return withActor(pool, s.actor, (c) => controlState(c));

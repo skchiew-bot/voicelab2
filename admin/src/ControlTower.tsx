@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { api, type Panels, type PhaseProgress, type Progress, type Tower } from './api';
 import { TowerPanels } from './TowerPanels';
 import { TowerActions } from './TowerActions';
+import { EmailAlerts } from './EmailAlerts';
 import { Errors, fmtDate, fmtDecimal, useLoad } from './ui';
 
 const SEVERITY = { high: 'badge bad', medium: 'badge warn', low: 'badge' } as const;
@@ -79,7 +80,7 @@ export function ControlTower() {
           : <ul className="alerts">{t.alerts.map((a, i) => (
               <li key={`${a.code}-${i}`}><span className={SEVERITY[a.severity]}>{a.severity}</span> {a.link ? <a href={a.link}>{a.message}</a> : a.message}</li>
             ))}</ul>)}
-        <p className="muted">Alerts appear in this console only for now.</p>
+        <p className="muted">Alerts appear here, and by email to the people listed under Email alerts below.</p>
       </section>
 
       <TowerActions onDone={() => { tower.reload(); panels.reload(); }} />
@@ -173,6 +174,7 @@ export function ControlTower() {
       {panels.error && panels.data && <div className="errors" role="alert">The panels below could not be refreshed, so they show figures from {new Date(panels.data.generatedAt).toLocaleTimeString()}.</div>}
       {panels.error && !panels.data && <Errors error={panels.error} />}
       {panels.data && <TowerPanels p={panels.data} />}
+      <EmailAlerts />
       <p className="muted"><a href="#/change-log">Change log</a>: every change made, who made it and why.</p>
     </>
   );

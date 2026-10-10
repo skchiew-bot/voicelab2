@@ -51,6 +51,7 @@ Each is a `POST` to the app with the scheduler's staff token. Suggested cadence;
 
 | Job | Endpoint | Every |
 | --- | --- | --- |
+| Email new Control Tower alerts | `/internal/alerts/sweep` | 1 minute |
 | Place due case callbacks | `/internal/cases/dispatch` | 1 minute |
 | Give up waiting callers | `/internal/queue/expire` | 1 minute |
 | Flag dropped calls | `/internal/faults/sweep` | 5 minutes |
@@ -85,3 +86,4 @@ Each is a `POST` to the app with the scheduler's staff token. Suggested cadence;
 - Cloud: AWS `ap-southeast-5` (recommended) or wait for Azure Malaysia West to be confirmed for PostgreSQL.
 - Who owns the AWS account and the domain.
 - Backup retention and who may restore.
+- The mail service that sends alert emails (for example Amazon SES in the same region). Voice Lab takes it as an injected sender; none is wired in yet.

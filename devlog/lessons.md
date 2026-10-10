@@ -21,6 +21,8 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/learning.test.ts` › "records the audio once when two finishes arrive together"
   - `tests/cases.test.ts` › "holds every dial to a contact's limits even when they arrive together, or in one dispatcher batch"
   - `tests/cases.test.ts` › "does not call a case that was closed while its number was being looked up"
+  - `tests/knowledge.test.ts` › "approves each level once and in order when three people approve at the same moment, and publishes a draft once"
+  - `tests/control-actions.test.ts` › "holds dials back once the minute's quota is used, even when they arrive at the same moment, and lifts when cleared"
 
 ### L-002: Never repeat an action whose outcome is unknown
 - **Seen:** The dial retry re-dialled after a timeout, risking two calls to one person ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)).
@@ -108,6 +110,7 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** Every live screen shows when its data is from, says so when an update fails, and lets the newest request win.
 - **Guards:**
   - `tests/admin-ui.test.ts` › "says so when a refresh fails, instead of showing old numbers as current"
+  - `tests/admin-ui.test.ts` › "never mixes an old filter's late answer into the change log"
 
 ### L-012: One blip is not a failure, and one good sign is not a recovery
 - **Seen:** One error on the bridge message dropped a healthy provider. Recovery time was counted from the failure, not across the run of good attempts ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)).

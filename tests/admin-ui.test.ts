@@ -1026,6 +1026,24 @@ describe.skipIf(!run)('admin UI', () => {
     await page.close();
   });
 
+  it('never mixes an old filter\'s late answer into the change log', async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 1000 } });
+    await signIn(page, env.staffToken);
+    // The "Money and rates" answer is held back until after the filter has moved on to "Every change".
+    let release!: () => void; const held = new Promise<void>((r) => { release = r; });
+    await page.route(/change-log\?.*category=money/, async (route) => { await held; await route.continue(); });
+    await page.goto(`${base}#/change-log`);
+    await expect(page.getByLabel('Changes')).toContainText('policy.propose');
+    await page.getByLabel('Show').selectOption({ label: 'Money and rates' });
+    await page.getByLabel('Show').selectOption({ label: 'Every change' });
+    await expect(page.getByLabel('Changes')).toContainText('policy.propose');
+    release();
+    await page.waitForTimeout(500);                                                         // let the late answer arrive
+    await expect(page.getByLabel('Show')).toHaveValue('');
+    await expect(page.getByLabel('Changes')).toContainText('policy.propose');            // still every change, not the late money page
+    await page.close();
+  }, 30_000);
+
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();
     await signIn(page, env.staffToken);

@@ -171,3 +171,14 @@ export interface PromotionFinancial {
   perUse: { liveBefore: { chars: number; costUsd: string | null }; afterPromotion: { chars: number; costUsd: string | null }; saved: { chars: number; costUsd: string | null } };
   oneTime: { chars: number; costUsd: string | null; note: string }; breakEvenUses: number | null; usesWhilePromoted: number; realisedSavingUsd: string | null; ratesConfirmed: boolean | null; note: string;
 }
+
+export interface CaseRow { id: string; case_ref: string; contact_ref: string | null; status: 'open' | 'decision_required' | 'closed'; currency: string; opening_balance: string; paid_total: string; treatment: number; needs_human: boolean; opened_at: string; close_reason: string | null; pending_actions: number }
+export interface CaseView {
+  id: string; caseRef: string; status: CaseRow['status']; closeReason: string | null; needsHuman: boolean; currency: string; timeZone: string; balance: string; openingBalance: string; paidTotal: string;
+  treatment: { level: number; name: string }; readBack: string;
+  promises: { id: string; amount: string; due_on: string; status: string }[];
+  actions: { id: string; kind: string; channel: string; scheduled_for: string; status: string; attempt: number; note: string | null }[];
+  events: { id: number; kind: string; detail: Record<string, unknown>; at: string }[];
+  bestTimes: { dow: number; hour: number; answered: number; tried: number }[];
+}
+export interface CasesSummary { open: number; decisionRequired: number; needsHuman: number; missedOrUnknown: number }

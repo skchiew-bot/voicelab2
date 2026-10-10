@@ -130,8 +130,19 @@ export const PHASES: PhaseProgress[] = [
     ],
   },
   {
-    id: '7', name: 'Business Modules', status: 'not_started', summary: 'Self-contained modules that each plug into the shared backbone: case management, appointments, knowledge base and policy.',
-    criteria: [], open: [],
+    id: '7', name: 'Business Modules', status: 'in_progress', summary: "Self-contained modules that each plug into the shared backbone. Closed-loop case management is built and tested against fakes: callbacks locked to a time and placed then, promise-to-pay tracked through a payment-status integration, reminders and thanks, retry and channel rotation, reachability learning, treatment after a broken promise, balance recalculation, case ageing, inbound recognition, and quiet hours and contact limits on every dial. Appointments and the knowledge base and policy module are not started.",
+    criteria: [], open: [
+      'Appointments (diaries, field visits, cascading delays, notifications, cancellation policy) are not started',
+      'The knowledge base and policy module is not started',
+      'Case management has been tested only against fakes: the lookup of a number to dial at the moment of a call, and the client\'s payment-status system, are stand-ins; no client system is connected',
+      'Messages on other channels (WhatsApp, SMS, email) are not sent by the platform: they are queued for the client\'s own sender (`/internal/tenants/:id/case-outbox`)',
+      'The dispatcher (`POST /internal/cases/dispatch`), the payment check and the ageing sweep must be run on a schedule by the deployment; callbacks are placed within the agreed lateness of their time only if the dispatcher runs at least that often',
+      'Promises are recorded through the API; a workflow does not yet record one from what a caller says on a call',
+      'Quiet hours and contact limits apply to every dial only for a client with a contact policy; a client without one has no limits. The daily and weekly limits are rolling 24 hours and 7 days, not calendar days in the contact\'s zone',
+      'It is assumed, not checked against a real system, that the client\'s payment-status integration reports the total paid since the case was opened, as an exact decimal string; a total that goes down is ignored and logged each time it is seen',
+      'The keyed hash of every inbound caller\'s number is now kept on the call, whether or not they have a case',
+      'A case or contact reference containing a run of eight or more digits is refused because it looks like a phone number, which also refuses some genuine references',
+    ],
   },
   {
     id: 'CT', name: 'Control Tower', status: 'in_progress', summary: 'One internal console to see and steer the whole platform. Version 1 shows project progress, what needs attention, live calls, provider health, funding and cost.',

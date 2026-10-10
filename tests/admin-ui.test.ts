@@ -71,7 +71,7 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(p1.getByText('Inbound and outbound test calls work on both Twilio and Telnyx.')).toBeVisible();
     await expect(p1).toContainText('tested against fakes, not the real provider');
     await expect(p1).toContainText('Still open');
-    await expect(page.getByLabel('Phase 7')).toContainText('Not started');
+    await expect(page.getByLabel('Phase 7')).toContainText('In progress');
     await expect(page.getByLabel('Control Tower', { exact: true }).first()).toBeVisible();
     await expect(page.getByLabel('Applies to every phase')).toContainText('configured model tier');
     await progress.getByText('10 open decisions').click();
@@ -422,7 +422,7 @@ describe.skipIf(!run)('admin UI', () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
     await signIn(page, env.staffToken);
     await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
-    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience', 'tickets', 'qa', 'changes', 'learning']) {
+    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience', 'tickets', 'qa', 'changes', 'learning', 'cases']) {
       await page.goto(`${base}#/${route}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
@@ -777,6 +777,49 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(live).toContainText('Demoted (live again)');
     await waiting.getByRole('button', { name: 'Turn down' }).click();
     await expect(waiting).toContainText('Turned down');
+    await page.close();
+  }, 60_000);
+
+  it('opens a case, records a promise, locks a callback and decides on an aged case, from the console', async () => {
+    const tenant = (await env.call(env.staffToken, 'POST', '/internal/tenants', { name: 'Cases UI Co' })).json().id as string;
+    const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
+    await signIn(page, env.staffToken);
+    await page.goto(`${base}#/cases`);
+    await page.getByLabel('Client').selectOption({ label: 'Cases UI Co' });
+    const form = page.getByLabel('Open a case');
+    await form.getByLabel(/^Case reference/).fill('UI-1');
+    await form.getByLabel(/^Phone number/).fill('+60123450999');
+    await form.getByLabel(/^Opening balance/).fill('250.50');
+    await form.getByRole('button', { name: 'Open case' }).click();
+    const list = page.getByLabel('Cases list');
+    await expect(list).toContainText('UI-1');
+    await expect(list).toContainText('250.5');
+    await list.getByRole('button', { name: 'Open' }).click();
+    const detail = page.getByRole('region', { name: 'Case', exact: true });
+    await expect(detail).toContainText('The balance now is 250.50 MYR.');
+    const due = new Date(Date.now() + 5 * 86_400_000).toISOString().slice(0, 10);
+    await detail.getByLabel(/^Promise amount/).fill('100');
+    await detail.getByLabel(/^Due on/).fill(due);
+    await detail.getByRole('button', { name: 'Record promise' }).click();
+    await expect(detail).toContainText(`100 MYR by ${due}`);
+    await expect(detail).toContainText('promise recorded');
+    await detail.getByLabel(/^Promise amount/).fill('50');
+    await detail.getByRole('button', { name: 'Record promise' }).click();
+    await expect(detail).toContainText('open promise');            // a second promise is refused, and the page says why
+    // an aged case waits for a decision
+    await env.pool.query(`UPDATE cases SET status = 'decision_required' WHERE case_ref = 'UI-1'`);
+    await detail.getByRole('button', { name: 'Hide' }).isVisible().catch(() => undefined);
+    await page.reload();
+    await page.getByLabel('Client').selectOption({ label: 'Cases UI Co' });
+    await page.getByLabel('Cases list').getByRole('button', { name: 'Open' }).click();
+    const aged = page.getByRole('region', { name: 'Case', exact: true });
+    await expect(aged).toContainText('Needs a decision');
+    await expect(aged.getByRole('button', { name: 'Carry on' })).toBeDisabled();      // a reason is needed
+    await aged.getByLabel(/^Why/).fill('Customer asked for time.');
+    await aged.getByRole('button', { name: 'Carry on' }).click();
+    await expect(aged).toContainText('decision');
+    await expect(page.getByLabel('Cases list')).toContainText('Open');
+    void tenant;
     await page.close();
   }, 60_000);
 

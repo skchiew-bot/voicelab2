@@ -25,7 +25,7 @@ export function structureOf(def: WorkflowDefinition): Json {
       target: n.type === 'handoff' ? (n.target as unknown as Json) : null,
     };
   }
-  return { start: def.start, nodes };
+  return { start: def.start, nodes, intentRoutes: ((def as { intentRoutes?: unknown }).intentRoutes as Json) ?? [] };
 }
 
 export type Change = 'none' | 'minor' | 'major';

@@ -9,7 +9,7 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:** one or more lines `` `path` › "exact text" ``. The text must appear in that file, usually a test title. The test fails if a guard's file or text is removed, so a lesson cannot quietly lose its protection.
 
 ### L-001: Check-then-act needs a lock or an atomic claim
-- **Seen:** 6 times. Racing final callbacks ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)); two reconciliation checks at once ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)); two replies both firing an integration write ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)); the dial retry bypassing the capacity lock, and inbound capacity decided without it ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)); concurrent rate changes (Phase 0).
+- **Seen:** 6 times. Racing final callbacks ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)); two reconciliation checks at once ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)); two replies both firing an integration write ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)); the dial retry bypassing the capacity lock, and inbound capacity decided without it ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)); concurrent rate changes (Phase 0). Two approved changes to one flow could both go live, the older silently undoing the newer; the drop watchdog could flag a call twice (Phase 5 independent review, 2026-10-10).
 - **Rule:** Any "read state, decide, write" path that two requests can reach at once takes a lock (`pg_advisory_xact_lock`, `SELECT … FOR UPDATE`) or claims the work atomically, and re-checks inside the lock. Write the simultaneous-requests test first.
 - **Guards:**
   - `tests/telephony.test.ts` › "survives the same final callback arriving three times at once"
@@ -17,6 +17,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/workflow-store-hardening.test.ts` › "two simultaneous replies cannot both reach the next step"
   - `tests/concurrency.test.ts` › "never exceeds the ceiling when dials arrive at the same moment"
   - `tests/concurrency.test.ts` › "counts a caller on hold against the provider"
+  - `tests/changes.test.ts` › "is refused, so approving one change never silently undoes another"
 
 ### L-002: Never repeat an action whose outcome is unknown
 - **Seen:** The dial retry re-dialled after a timeout, risking two calls to one person ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)).
@@ -25,12 +26,13 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/concurrency.test.ts` › "does not dial again after a timeout or an unreadable reply"
 
 ### L-003: Look up data-defined names as own properties only
-- **Seen:** Workflow names such as `constructor`, `toString` and `__proto__` passed validation, rendering, conditions and reply paths ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)).
+- **Seen:** Workflow names such as `constructor`, `toString` and `__proto__` passed validation, rendering, conditions and reply paths ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). A client's lexicon topic named like an inherited property (`toString`) broke turn reading (Phase 5 independent review, 2026-10-10).
 - **Rule:** Never use `in` or `obj[name]` on names that come from data. Use `own()`, and reject reserved names.
 - **Guards:**
   - `tests/workflow-hardening.test.ts` › "reserved names cannot be used for nodes, variables, captures or stored values"
   - `tests/workflow-hardening.test.ts` › "a missing variable named like an inherited property is still missing"
   - `tests/workflow-hardening.test.ts` › "does not reach inherited properties"
+  - `tests/tracker.test.ts` › "lets a client name a topic like an inherited property without breaking the reading"
 
 ### L-004: Money never passes through a JavaScript number, including on screen
 - **Seen:** 2 times. The funding monitor compared balances as floats ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). The console still showed balances and credits with `Number(…).toLocaleString()` on three screens, found by the dev Control Tower check on 2026-10-09.
@@ -40,13 +42,16 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "keeps money out of floating point in the console"
 
 ### L-005: Something that never happened gets no status as if it had
-- **Seen:** 4 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10).
+- **Seen:** 4 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10). A call never answered was recorded as a customer hang-up or a system drop; a QA run with nothing scored was stored as 0; a later normal end cleared a fault already flagged (Phase 5 independent review, 2026-10-10).
 - **Rule:** Give "never started" or "unknown" its own state (such as `not_applicable`, or `null` rather than 0) and keep it out of failure counts, alerts, retries and anything that recommends an action.
 - **Guards:**
   - `tests/phase3.test.ts` › "will not lock a DID because of a call that never went out"
   - `tests/phase3.test.ts` › "does not count a refused dial as the provider failing"
   - `tests/reconcile.test.ts` › "skips calls that never connected"
   - `tests/devlog.test.ts` › "runs no audit and flags nothing when the trunk cannot be found"
+  - `tests/journey.test.ts` › "does not call a call that was never answered a hang-up or a drop"
+  - `tests/journey.test.ts` › "keeps a fault the watchdog found, with the time it was first seen, when the call then ends in a way that looks fine"
+  - `tests/qa.test.ts` › "stores no score at all when nothing could be scored, and scores the call once a model is connected"
 
 ### L-006: One bad record must not take a whole feature down
 - **Seen:** 3 times. One unreadable secret returned a 500 for the whole Control Tower ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). One provider priced in a currency with no exchange rate made every pooled dial fail ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). A very large number gave a 500 instead of a 400 ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)).
@@ -55,6 +60,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/control-tower.test.ts` › "is reported as an alert and does not take the whole Control Tower down"
   - `tests/phase3.test.ts` › "ranks a provider priced in a currency with no exchange rate last instead of failing every dial"
   - `tests/reconcile.test.ts` › "are refused with a clear error, not a server error"
+  - `tests/qa.test.ts` › "keeps scoring the rest of a batch when the model fails on one call, and tries the failed one again next time"
 
 ### L-007: Bill only for what was served
 - **Seen:** A caller who hung up in the queue was charged credits, and a served caller was billed for their time on hold. A promoted caller lost their agreed premium ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)).
@@ -153,13 +159,14 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "folds the board, splits a session's cost between its tasks exactly, links incidents to guarded lessons, and finds logging gaps"
 
 ### L-021: A guardrail that fires on normal work is worse than none
-- **Seen:** The first stop-loss rules told Claude to stop after three unrelated commands that shared a description, a `grep` that mentioned `vitest`, a large file read in chunks, and test runs broken on purpose to prove a test can fail (independent review, 2026-10-10).
+- **Seen:** The first stop-loss rules told Claude to stop after three unrelated commands that shared a description, a `grep` that mentioned `vitest`, a large file read in chunks, and test runs broken on purpose to prove a test can fail (independent review, 2026-10-10). The Phase 5 turn reader treated a plain "no" and "no, thank you" as upset, so two declined questions handed a call to a person; the drop watchdog treated a reply still being worked on as dropped (Phase 5 independent review, 2026-10-10).
 - **Rule:** Before a guardrail can stop work, test it against normal work as well as the failure it targets: count consecutive failures of the same thing, reset on success, and give deliberate exceptions a way through (`DEVLOG_EXPECT_RED=1`).
 - **Guards:**
   - `tests/devlog.test.ts` › "does not count test runs expected to fail, or commands that only mention a test runner"
   - `tests/devlog.test.ts` › "counts the same command failing, not different commands that share a description"
   - `tests/devlog.test.ts` › "but not about reading it in chunks"
   - `tests/devlog.test.ts` › "counts only successful edits since the last passing check"
+  - `tests/tracker.test.ts` › "reads a plain "no" or "no, thank you" as neutral or kind, and two declined questions do not hand the call to a person"
 
 ### L-022: Compare times as times, not as text
 - **Seen:** The report compared git commit dates written with a +08:00 offset against UTC log timestamps as strings, so logging gaps, audit completeness and session times were wrong for anyone outside UTC (independent review, 2026-10-10).

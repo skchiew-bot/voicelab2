@@ -79,6 +79,20 @@ export function validateDefinition(input: unknown): ValidationResult {
     else def.sensitiveVariables.forEach((v) => sensitive.add(v));
   }
   const edges = new Map<string, string[]>();
+  // Re-routes on a change of intent are edges too: a node only reached that way is still reachable.
+  const reroutes: string[] = [];
+  if (def.intentRoutes !== undefined) {
+    const kinds = ['inquiry', 'complaint', 'request', 'other'];
+    if (!Array.isArray(def.intentRoutes) || def.intentRoutes.length > 20) err('bad_intent_routes', '"intentRoutes" must be a list of at most 20 routes.');
+    else (def.intentRoutes as unknown[]).forEach((r, i) => {
+      if (!isObj(r) || !isObj(r.when) || typeof r.to !== 'string') { err('bad_intent_routes', `Intent route ${i + 1} needs a "when" and a "to".`); return; }
+      const w = r.when as Record<string, unknown>;
+      if (w.kind === undefined && w.topic === undefined) err('bad_intent_routes', `Intent route ${i + 1} must say a kind or a topic.`);
+      if (w.kind !== undefined && !kinds.includes(w.kind as string)) err('bad_intent_routes', `Intent route ${i + 1}: kind must be one of ${kinds.join(', ')}.`);
+      if (w.topic !== undefined && !isName(w.topic)) err('bad_intent_routes', `Intent route ${i + 1}: topic must be a name.`);
+      reroutes.push(r.to);
+    });
+  }
 
   for (const id of ids) {
     const raw = (def.nodes as Record<string, unknown>)[id];
@@ -187,8 +201,10 @@ export function validateDefinition(input: unknown): ValidationResult {
   for (const [id, targets] of edges) {
     for (const t of targets) if (!own(def.nodes as object, t)) err('unknown_target', `Goes to "${t}", which does not exist.`, id);
   }
+  for (const t of reroutes) if (!own(def.nodes as object, t)) err('unknown_target', `An intent route goes to "${t}", which does not exist.`);
   if (typeof def.start === 'string' && own(def.nodes as object, def.start)) {
-    const seen = new Set<string>([def.start]); const queue = [def.start];
+    // Anything an intent route points at can be reached from any node, so those start the search too.
+    const seen = new Set<string>([def.start, ...reroutes.filter((t) => own(def.nodes as object, t))]); const queue = [...seen];
     while (queue.length) for (const t of edges.get(queue.shift()!) ?? []) if (own(def.nodes as object, t) && !seen.has(t)) { seen.add(t); queue.push(t); }
     for (const id of ids) if (!seen.has(id)) err('unreachable_node', `Nothing leads to "${id}", so it can never run.`, id);
   }

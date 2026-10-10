@@ -117,7 +117,7 @@ export function Calls() {
               <td>{fmtDate(c.started_at)}</td><td>{c.direction}</td><td>{c.status}</td>
               <td>{c.duration_seconds ? `${fmtDecimal(c.duration_seconds)}s` : '—'}</td>
               <td><span className={COST_STATE[c.cost_status]?.cls ?? 'badge'}>{COST_STATE[c.cost_status]?.text ?? c.cost_status}</span></td>
-              <td><button className="link" onClick={() => setOpen(c.id)}>Details</button></td>
+              <td><button className="link" onClick={() => setOpen(c.id)}>Details</button> <a href={`#/replay/call/${c.id}`}>Replay</a></td>
             </tr>
           ))}</tbody>
         </table>

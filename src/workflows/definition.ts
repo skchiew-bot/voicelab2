@@ -52,8 +52,13 @@ export interface EndNode extends Common { type: 'end'; outcome: string }
 
 export type WorkflowNode = SpeakNode | ApiNode | SubflowNode | HandoffNode | EndNode;
 
+/** When the caller's kind of moment or topic changes to this, the call goes to this node instead of following the node's own transitions. */
+export interface IntentRoute { when: { kind?: 'inquiry' | 'complaint' | 'request' | 'other'; topic?: string }; to: string }
+
 export interface WorkflowDefinition {
   start: string;
+  /** Re-routing on a change of intent, checked after each caller turn. The first that matches is taken. */
+  intentRoutes?: IntentRoute[];
   /** Variables the caller of this workflow must supply (contact details, balances, and so on). */
   variables?: string[];
   /** Variables that must never be spoken, sent to an integration or recorded in steps, and are wiped when the call ends. */

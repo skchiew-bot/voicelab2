@@ -1,7 +1,8 @@
 import { redactNumbers } from '../telephony/types.js';
 import { evalCondition, type Vars } from './conditions.js';
 import { own, RESERVED_NAMES, SLOT_RE, type ApiNode, type Json, type SpeakNode, type WorkflowDefinition, type WorkflowNode } from './definition.js';
-import { interpretReply } from './interpret.js';
+import { interpretDetail } from './interpret.js';
+import { analyseTurn, intentChanged, observeTurn, type JourneyConfig, type JourneyState } from '../journey/tracker.js';
 import { planSpeech, synthOnly, type RecordingIndex, type SpeechPlan } from './stitch.js';
 import { MissingVariable, pickText, renderText, SensitiveVariable } from './render.js';
 
@@ -24,9 +25,30 @@ export interface RunState {
   /** Steps taken over the whole call, and integration calls made: both capped so a loop cannot run up cost. */
   steps: number;
   apiCalls?: number;
+  /** Turn-by-turn reading of the caller (kind, topic, sentiment), kept so the call can re-route and escalate. */
+  journey?: JourneyState;
+  /** Why the call was passed to a person, when it was escalated rather than handed over by the flow. */
+  escalation?: { trigger: string; detail: string; node: string };
 }
 
-export interface StepRecord { type: string; workflow: string; node?: string; payload: Record<string, Json> }
+export interface StepRecord {
+  type: string; workflow: string; node?: string; payload: Record<string, Json>;
+  /** When it happened (ISO time), stamped as the record is made, so a replay can show how long each step took. */
+  at?: string;
+}
+
+/** A list of records that stamps each one with the time it was made. */
+function stampedRecords(deps: { now?: () => Date }): StepRecord[] {
+  const records: StepRecord[] = [];
+  const push = records.push.bind(records);
+  records.push = (...items: StepRecord[]) => { for (const r of items) r.at ??= (deps.now ? deps.now() : new Date()).toISOString(); return push(...items); };
+  return records;
+}
+
+/** What a model that writes a line can report about it, for the audit trail. A plain string is also accepted. */
+export interface SpeakerResult {
+  text: string; model?: string; reasoning?: string; policy?: string; inputTokens?: number; outputTokens?: number; confidence?: number;
+}
 
 export interface IntegrationCall { method: 'GET' | 'POST'; path: string; body?: Json }
 export interface Deps {
@@ -36,13 +58,17 @@ export interface Deps {
   /** Pre-recorded audio to play where the words match. Without one every line is spoken live (the unstitched baseline). */
   recordings?: RecordingIndex;
   /** Writes a dynamic node's line. Without one, a dynamic node speaks its fallback text. */
-  speaker?: { generate(node: SpeakNode, vars: Vars, lang: string | undefined): Promise<string> };
+  speaker?: { generate(node: SpeakNode, vars: Vars, lang: string | undefined): Promise<string | SpeakerResult> };
   /** Steps allowed in one request (one start or one reply). */
   maxSteps?: number;
   /** Steps allowed over the whole call. */
   maxTotalSteps?: number;
   maxApiCalls?: number;
   maxDepth?: number;
+  /** The clock, so records can be stamped with a time a test controls. */
+  now?: () => Date;
+  /** Read each caller turn; re-route on a change of intent and escalate to a person on failed recoveries or severe sentiment. */
+  journey?: JourneyConfig;
 }
 
 export const DEFAULT_MAX_STEPS = 200;
@@ -89,14 +115,60 @@ function fail(state: RunState, out: StepRecord[], message: string, node?: string
   out.push({ type: 'error', workflow: state.workflow, node, payload: { message } });
 }
 
+/**
+ * What a model wrote is not trusted as it stands. It is turned down if it is empty, still has an unfilled {{slot}},
+ * runs on beyond a spoken line, or contains something that looks like a phone number (a model could invent or repeat
+ * one, and those are never spoken). Stray whitespace is tidied, and the line is marked as reworked.
+ */
+export function checkModelLine(raw: string): { decision: 'proceeded' | 'rejected' | 'reworked'; line?: string; reason: string } {
+  const tidy = raw.replace(/\s+/g, ' ').trim();
+  if (tidy === '') return { decision: 'rejected', reason: 'The model wrote nothing.' };
+  if (/\{\{|\}\}/.test(tidy)) return { decision: 'rejected', reason: 'The line still had an unfilled placeholder.' };
+  if (tidy.length > 600) return { decision: 'rejected', reason: 'The line was too long to be spoken in one go.' };
+  if (redactNumbers(tidy) !== tidy) return { decision: 'rejected', reason: 'The line contained something that looks like a phone number.' };
+  return tidy === raw ? { decision: 'proceeded', line: tidy, reason: 'The line passed the checks.' } : { decision: 'reworked', line: tidy, reason: 'Extra spaces and line breaks were tidied.' };
+}
+
+/** What is kept of a model's account of its own line. Numbers in free text are scrubbed like any other. */
+function aiInfo(g: SpeakerResult): Record<string, Json> {
+  const out: Record<string, Json> = {};
+  if (g.model) out.model = g.model;
+  if (g.reasoning) out.reasoning = redactNumbers(g.reasoning).slice(0, 1000);
+  if (g.policy) out.policy = redactNumbers(g.policy).slice(0, 500);
+  if (g.inputTokens !== undefined) out.inputTokens = g.inputTokens;
+  if (g.outputTokens !== undefined) out.outputTokens = g.outputTokens;
+  if (g.confidence !== undefined) out.confidence = g.confidence;
+  return out;
+}
+
+/** The call goes to a person: the flow's own handoff, or an escalation. Control does not come back. */
+function endWithHuman(state: RunState, out: StepRecord[], node: string, reason: string): void {
+  const wf = state.workflow;
+  out.push({ type: 'handoff_human', workflow: wf, node, payload: { reason } });
+  state.status = 'ended'; state.outcome = 'handoff_human'; state.node = null; state.stack = []; state.awaiting = undefined; scrub(state);
+  out.push({ type: 'end', workflow: wf, payload: { outcome: 'handoff_human', reason } });
+}
+
 function withoutSensitive(state: RunState): Vars {
   return Object.fromEntries(Object.entries(state.vars).filter(([k]) => !state.sensitive.includes(k)));
 }
 
 function route(node: WorkflowNode, vars: Vars): string | null {
+  return routeWhy(node, vars).to;
+}
+
+/** Where the call goes next, and which rule sent it there: the first transition whose condition holds. */
+function routeWhy(node: WorkflowNode, vars: Vars): { to: string | null; via: string } {
   const ts = (node as { transitions?: { when?: Parameters<typeof evalCondition>[0]; to: string }[] }).transitions ?? [];
-  for (const t of ts) if (t.when === undefined || evalCondition(t.when, vars)) return t.to;
-  return null; // nothing matched: the call ends cleanly
+  for (const [i, t] of ts.entries()) if (t.when === undefined || evalCondition(t.when, vars)) return { to: t.to, via: t.when === undefined ? `transition ${i + 1} (always)` : `transition ${i + 1} (condition held)` };
+  return { to: null, via: ts.length === 0 ? 'no transitions' : 'no transition matched' }; // nothing matched: the call ends cleanly
+}
+
+/** Move on from a node, and leave a record of why that way. */
+function goFrom(state: RunState, node: WorkflowNode, nodeId: string, out: StepRecord[]): string | null {
+  const r = routeWhy(node, state.vars);
+  out.push({ type: 'route', workflow: state.workflow, node: nodeId, payload: { to: r.to, via: r.via } });
+  return r.to;
 }
 
 function dig(v: Json, path: string): Json | undefined {
@@ -118,7 +190,7 @@ export async function start(workflow: string, vars: Vars, deps: Deps): Promise<{
   checkVars(vars);
   const def = deps.load(workflow);
   const state: RunState = { workflow, node: null, vars: { ...vars }, stack: [], status: 'running', steps: 0, sensitive: [...(def?.sensitiveVariables ?? [])] };
-  const records: StepRecord[] = [];
+  const records = stampedRecords(deps);
   if (!def) { fail(state, records, `The workflow "${workflow}" is not available.`); return { state, records }; }
   state.node = def.start;
   records.push({ type: 'start', workflow, payload: {} });
@@ -130,20 +202,45 @@ export async function start(workflow: string, vars: Vars, deps: Deps): Promise<{
 export async function reply(state: RunState, text: string, deps: Deps): Promise<{ state: RunState; records: StepRecord[] }> {
   if (state.status !== 'awaiting_reply' || !state.awaiting) throw new Error('This call is not waiting for a reply.');
   const next: RunState = structuredClone(state);
-  const records: StepRecord[] = [];
+  const records = stampedRecords(deps);
   const { node, captureAs, intents, sensitive } = next.awaiting!;
   // What was said can contain a number; it is kept without it. A sensitive answer is not recorded at all.
   const heard = sensitive ? text : redactNumbers(text);
   setVar(next, captureAs, heard);
   if (sensitive) addSensitive(next, [captureAs]);
   const payload: Record<string, Json> = { text: sensitive ? '[hidden]' : heard };
-  if (intents) { const intent = interpretReply(text, intents); setVar(next, `${captureAs}_intent`, intent); payload.intent = intent; }
+  if (intents) {
+    const d = interpretDetail(text, intents);
+    setVar(next, `${captureAs}_intent`, d.intent); payload.intent = d.intent;
+    // The words that decided it, unless the answer is sensitive (then nothing of it is recorded).
+    if (!sensitive) payload.matched = d.matched.map((m) => `${m.intent}: ${m.phrase}`);
+  }
+  // Read the turn (kind, topic, sentiment) unless the answer is sensitive, in which case nothing of it is looked at or kept.
+  let decision: ReturnType<typeof observeTurn> = { escalate: false };
+  let analysis: ReturnType<typeof analyseTurn> | undefined;
+  if (deps.journey && !sensitive) {
+    analysis = analyseTurn(text, deps.journey.lexicon, deps.journey.severeBelow);
+    next.journey ??= { turns: [], recoveries: 0 };
+    const understood = !intents || (payload.intent !== 'unknown' && payload.intent !== 'ambiguous');
+    decision = observeTurn(next.journey, { node, analysis, understood }, deps.journey);
+    payload.analysis = { kind: analysis.kind, topic: analysis.topic, sentiment: analysis.sentiment, severe: analysis.severe, understood };
+  }
   records.push({ type: 'heard', workflow: next.workflow, node, payload });
   next.awaiting = undefined; next.status = 'running';
+  if (decision.escalate) {
+    next.escalation = { trigger: decision.trigger, detail: decision.detail, node };
+    records.push({ type: 'escalate', workflow: next.workflow, node, payload: { trigger: decision.trigger, detail: decision.detail, recoveries: next.journey!.recoveries, sentiment: analysis!.sentiment } });
+    if (sensitive) { delete next.vars[captureAs]; delete next.vars[`${captureAs}_intent`]; }
+    endWithHuman(next, records, node, `Escalated: ${decision.detail}`);
+    return { state: next, records };
+  }
   const def = deps.load(next.workflow);
   const n = def && own(def.nodes, node) ? def.nodes[node] : undefined;
   if (!n) { fail(next, records, `The node "${node}" is no longer available.`, node); return { state: next, records }; }
-  next.node = route(n, next.vars);
+  // A change of intent can send the call somewhere else before the node's own transitions are looked at.
+  const rerouted = analysis && next.journey && intentChanged(next.journey) ? def!.intentRoutes?.find((r) => (r.when.kind === undefined || r.when.kind === analysis!.kind) && (r.when.topic === undefined || r.when.topic === analysis!.topic)) : undefined;
+  if (rerouted) records.push({ type: 'reroute', workflow: next.workflow, node, payload: { to: rerouted.to, kind: analysis!.kind, topic: analysis!.topic } });
+  next.node = rerouted ? rerouted.to : goFrom(next, n, node, records);
   // A sensitive answer has done its job once the route is chosen: it is forgotten now, not at the end of the call.
   if (sensitive) { delete next.vars[captureAs]; delete next.vars[`${captureAs}_intent`]; }
   if (next.node === null) leave(next, records, 'completed', deps);
@@ -160,7 +257,7 @@ function leave(state: RunState, out: StepRecord[], outcome: string, deps: Deps):
   state.workflow = frame.workflow;
   const pdef = deps.load(frame.workflow);
   const parent = pdef && own(pdef.nodes, frame.node) ? pdef.nodes[frame.node] : undefined;
-  state.node = parent ? route(parent, state.vars) : null;
+  state.node = parent ? goFrom(state, parent, frame.node, out) : null;
   if (state.node === null) leave(state, out, 'completed', deps);
 }
 
@@ -183,10 +280,21 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         const lang = typeof state.vars.lang === 'string' ? state.vars.lang : undefined;
         let line: string | undefined;
         let plan: SpeechPlan | undefined;
+        let ai: Record<string, Json> | undefined;
         try {
           if (node.speech === 'dynamic') {
             const fallback = node.text !== undefined ? pickText(node.text, lang) : undefined;
-            if (deps.speaker) line = await deps.speaker.generate(node, withoutSensitive(state), lang);
+            if (deps.speaker) {
+              const g = await deps.speaker.generate(node, withoutSensitive(state), lang);
+              if (typeof g !== 'string') ai = aiInfo(g);
+              // A line a model wrote is checked before anyone hears it: used as it is, tidied, or turned down for the fallback.
+              const checked = checkModelLine(typeof g === 'string' ? g : g.text);
+              if (checked.decision !== 'proceeded') ai = { ...(ai ?? {}), decision: checked.decision, decisionReason: checked.reason };
+              else ai = { ...(ai ?? {}), decision: 'proceeded', decisionReason: 'The line passed the checks and was used.' };
+              if (checked.line !== undefined) line = checked.line;
+              else if (fallback !== undefined) line = renderText(fallback, state.vars, state.sensitive);
+              else { fail(state, out, `The line written for "${id}" was turned down (${checked.reason}), and there is no fallback text.`, id); return; }
+            }
             else if (fallback !== undefined) line = renderText(fallback, state.vars, state.sensitive);
             else { fail(state, out, `"${id}" is dynamic and has no fallback text, and no model is connected to write its line.`, id); return; }
           } else {
@@ -206,6 +314,7 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         out.push({ type: 'say', workflow: wf, node: id, payload: {
           strategy: node.speech, text: line!, ...(lang ? { lang } : {}),
           synthChars: plan.synthCharacters, recordedChars: plan.recordedCharacters,
+          ...(ai ? { ai } : {}),
           segments: plan.segments.map((s): Json => (s.kind === 'recorded' ? { kind: 'recorded', chars: s.characters, recordingId: s.recordingId } : { kind: 'synth', chars: s.characters })),
         } });
         if (node.listen) {
@@ -213,7 +322,7 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
           state.awaiting = { node: id, captureAs: node.listen.captureAs, intents: node.listen.intents, sensitive: node.listen.sensitive };
           return;
         }
-        state.node = route(node, state.vars);
+        state.node = goFrom(state, node, id, out);
         if (state.node === null) leave(state, out, 'completed', deps);
         break;
       }
@@ -226,7 +335,7 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         if (!outcome.ok && outcome.fatal) { fail(state, out, outcome.reason, id); return; }
         if (outcome.ok) {
           out.push({ type: 'api', workflow: wf, node: id, payload: { integration: node.integration, stored: outcome.stored } });
-          state.node = route(node, state.vars);
+          state.node = goFrom(state, node, id, out);
           if (state.node === null) leave(state, out, 'completed', deps);
         } else {
           out.push({ type: 'api_error', workflow: wf, node: id, payload: { integration: node.integration, reason: outcome.reason } });
@@ -246,12 +355,7 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         break;
       }
       case 'handoff': {
-        if ('human' in node.target) {
-          out.push({ type: 'handoff_human', workflow: wf, node: id, payload: { reason: node.target.human.reason } });
-          state.status = 'ended'; state.outcome = 'handoff_human'; state.node = null; state.stack = []; scrub(state);
-          out.push({ type: 'end', workflow: wf, payload: { outcome: 'handoff_human', reason: node.target.human.reason } });
-          return;
-        }
+        if ('human' in node.target) { endWithHuman(state, out, id, node.target.human.reason); return; }
         const target = deps.load(node.target.workflow);
         if (!target) { fail(state, out, `The workflow "${node.target.workflow}" (handoff "${id}") is not available.`, id); return; }
         // Control does not come back: the call, with all its variables, continues in the other workflow.

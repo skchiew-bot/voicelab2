@@ -107,7 +107,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: Ctx): void {
   app.post('/internal/workflows/:workflowId/runs', async (req, reply) => {
     const s = await ctx.internal(req);
     const { workflowId } = z.object({ workflowId: id }).parse(req.params);
-    const body = z.object({ environment, kind: z.enum(['test', 'live']).default('test'), variables: z.record(z.string(), json).default({}) }).parse(req.body);
+    const body = z.object({ environment, kind: z.enum(['test', 'live']).default('test'), variables: z.record(z.string(), json).default({}), callId: id.optional() }).parse(req.body);
     return reply.status(201).send(await startRun(ctx.runDeps, s.userId, { workflowId, ...body, variables: body.variables as never }));
   });
   app.get('/internal/workflows/:workflowId/runs', async (req) => {

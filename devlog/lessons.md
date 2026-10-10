@@ -185,12 +185,13 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/tracker.test.ts` › "reads a plain "no" or "no, thank you" as neutral or kind, and two declined questions do not hand the call to a person"
 
 ### L-022: Compare times as times, not as text
-- **Seen:** 3 times. The report compared git commit dates written with a +08:00 offset against UTC log timestamps as strings, so logging gaps, audit completeness and session times were wrong for anyone outside UTC (independent review, 2026-10-10). A date column read on a server east of UTC came back as the day before, so a promise was judged broken a day early (Phase 7 independent review, 2026-10-10). A group booking counted an officer's busy-ness by the server's UTC day, so early-morning work in Kuala Lumpur counted towards the wrong day (Phase 7 appointments independent review, 2026-10-10).
-- **Rule:** Turn every timestamp into one form (`new Date(x).toISOString()`, or milliseconds) at the edge, before comparing or sorting.
+- **Seen:** 4 times. The report compared git commit dates written with a +08:00 offset against UTC log timestamps as strings, so logging gaps, audit completeness and session times were wrong for anyone outside UTC (independent review, 2026-10-10). A date column read on a server east of UTC came back as the day before, so a promise was judged broken a day early (Phase 7 independent review, 2026-10-10). A group booking counted an officer's busy-ness by the server's UTC day, so early-morning work in Kuala Lumpur counted towards the wrong day (Phase 7 appointments independent review, 2026-10-10). The alert sweep judged an email claim's age by its own clock against a time the database had stamped, so a second sweep took a send still under way for a crash and marked it "may not have arrived" (found by repeated full runs, 2026-10-10).
+- **Rule:** Turn every timestamp into one form (`new Date(x).toISOString()`, or milliseconds) at the edge, before comparing or sorting. Compare a time with times from the same clock: a database-stamped time against the database's `now()`.
 - **Guards:**
   - `tests/devlog.test.ts` › "finds logging gaps"
   - `tests/cases.test.ts` › "records a part payment, recalculates the balance exactly, and passes the case to a person or plan"
   - `tests/appointments.test.ts` › "counts a group member's load by their own calendar day"
+  - `tests/alerts.test.ts` › "sends once when two sweeps run at the same moment, and the second does not take a send still under way for a crash"
 
 ### L-023: Keep every branch accountable to the plan, and the trunk as the default
 - **Seen:** 2 times. The repository's default branch on GitHub was still the first session branch (`claude/elegant-fermat-er13o8`), long merged, so clones and the GitHub page showed stale code; seven merged branches were never deleted; and nothing checked that a branch belonged to the plan (found by the dev Control Tower branch audit, 2026-10-10). A cloud session could not delete merged branches when asked: the git proxy refuses deletes and no GitHub tool deletes a branch, so a workflow now does it ([#20](https://github.com/skchiew-bot/voicelab2/pull/20)).

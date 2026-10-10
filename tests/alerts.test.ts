@@ -27,9 +27,9 @@ describe('choosing and writing alert emails', () => {
 type Env = Awaited<ReturnType<typeof import('./helpers.js').setupDb>>;
 let env: Env; let alice: { id: string; token: string }; let bob: { id: string; token: string }; let twilioId: string;
 const sent: { to: string; subject: string; text: string }[] = [];
-let mode: 'ok' | 'refuse' | 'timeout' = 'ok';
+let mode: 'ok' | 'refuse' | 'timeout' = 'ok'; let slow = 0;
 // Failures are aimed at the drain alert the tests toggle, so other alerts still open from earlier steps go through.
-const mailer: Mailer = { async send(m) { const aimed = m.text.includes('is drained') || m.subject.includes('Test'); if (aimed && mode === 'refuse') throw new MailRefused('550'); if (aimed && mode === 'timeout') throw new Error('timed out'); sent.push(m); } };
+const mailer: Mailer = { async send(m) { if (slow) await new Promise((r) => setTimeout(r, slow)); const aimed = m.text.includes('is drained') || m.subject.includes('Test'); if (aimed && mode === 'refuse') throw new MailRefused('550'); if (aimed && mode === 'timeout') throw new Error('timed out'); sent.push(m); } };
 const drained = () => sent.filter((m) => m.text.includes('is drained'));
 const st = () => env.staffToken;
 async function must<T extends { statusCode: number; body: string }>(p: Promise<T>): Promise<T> {
@@ -124,11 +124,13 @@ describe('alerts by email', () => {
     later(31); await sweep();
   });
 
-  it('sends once when two sweeps run at the same moment', async () => {
+  it('sends once when two sweeps run at the same moment, and the second does not take a send still under way for a crash', async () => {
     sent.length = 0;
     await drain(); later(1);
-    await Promise.all([sweep(), sweep()]);
+    slow = 200;                                                                                    // the first is still sending when the second starts
+    try { await Promise.all([sweep(), sweep()]); } finally { slow = 0; }
     expect(drained()).toHaveLength(1);
+    expect((await deliveries()).filter((d) => d.alertKey.startsWith('provider_drained')).map((d) => d.status)[0]).toBe('sent');
     await settle();
   });
 

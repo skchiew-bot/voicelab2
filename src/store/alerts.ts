@@ -69,9 +69,10 @@ interface Job { ids: number[]; email: string; subject: string; text: string }
 export async function sweepAlerts(d: AlertDeps, now = new Date()) {
   const { jobs, opened, cleared, notSent } = await withActor(d.pool, { kind: 'internal' }, async (c) => {
     await c.query(`SELECT pg_advisory_xact_lock(hashtext('alerts'))`);
-    // A send left half-done by a crash or restart is settled as unknown: it may have gone, so it is never sent again.
+    // A send left half-done by a crash or restart is settled as unknown: it may have gone, so it is never sent again. Its age is
+    // judged on the database clock that stamped it, never the sweep's own, so a send still under way is not taken for a crash.
     await c.query(`UPDATE alert_deliveries SET status = 'unknown', detail = 'the sweep sending it stopped before it finished; not sent again', settled_at = now()
-                    WHERE status = 'sending' AND created_at < $1`, [new Date(now.getTime() - STALE_SENDING_MS)]);
+                    WHERE status = 'sending' AND created_at < now() - make_interval(secs => $1)`, [STALE_SENDING_MS / 1000]);
     const t = await controlTower(c, d.key, { publicBaseUrlSet: Boolean(d.publicBaseUrl), mailConnected: Boolean(d.mailer) });
     const showing = new Map<string, Alert>();
     for (const a of t.alerts) if (!showing.has(alertKey(a))) showing.set(alertKey(a), a);

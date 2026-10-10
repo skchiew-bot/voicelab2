@@ -118,7 +118,11 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
       [version.id, item.direction ?? input.direction],
     )).rows;
 
-    for (const comp of comps) {
+    // The agent's leg is a plain call leg: only the telephony leg's own rate applies to it, never a per-call fee or a
+    // per-minute charge for something it does not use (the speech relay ended before the dial began).
+    const own = leg === 'agent' ? comps.filter((x) => x.component === 'telephony_leg') : comps;
+    const before = lines.length;
+    for (const comp of own) {
       const q = quantityFor(comp.unit as Unit, comp.billing_line, item.usage, billed);
       if (!q) continue;
       let amount = lineAmount(comp.rate, q);
@@ -130,6 +134,10 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
         rate: comp.rate, currency: comp.currency, burstMultiplier: burst, amount, perUsd: fx,
         amountUsd: mulDiv(amount, SCALE, fx), // currency -> USD
       });
+    }
+    // A leg with time on it and no rate to price it is refused, never recorded as free.
+    if (leg === 'agent' && lines.length === before) {
+      throw new AppError(409, `Provider ${item.providerId} has no outbound telephony rate in force at ${input.occurredAt.toISOString()} for the agent's leg of a transfer. Add one before costing calls.`);
     }
   }
   if (lines.length === 0) throw new AppError(400, 'The usage given does not match any billable component of those providers.');

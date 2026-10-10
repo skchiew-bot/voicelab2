@@ -120,15 +120,15 @@ afterAll(async () => { await env?.teardown(); });
 
 /** A new charging version for the Twilio provider, in force from now, with this concurrency ceiling. */
 let rateClock = Date.parse('2026-01-01T00:00:00Z');
-async function rates(ceiling: number) {
+const LEG = { component: 'telephony_leg', unit: 'per_minute', currency: 'USD' };
+async function rates(ceiling: number, components: Record<string, string>[] = [
+  { ...LEG, rate: '0.0085', direction: 'inbound' }, { ...LEG, rate: '0.0140', direction: 'outbound' },
+]) {
   // Each version is a moment later than the last (and never in the future), so the newest is the one in force.
   rateClock = Math.min(Date.now() - 1000, Math.max(rateClock + 1000, Date.now() - 60_000));
   await must(post(`/internal/providers/${twilioId}/charging`, {
     effectiveFrom: new Date(rateClock).toISOString(), billingIncrementSeconds: 60, concurrencyLimit: ceiling,
-    components: [
-      { component: 'telephony_leg', unit: 'per_minute', rate: '0.0085', currency: 'USD', direction: 'inbound' },
-      { component: 'telephony_leg', unit: 'per_minute', rate: '0.0140', currency: 'USD', direction: 'outbound' },
-    ],
+    components,
   }));
 }
 /** How many channels the Twilio provider has in use, as every dial decision counts them. */
@@ -381,18 +381,56 @@ describe('a live caller passed to a person', () => {
 
       // Room for exactly one more leg, and two calls asking at the same moment: one is put through, one gets the ladder.
       const b = await handedOver(); const c = await handedOver();
-      await rates((await inUse()) + 1);
+      const before = await inUse();
+      await rates(before + 1);
       const [rb, rc] = await Promise.all([relayEnded(b.callSid, b.callId), relayEnded(c.callSid, c.callId)]);
       expect([rb.body, rc.body].filter((x) => x.includes('<Dial ')).length).toBe(1);
       expect([rb.body, rc.body].filter((x) => x.includes('<Say>')).length).toBe(1);
       const dialling = rb.body.includes('<Dial ') ? b : c;
-      // the dialling leg holds a channel until the dial ends; Twilio asking again does not count it twice
+      // the dialling leg holds exactly one more channel until the dial ends
       const held = await inUse();
-      expect((await relayEnded(dialling.callSid, dialling.callId)).body).toContain('<Dial ');
-      expect(await inUse()).toBe(held);
+      expect(held).toBe(before + 1);
       await dialled(dialling.callSid, dialling.callId, { DialCallStatus: 'no-answer', DialCallDuration: '0' });
       expect(await inUse()).toBe(held - 1);
     } finally { await rates(1000); }
+  });
+
+  it('prices the agent leg only at its own telephony rate, refuses to call it free, and waits when its length is unknown', async () => {
+    const end = (callSid: string, seconds: string) => twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: callSid, CallStatus: 'completed', CallDuration: seconds, Direction: 'inbound', From: CUSTOMER, To: OUR });
+    const putThrough = async (dial: Record<string, string>) => {
+      const x = await handedOver();
+      await relayEnded(x.callSid, x.callId); await whisperReq(x.callSid, x.callId); await acceptReq(x.callSid, x.callId, '1');
+      await dialled(x.callSid, x.callId, dial);
+      await end(x.callSid, '90');
+      return x.callId;
+    };
+    const costRow = async (callId: string) => (await env.pool.query('SELECT cost_status, cost_error FROM calls WHERE id = $1', [callId])).rows[0];
+    try {
+      // A relay charge per minute and a per-call fee that apply to any direction: the agent leg pays neither.
+      await rates(1000, [
+        { ...LEG, rate: '0.0085', direction: 'inbound' }, { ...LEG, rate: '0.0140', direction: 'outbound' },
+        { component: 'other', unit: 'per_minute', rate: '0.0700', currency: 'USD', direction: 'any', billingLine: 'speech_relay' },
+      ]);
+      const a = await putThrough({ DialCallDuration: '61' });
+      expect((await env.pool.query(
+        `SELECT l.leg, l.component, l.amount_usd FROM call_cost_lines l JOIN call_costs k ON k.id = l.call_cost_id WHERE k.call_id = $1 ORDER BY l.leg DESC, l.component DESC`, [a])).rows)
+        .toEqual([
+          { leg: 'caller', component: 'telephony_leg', amount_usd: '0.01700000' },
+          { leg: 'caller', component: 'other', amount_usd: '0.14000000' },
+          { leg: 'agent', component: 'telephony_leg', amount_usd: '0.02800000' },
+        ]);
+      // Only an inbound rate: the agent leg cannot be priced, so the call is refused a cost, never recorded with the leg free.
+      await rates(1000, [{ ...LEG, rate: '0.0085', direction: 'inbound' }]);
+      const b = await putThrough({ DialCallDuration: '61' });
+      expect(await costRow(b)).toMatchObject({ cost_status: 'failed', cost_error: expect.stringContaining('no outbound telephony rate') });
+      expect((await env.pool.query('SELECT count(*)::int AS n FROM call_costs WHERE call_id = $1', [b])).rows[0].n).toBe(0);
+    } finally { await rates(1000); }
+    // A dial that ended in a way we do not know, with no length: unknown, so the cost waits rather than calling it free.
+    const c = await putThrough({ DialCallStatus: 'something-new', DialCallDuration: '' });
+    expect(await costRow(c)).toMatchObject({ cost_status: 'pending' });
+    // One that never connected costs nothing, length or not.
+    const n = await putThrough({ DialCallStatus: 'busy', DialCallDuration: '' });
+    expect(await costRow(n)).toMatchObject({ cost_status: 'recorded' });
   });
 
   it('costs the agent leg in the one cost record of the call, exactly, with credits only for the time of the caller', async () => {
@@ -474,6 +512,10 @@ describe('a live caller passed to a person', () => {
     ]);
     expect((await post(`/internal/calls/${c.callId}/cost/retry`, { agentLegSeconds: 40 })).statusCode).toBe(409);
     expect((await env.pool.query(`SELECT detail FROM audit_log WHERE action = 'transfer.agent_leg_settled' AND entity_id = $1`, [c.callId])).rows).toEqual([{ detail: { seconds: 20 } }]);
+    // a call priced before agent legs were costed (rang an agent, no length kept) is not changed after the fact
+    await env.pool.query('UPDATE calls SET transfer_seconds = NULL WHERE id = $1', [n.callId]);
+    const late = await post(`/internal/calls/${n.callId}/cost/retry`, { agentLegSeconds: 5 });
+    expect(late.statusCode).toBe(409); expect(late.json().error).toContain('already priced');
     // a call that never rang an agent has no leg to settle
     const plain = await ring(ASK);
     await twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: plain.callSid, CallStatus: 'completed', CallDuration: '15', Direction: 'inbound', From: CUSTOMER, To: ASK });

@@ -64,6 +64,8 @@ export async function clearTransferSettings(c: pg.PoolClient, actorId: string | 
 // ------------------------------------------------------------------ the call
 const asInternal = <T>(d: TransferDeps, fn: (c: pg.PoolClient) => Promise<T>) => withActor(d.pool, { kind: 'internal' }, fn);
 const OPEN = ['ringing', 'in_progress', 'queued', 'dialing'];
+/** Dial statuses that say the agent's leg never connected, so it costs nothing. */
+const NEVER_CONNECTED = ['busy', 'no-answer', 'canceled', 'failed'];
 /** Call statuses that say the caller has gone. Anything else (including a value we do not know) is taken as still there. */
 const GONE = ['completed', 'busy', 'no-answer', 'failed', 'canceled'];
 
@@ -251,7 +253,8 @@ export async function afterDial(d: TransferDeps, providerId: string, callId: str
     const present = !GONE.includes(params.CallStatus ?? '');
     // How long the agent's leg lasted, for its cost. A leg that was never picked up is not billed; one that was (a
     // person, or a voicemail) is, so a missing duration there stays unknown and the call's cost waits for a person.
-    const seconds = dialSeconds(params.DialCallDuration) ?? (dialled === 'answered' ? null : 0);
+    // Only a status that says the leg never connected means no time; anything else without a duration is unknown.
+    const seconds = dialSeconds(params.DialCallDuration) ?? (NEVER_CONNECTED.includes(params.DialCallStatus ?? '') ? 0 : null);
     if (call.transfer_status === 'dialing') {
       const next = outcome === 'answered' ? 'answered' : present ? outcome : 'abandoned';
       await c.query('UPDATE calls SET transfer_status = $2, transfer_seconds = $3 WHERE id = $1', [callId, next, seconds]);
@@ -281,10 +284,12 @@ export async function afterDial(d: TransferDeps, providerId: string, callId: str
  * never reported the end of the dial. Only a leg that was dialled and has no duration yet can be set; it is audited.
  */
 export async function settleAgentLeg(c: pg.PoolClient, actorId: string | null, callId: string, seconds: number) {
-  const r = (await c.query('SELECT transfer_started_at, transfer_seconds FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
+  const r = (await c.query('SELECT transfer_started_at, transfer_seconds, cost_status FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
   if (!r) throw new AppError(404, 'Call not found.');
   if (!r.transfer_started_at) throw new AppError(409, 'This call never rang an agent, so it has no agent leg to settle.');
   if (r.transfer_seconds !== null) throw new AppError(409, 'This call\'s agent leg already has its duration.');
+  // A call already priced (before agent legs were costed) is not changed after the fact: its cost record stands.
+  if (['recorded', 'reconciled', 'variance', 'not_applicable'].includes(r.cost_status)) throw new AppError(409, 'This call is already priced, so its agent leg cannot be added now.');
   await c.query('UPDATE calls SET transfer_seconds = $2 WHERE id = $1', [callId, seconds]);
   await audit(c, actorId, 'transfer.agent_leg_settled', 'call', callId, { seconds });
 }

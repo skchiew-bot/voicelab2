@@ -15,16 +15,19 @@ import { DEFAULT_FALLBACK } from '../resilience/fallback.js';
 import { sayMessages, type RelayInbound, type RelayOutbound } from '../telephony/relay.js';
 import { recordEvent } from './events.js';
 import { addCallbackRequest, getFallbackPlan } from './resilience.js';
-import { abandonRow, abandonRun, replyRunSpoken, startRunSpoken, type RunDeps, type SpokenLine } from './runs.js';
+import { abandonRow, replyRunSpoken, startRunSpoken, type RunDeps, type SpokenLine } from './runs.js';
+import type { Segment } from '../workflows/stitch.js';
 
 export interface RelayDeps { runs: RunDeps; baseUrl: string; now?: () => Date }
 
 /**
  * One open conversation. `version` is the question the call is on, so a late answer to an earlier one is not applied.
  * `owner` names this connection: the call is served by the connection that last took it over, and only that one may end
- * its run on closing.
+ * its run on closing. `asking` says this connection itself said the question the call is on (it started the run, or
+ * took the call over or caught up and said it again), so words that arrived before it did are no answer to it.
+ * `closed` says the socket has gone, so it must not take the call over from anyone.
  */
-export interface RelaySession { providerId: string; callId: string; tenantId: string; projectId: string | null; runId: string | null; version: number; ended: boolean; owner: string }
+export interface RelaySession { providerId: string; callId: string; tenantId: string; projectId: string | null; runId: string | null; version: number; ended: boolean; owner: string; asking?: boolean; closed?: boolean }
 
 const asInternal = <T>(d: RelayDeps, fn: (c: pg.PoolClient) => Promise<T>) => withActor(d.runs.pool, { kind: 'internal' }, fn);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -69,14 +72,48 @@ const say = (d: RelayDeps, lines: SpokenLine[]) => sayMessages(lines, (id) => me
 /** What a finished run leaves to say: nothing more, then the end. A call passed to a person says so to whatever runs next. */
 const endMessage = (outcome: string | null): RelayOutbound => (outcome === 'handoff_human' ? { type: 'end', handoffData: JSON.stringify({ reason: 'handoff_human' }) } : { type: 'end' });
 
-/** A start that has produced no run in this long died with the server that was running it. */
-export const STARTING_GRACE_MS = 30_000;
-/** A reply claimed this long ago and still not applied died with the server that was applying it. */
-export const STUCK_REPLY_MS = 60_000;
+/**
+ * A start that has produced no run in this long died with the server that was running it, and a reply claimed this long
+ * ago and still not applied died with the server applying it. Set well above a slow but healthy start or turn (several
+ * integration calls of up to 10 s each); and should a slow one cross it anyway, the fallback wins: once a call has
+ * fallen back, no run can be written for it and a reply still being applied cannot land.
+ */
+export const STARTING_GRACE_MS = 60_000;
+export const STUCK_REPLY_MS = 90_000;
+/** How often a connection standing by looks for the run another is starting. The verdict that the start died still waits for STARTING_GRACE_MS. */
+export const STANDBY_POLL_MS = 3_000;
+
+/** A run that ended this way did not finish the call: it broke, or it was abandoned (by a connection that closed, or a sweep). */
+const brokenEnd = (run: { outcome: string | null; error: string | null }) => run.outcome === 'error' || run.outcome === 'abandoned' || run.error !== null;
+
+/**
+ * A connection finds the run already over. A run that finished says its end; one that broke or was abandoned while the
+ * caller is still on the line (this connection is open, so they are) gets the fallback, never a plain end in silence.
+ */
+const endedRun = async (d: RelayDeps, session: RelaySession, run: { outcome: string | null; error: string | null }, closing: SpokenLine[] = []) =>
+  brokenEnd(run) ? failed(d, session) : finish(session, [...(closing.length ? await sayAgain(d, session, closing) : []), endMessage(run.outcome)]);
+
+/**
+ * The lines the caller was last told: every line said since they last spoke, rebuilt from the run's steps, recordings
+ * included. A line that mixed a recording with live speech is spoken whole, as the steps keep only its whole text.
+ */
+async function lastLines(c: pg.PoolClient, runId: string): Promise<SpokenLine[]> {
+  const rows = (await c.query(
+    `SELECT payload FROM workflow_run_steps WHERE run_id = $1 AND type = 'say'
+        AND seq > coalesce((SELECT max(seq) FROM workflow_run_steps WHERE run_id = $1 AND type = 'heard'), 0) ORDER BY seq`, [runId])).rows;
+  return rows.map(({ payload: p }: { payload: { text?: string; lang?: string; segments?: { kind: string; chars: number; recordingId?: string }[] } }) => {
+    const text = String(p.text ?? ''); const parts = p.segments ?? [];
+    const recorded = parts.length > 0 && parts.every((s) => s.kind === 'recorded' && typeof s.recordingId === 'string');
+    const segments: Segment[] = recorded
+      ? parts.map((s) => ({ kind: 'recorded', characters: s.chars, recordingId: s.recordingId!, durationMs: 0, text: parts.length === 1 ? text : '' }))
+      : [{ kind: 'synth', characters: text.length, text }];
+    return { lang: p.lang ?? 'en', segments };
+  });
+}
 
 type Opening =
   | { kind: 'refuse' } | { kind: 'over' } | { kind: 'end' } | { kind: 'standby' } | { kind: 'died' } | { kind: 'start'; workflowId: string }
-  | { kind: 'resume'; run: { id: string; status: string; outcome: string | null; state_version: number; stuck: boolean } };
+  | { kind: 'resume'; run: { id: string; status: string; outcome: string | null; error: string | null; state_version: number; stuck: boolean } };
 
 /**
  * The relay has connected for a call. Check that it is the call it says it is, then start the call's workflow, or take
@@ -99,7 +136,7 @@ export async function openRelay(d: RelayDeps, providerId: string, setup: Extract
     const row = call;
     if (row.relay_failed) return { kind: 'over' };
     const run = (await c.query(
-      `SELECT id, status, outcome, state_version, (status = 'processing' AND claimed_at < now() - make_interval(secs => $2)) AS stuck
+      `SELECT id, status, outcome, error, state_version, (status = 'processing' AND claimed_at < now() - make_interval(secs => $2)) AS stuck
          FROM workflow_runs WHERE call_id = $1 AND kind = 'live'`, [callId, STUCK_REPLY_MS / 1000])).rows[0];
     const claim = () => c.query('UPDATE calls SET relay_owner = $2, relay_claimed_at = now() WHERE id = $1', [callId, owner]);
     if (run) { await claim(); return { kind: 'resume', run }; }
@@ -114,35 +151,45 @@ export async function openRelay(d: RelayDeps, providerId: string, setup: Extract
   const session: RelaySession = { providerId, callId, tenantId: call.tenant_id, projectId: call.project_id, runId: null, version: 0, ended: false, owner };
   await event(d, session, 'relay.connected', { opening: opening.kind });
   switch (opening.kind) {
-    case 'over': case 'end': return finish(session, [{ type: 'end' }]);
+    // Fallen back already: the holding line may have gone to the connection that dropped, so it is said again (no second callback).
+    case 'over': return failed(d, session);
+    case 'end': return finish(session, [{ type: 'end' }]);
     case 'standby': return { session, send: [] };
     case 'died': return failed(d, session);
     case 'resume': {
       session.runId = opening.run.id; session.version = opening.run.state_version;
-      if (opening.run.status === 'ended') return finish(session, [endMessage(opening.run.outcome)]);
+      if (opening.run.status === 'ended') return endedRun(d, session, opening.run);
       if (opening.run.stuck) return failed(d, session);
       return { session, send: [] };   // carry on: the next thing the caller says answers the question already asked
     }
     case 'start':
+      session.asking = true;
       try {
         const r = await startRunSpoken(d.runs, null, { workflowId: opening.workflowId, environment: 'production', kind: 'live', variables: {}, callId });
         session.runId = r.view.id; session.version = r.view.version;
         return afterTurn(d, session, r.view, r.speech);
-      } catch { return failed(d, session); }
+      } catch (e) {
+        // A start refused because the call fell back meanwhile ran all the same: what it did to a client's system is unknown.
+        if (e instanceof AppError && e.status === 409) await event(d, session, 'relay.start_refused', { effects: 'unknown' }).catch(() => undefined);
+        return failed(d, session);
+      }
   }
 }
 
 /**
  * Something came from the relay. The caller's finished words are the answer to the question the call was on when they
  * finished speaking (`askedAt`); anything they say while that answer is being worked out was said before the next
- * question, so it is not applied to it.
+ * question, so it is not applied to it. `askedAt` is null for words that arrived before this connection was serving the
+ * call: on a connection that started the run they were said before the first question was heard, so they answer nothing.
  */
-export async function onRelayMessage(d: RelayDeps, session: RelaySession, m: RelayInbound, askedAt?: number): Promise<RelayOutbound[]> {
-  if (session.ended) return [];
+export async function onRelayMessage(d: RelayDeps, session: RelaySession, m: RelayInbound, askedAt?: number | null): Promise<RelayOutbound[]> {
+  if (session.ended || session.closed) return [];
   if (m.type === 'error') { await event(d, session, 'relay.error', { by: 'provider' }); return []; }
   if (m.type !== 'prompt' || m.last === false || m.voicePrompt.trim() === '') return [];
-  // A connection that stood by while another started the call takes it over once the run exists.
-  if (!session.runId && !(await adopt(d, session))) return [];
+  // A connection that stood by while another started the call takes it over once the run exists. The caller's words are
+  // not applied: the question went to the connection that dropped, so they may never have heard it. It is asked again.
+  if (!session.runId) return (await standbyCheck(d, session)).send;
+  if (askedAt === null && session.asking) return [];
   const asked = askedAt ?? session.version;
   try {
     const r = await replyRunSpoken(d.runs, session.runId!, m.voicePrompt, asked);
@@ -152,25 +199,87 @@ export async function onRelayMessage(d: RelayDeps, session: RelaySession, m: Rel
     if (!(e instanceof AppError && e.status === 409)) return (await failed(d, session)).send;
     // Refused because the call is not where these words were said: say why, from the run itself.
     const run = await asInternal(d, async (c) => (await c.query(
-      `SELECT status, outcome, state_version, claimed_at > now() - make_interval(secs => $2) AS fresh FROM workflow_runs WHERE id = $1`, [session.runId, STUCK_REPLY_MS / 1000])).rows[0]);
-    if (run?.status === 'ended') return finish(session, [endMessage(run.outcome)]).send;
+      `SELECT status, outcome, error, state_version, claimed_at > now() - make_interval(secs => $2) AS fresh FROM workflow_runs WHERE id = $1`, [session.runId, STUCK_REPLY_MS / 1000])).rows[0]);
+    if (run?.status === 'ended') return (await endedRun(d, session, run)).send;
+    // Another connection moved the call on while this one was not serving it: the caller has not heard the question it is
+    // on now, so it is said again (their words are not applied to it).
+    if (run?.status === 'awaiting_reply' && run.state_version > session.version) return (await catchUp(d, session)).send;
     if (run?.status === 'awaiting_reply' && run.state_version !== asked) return [];   // the words were for an earlier question
     if (run?.status === 'processing' && run.fresh) return [];                          // another answer is being applied now
     return (await failed(d, session)).send;                                           // stuck: never leave the caller in silence
   }
 }
 
-/** Take over a call whose run another connection started. False if there is no run yet. */
-async function adopt(d: RelayDeps, session: RelaySession): Promise<boolean> {
-  const run = await asInternal(d, async (c) => {
-    await c.query('SELECT 1 FROM calls WHERE id = $1 FOR UPDATE', [session.callId]);
-    const r = (await c.query(`SELECT id, state_version FROM workflow_runs WHERE call_id = $1 AND kind = 'live'`, [session.callId])).rows[0];
-    if (r) await c.query('UPDATE calls SET relay_owner = $2, relay_claimed_at = now() WHERE id = $1', [session.callId, session.owner]);
-    return r;
+/**
+ * A connection with nothing to say looks again: one that resumed or took over a call catches up (see `catchUp`); one
+ * standing by while another starts the call looks for the run. If the run now exists it takes the call over and
+ * says the last lines again (the connection that started the call has gone, so the caller may not have heard them); a
+ * run that broke or was abandoned meanwhile gets the fallback. While the start is within its time, `again` means look
+ * later; past it with no run, the start died (what it did is unknown, so it is not done again) and the caller gets the
+ * fallback. Everything is read in one transaction holding the call's row.
+ */
+export async function standbyCheck(d: RelayDeps, session: RelaySession): Promise<{ send: RelayOutbound[]; again: boolean }> {
+  if (session.ended || session.closed) return { send: [], again: false };
+  if (session.runId) return catchUp(d, session);
+  type Run = { id: string; state_version: number; status: string; outcome: string | null; error: string | null; stuck: boolean };
+  const found = await asInternal(d, async (c) => {
+    const call = (await c.query(`SELECT relay_failed, relay_claimed_at > now() - make_interval(secs => $2) AS claim_fresh FROM calls WHERE id = $1 FOR UPDATE`,
+      [session.callId, STARTING_GRACE_MS / 1000])).rows[0];
+    if (!call || call.relay_failed) return { kind: 'over' as const };
+    const r: Run | undefined = (await c.query(
+      `SELECT id, state_version, status, outcome, error, (status = 'processing' AND claimed_at < now() - make_interval(secs => $2)) AS stuck
+         FROM workflow_runs WHERE call_id = $1 AND kind = 'live'`, [session.callId, STUCK_REPLY_MS / 1000])).rows[0];
+    if (!r && call.claim_fresh) return { kind: 'waiting' as const };
+    if (!r) return { kind: 'died' as const };
+    // The socket closed while this look was under way: it must not take the call from whoever serves it now.
+    if (session.closed) return { kind: 'closed' as const };
+    await c.query('UPDATE calls SET relay_owner = $2, relay_claimed_at = now() WHERE id = $1', [session.callId, session.owner]);
+    return { kind: 'adopted' as const, run: r, lines: r.status === 'awaiting_reply' || r.status === 'ended' ? await lastLines(c, r.id) : [] };
   });
-  if (!run) return false;
-  session.runId = run.id; session.version = run.state_version;
-  return true;
+  if (found.kind === 'waiting') return { send: [], again: true };
+  if (found.kind === 'closed') return { send: [], again: false };
+  // 'over': the call fell back on the connection that dropped, so its holding line may not have been heard. No second callback.
+  if (found.kind === 'died' || found.kind === 'over') return { send: (await failed(d, session)).send, again: false };
+  session.runId = found.run.id; session.version = found.run.state_version;
+  // A call that finished meanwhile: its closing lines went to the connection that dropped, so they are said before the end.
+  if (found.run.status === 'ended') return { send: (await endedRun(d, session, found.run, found.lines)).send, again: false };
+  if (found.run.stuck) return { send: (await failed(d, session)).send, again: false };
+  if (found.run.status !== 'awaiting_reply') return { send: [], again: true };   // a reply is being applied: say its question once it has
+  return { send: await sayAgain(d, session, found.lines), again: false };
+}
+
+/**
+ * A connection that resumed or took over a call whose reply was still being applied, or that another connection has moved
+ * on since, catches up: once the run is waiting again, it says the lines since the caller last spoke. `again` means a
+ * reply is still being applied, so look later.
+ */
+async function catchUp(d: RelayDeps, session: RelaySession): Promise<{ send: RelayOutbound[]; again: boolean }> {
+  const found = await asInternal(d, async (c) => {
+    const run = (await c.query(
+      `SELECT status, outcome, error, state_version, (status = 'processing' AND claimed_at < now() - make_interval(secs => $2)) AS stuck
+         FROM workflow_runs WHERE id = $1`, [session.runId, STUCK_REPLY_MS / 1000])).rows[0] as { status: string; outcome: string | null; error: string | null; state_version: number; stuck: boolean } | undefined;
+    const behind = (run?.status === 'awaiting_reply' || run?.status === 'ended') && run.state_version > session.version;
+    return { run, lines: behind ? await lastLines(c, session.runId!) : null };
+  });
+  const run = found.run;
+  if (!run) return { send: [], again: false };
+  if (run.status === 'ended') return { send: (await endedRun(d, session, run, found.lines ?? [])).send, again: false };
+  if (run.stuck) return { send: (await failed(d, session)).send, again: false };
+  if (run.status !== 'awaiting_reply') return { send: [], again: true };
+  if (!found.lines) return { send: [], again: false };
+  session.version = run.state_version;
+  return { send: await sayAgain(d, session, found.lines), again: false };
+}
+
+/**
+ * Say lines again. They are new speech for the voice provider, so the characters it speaks are recorded on the call (the
+ * lines themselves are in the run's steps already); recordings cost nothing to play again.
+ */
+async function sayAgain(d: RelayDeps, session: RelaySession, lines: SpokenLine[]): Promise<RelayOutbound[]> {
+  session.asking = true;
+  const synthChars = lines.flatMap((l) => l.segments).reduce((n, s) => n + (s.kind === 'synth' ? s.characters : 0), 0);
+  await event(d, session, 'relay.said_again', { lines: lines.length, synthChars }).catch(() => undefined);
+  return say(d, lines);
 }
 
 /**
@@ -195,7 +304,7 @@ function afterTurn(d: RelayDeps, session: RelaySession, view: { status: string; 
   if (view.status !== 'ended') return Promise.resolve({ session, send });
   // A workflow that broke part-way (whatever its outcome is called, e.g. a client's system failing) is not a finished
   // call: the caller gets the fallback, never silence.
-  if (view.outcome === 'error' || view.error !== null) return failed(d, session, send);
+  if (brokenEnd(view)) return failed(d, session, send);
   return Promise.resolve(finish(session, [...send, endMessage(view.outcome)]));
 }
 
@@ -213,7 +322,13 @@ export async function failed(d: RelayDeps, session: RelaySession, already: Relay
     return (await getFallbackPlan(c, session.tenantId)) ?? DEFAULT_FALLBACK;
   }).catch(() => DEFAULT_FALLBACK);
   await event(d, session, 'relay.fallback', { steps: ['record_callback_request', 'holding_message'] }).catch(() => undefined);
-  if (session.runId) await abandonRun(d.runs, session.runId).catch(() => false);
+  // The run ends now, whatever it was doing, so nothing sensitive is held for a call that has given up. A reply still being
+  // applied cannot then land: its write needs the run to be as it left it. What that reply did to a client's system is
+  // unknown, so the end says it was cut off (L-002).
+  await asInternal(d, async (c) => {
+    const run = (await c.query(`SELECT id, state, status FROM workflow_runs WHERE call_id = $1 AND kind = 'live' AND status IN ('running', 'awaiting_reply', 'processing') FOR UPDATE`, [session.callId])).rows[0];
+    if (run) await abandonRow(c, run, run.status === 'processing' ? { interrupted: 'reply_in_flight' } : {});
+  }).catch(() => undefined);
   return finish(session, [...already, { type: 'text', token: plan.holdingMessage, last: true }, { type: 'end' }]);
 }
 

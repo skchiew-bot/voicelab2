@@ -2,3 +2,6 @@ node_modules
 dist
 .env
 test-results
+
+# Dev Control Tower: the hook spool (flushed into devlog/activity/ before commits)
+devlog/.spool/

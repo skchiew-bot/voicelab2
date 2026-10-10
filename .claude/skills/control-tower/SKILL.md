@@ -9,7 +9,8 @@ argument-hint: "[dashboard | lesson <what happened> | check]"
 This is the owner's view of the **development** of Voice Lab. It is not the product's Control Tower (the operations console in `BUILD_PLAN.md`, `admin/src/ControlTower.tsx`). If a request could mean either, ask (lesson L-014).
 
 Pieces:
-- `.claude/hooks/devlog.mjs`, wired in `.claude/settings.json`: logs each session's actions and failed actions to `devlog/activity/<date>-<session>.jsonl`. It records file paths and command descriptions only, never content, prompts, numbers or tokens.
+- `.claude/hooks/devlog.mjs`, wired in `.claude/settings.json`: logs each session's actions and failed actions to `devlog/.spool/`, which git ignores. It records the tool, a scrubbed file path or command description, and for a failure only a category (such as `exit 1` or `denied`), never content, prompts, error text, numbers or tokens.
+- `scripts/devlog-flush.mjs`: moves new spool lines into new files under `devlog/activity/`, rebuilt from an allowlist of fields. Run it before every commit; the new files go in that commit.
 - `devlog/lessons.md`: the lessons register, loaded into every session from `CLAUDE.md`. `tests/devlog.test.ts` fails if a lesson loses a guard.
 - `devlog/prs.json`: each PR with its review findings (severity and whether fixed), extracted once per PR.
 - `scripts/devlog-report.mjs` and the template `devlog/dashboard.html`: they build the dashboard from all of the above with no model call.
@@ -24,7 +25,7 @@ Check the branch is current: `git fetch origin main && git rev-list --count HEAD
 2. **Check new lessons.** For every PR or commit since the last run that fixed a bug or a review finding, make sure `devlog/lessons.md` has a lesson for it, or extend that lesson's **Seen** line and count. Use `lesson` mode below for each new one.
 3. **Build:** `node scripts/devlog-report.mjs --prs devlog/prs.json --html <scratchpad>/dev-control-tower.html`.
 4. **Publish** it with the Artifact tool as an update to the owner's existing dashboard, https://claude.ai/artifact/VbV5a77oLkWRr5KpKRcnaH (pass it as `url`; read it first, as the tool requires), so the owner keeps one link. If that link no longer works, look for "Voice Lab Dev Control Tower" with `action: list` before publishing a new one.
-5. **Commit and push** any changes to `devlog/` (lessons, PR data, this session's activity log).
+5. **Commit and push** on the branch the session is working on (its designated branch, or the current phase branch): run `node scripts/devlog-flush.mjs`, then commit the changes to `devlog/` (lessons, PR data and the new activity files). Activity files are always new files, so they never conflict when branches merge.
 6. **Report** in a few lines: what needs attention (from the top of the dashboard), any new lessons, and the link.
 
 ## `lesson <what happened>`
@@ -42,4 +43,5 @@ Read the current diff (`git diff origin/main...HEAD`) against every lesson's **R
 
 - Never record prompt text, command text, command output, phone numbers, credentials or customer data in `devlog/`.
 - The dashboard is internal to the owner. Publish it privately and do not share it.
-- Keep `devlog/activity/` files append-only: never edit or delete another session's log.
+- Never edit or delete a file in `devlog/activity/`; a correction is a new file.
+- `--html` must point outside the repository (the scratchpad); the script refuses to overwrite its template.

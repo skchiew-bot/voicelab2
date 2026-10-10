@@ -153,6 +153,8 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const day = (iso) => iso ? iso.slice(0, 10) : '—';
 const when = (iso) => iso ? iso.slice(0, 16).replace('T', ' ') + ' UTC' : '—';
+// Only links to GitHub and claude.ai are made clickable.
+const safeUrl = (u) => (/^https:\/\/(github\.com|claude\.ai)\//.test(String(u ?? '')) ? esc(u) : '#');
 const md = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
 const tier = (sev) => /^high/i.test(sev) ? 'h' : /^med/i.test(sev) ? 'm' : 'l';
 
@@ -194,17 +196,17 @@ function render(r) {
     const w = (n) => `${(n / maxF) * 100}%`;
     const fixed = p.findings.filter((f) => f.fixed).length;
     return `<div class="pr"><span class="n">#${p.number}</span>
-      <div class="t"><a href="${esc(p.url)}">${esc(p.title)}</a><small>${p.merged ? `Merged ${esc(day(p.merged))}` : esc(p.state)}${p.lessons.length ? ` · ${esc(p.lessons.join(', '))}` : ''}</small></div>
+      <div class="t"><a href="${safeUrl(p.url)}">${esc(p.title)}</a><small>${p.merged ? `Merged ${esc(day(p.merged))}` : esc(p.state)}${p.lessons.length ? ` · ${esc(p.lessons.join(', '))}` : ''}</small></div>
       <div class="bars">${p.findings.length ? `<div class="bar" role="img" aria-label="${c.h} high, ${c.m} medium, ${c.l} low findings"><span class="h" style="width:${w(c.h)}"></span><span class="m" style="width:${w(c.m)}"></span><span class="l" style="width:${w(c.l)}"></span></div>
         <small class="muted mono">${p.findings.length} findings · ${fixed} fixed</small>` : '<small class="muted">No review table</small>'}</div></div>`;
   }).join('') : '<div class="empty">No pull request data in this report. Run /control-tower to include it.</div>';
 
   $('sessions').innerHTML = r.sessions.length ? `<table><thead><tr><th>Session</th><th>Last active</th><th class="num">Commits</th><th class="num">Actions</th><th class="num">Failed</th><th class="num">Files edited</th></tr></thead><tbody>${
-    r.sessions.map((s) => `<tr><td><a class="mono" href="${esc(s.url)}">${esc(s.id.slice(-8))}</a></td><td class="mono">${esc(when(s.last))}</td><td class="num">${s.commits}</td><td class="num">${s.tools}</td><td class="num">${s.failures}</td><td class="num">${s.files}</td></tr>`).join('')}</tbody></table>`
+    r.sessions.map((s) => `<tr><td>${s.url ? `<a class="mono" href="${safeUrl(s.url)}">${esc(s.id.slice(-8))}</a>` : `<span class="mono">${esc(s.id.slice(-8))}</span>`}</td><td class="mono">${esc(when(s.last))}</td><td class="num">${s.commits}</td><td class="num">${s.tools}</td><td class="num">${s.failures}</td><td class="num">${s.files}</td></tr>`).join('')}</tbody></table>`
     : '<div class="empty">No sessions recorded yet.</div>';
 
-  $('failures').innerHTML = r.failures.length ? `<table><thead><tr><th>When</th><th>Action</th><th>Error</th></tr></thead><tbody>${
-    r.failures.map((f) => `<tr><td class="mono">${esc(when(f.ts))}</td><td>${esc(f.tool)}: ${esc(f.target)}</td><td class="mono">${esc(f.error)}</td></tr>`).join('')}</tbody></table>`
+  $('failures').innerHTML = r.failures.length ? `<table><thead><tr><th>When</th><th>Action</th><th>Failure</th></tr></thead><tbody>${
+    r.failures.map((f) => `<tr><td class="mono">${esc(when(f.ts))}</td><td>${esc(f.tool)}: ${esc(f.target)}</td><td>${esc(f.failure ?? f.error)}</td></tr>`).join('')}</tbody></table>`
     : '<div class="empty">No failed actions logged. Logging started on 2026-10-09; earlier sessions are covered by their commits and PRs only.</div>';
 
   $('commits').innerHTML = `<table><thead><tr><th>Date</th><th>Commit</th><th>What changed</th></tr></thead><tbody>${

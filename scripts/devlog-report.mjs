@@ -8,14 +8,15 @@
 // created_at, merged_at, body). Review findings are read from the "Independent review" table in
 // each body. Without --prs the report still covers everything that lives in the repository.
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
 const git = (...a) => { try { return execFileSync('git', a, { cwd: root, encoding: 'utf8', maxBuffer: 64 << 20 }); } catch { return ''; } };
-const sessionUrl = (id) => `https://claude.ai/code/${id}`;
+// Only claude.ai sessions have a link; a local CLI session's id does not.
+const sessionUrl = (id) => (/^session_\w+$/.test(id) ? `https://claude.ai/code/${id}` : null);
 
 // ----------------------------------------------------------------- commits
 function commits() {
@@ -51,11 +52,18 @@ export function parseLessons(md) {
 }
 
 // ---------------------------------------------------------------- activity
+// Committed lines (devlog/activity) plus this machine's unflushed spool, each line counted once.
 function activity() {
-  const dir = path.join(root, 'devlog', 'activity');
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir).filter((f) => f.endsWith('.jsonl')).flatMap((f) =>
-    readFileSync(path.join(dir, f), 'utf8').split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }));
+  const seen = new Set();
+  return [path.join(root, 'devlog', 'activity'), path.join(root, 'devlog', '.spool')].flatMap((dir) =>
+    existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.jsonl')).flatMap((f) =>
+      readFileSync(path.join(dir, f), 'utf8').split('\n').filter(Boolean).flatMap((l) => {
+        let e; try { e = JSON.parse(l); } catch { return []; }
+        const key = [e.ts, e.session, e.event, e.tool, e.target].join('|');
+        if (seen.has(key)) return [];
+        seen.add(key);
+        return [e];
+      })) : []);
 }
 
 // --------------------------------------------------------------- PR reviews
@@ -93,7 +101,7 @@ function build() {
   const stamp = (s, t) => { if (!s.first || t < s.first) s.first = t; if (!s.last || t > s.last) s.last = t; };
   for (const c of all) if (c.session && !c.merge) { const s = touch(c.session); s.commits++; stamp(s, c.date); }
   for (const e of events) {
-    const s = touch(e.session.startsWith('session_') ? e.session : `session_${e.session}`);
+    const s = touch(e.session);
     stamp(s, e.ts);
     if (e.event === 'UserPromptSubmit') s.prompts++;
     if (e.tool) { s.tools++; if (!e.ok) s.failures++; if (/^(Edit|Write|NotebookEdit)$/.test(e.tool) && e.target) s.files.add(e.target); }
@@ -139,14 +147,26 @@ function build() {
   };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+/** Put the report into the dashboard template. A function replacement, so "$'" in a title is just text. */
+export function renderHtml(template, report) {
+  // Escape "<" so no value can close the script tag it is embedded in.
+  const payload = JSON.stringify(report).replace(/</g, '\\u003c');
+  return template.replace('/*REPORT*/null', () => payload);
+}
+
+// Run as a script (not when imported); compare real paths as URLs so spaces or symlinks work.
+const invoked = (() => { try { return pathToFileURL(realpathSync(process.argv[1] ?? '')).href; } catch { return ''; } })();
+if (invoked && invoked === pathToFileURL(realpathSync(fileURLToPath(import.meta.url))).href) {
   const report = build();
   const json = JSON.stringify(report, null, 2);
   if (arg('--json')) writeFileSync(arg('--json'), json);
   if (arg('--html')) {
-    const template = readFileSync(path.join(root, 'devlog', 'dashboard.html'), 'utf8');
-    // Escape "<" so no value can close the script tag it is embedded in.
-    writeFileSync(arg('--html'), template.replace('/*REPORT*/null', JSON.stringify(report).replace(/</g, '\\u003c')));
+    const templatePath = path.join(root, 'devlog', 'dashboard.html');
+    if (path.resolve(arg('--html')) === templatePath) {
+      console.error('Refusing to overwrite the template devlog/dashboard.html; write the dashboard somewhere else.');
+      process.exit(1);
+    }
+    writeFileSync(arg('--html'), renderHtml(readFileSync(templatePath, 'utf8'), report));
   }
   if (!arg('--json') && !arg('--html')) process.stdout.write(json + '\n');
 }

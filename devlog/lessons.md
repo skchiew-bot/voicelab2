@@ -9,7 +9,7 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:** one or more lines `` `path` › "exact text" ``. The text must appear in that file, usually a test title. The test fails if a guard's file or text is removed, so a lesson cannot quietly lose its protection.
 
 ### L-001: Check-then-act needs a lock or an atomic claim
-- **Seen:** 9 times. Racing final callbacks ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)); two reconciliation checks at once ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)); two replies both firing an integration write ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)); the dial retry bypassing the capacity lock, and inbound capacity decided without it ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)); concurrent rate changes (Phase 0). Two approved changes to one flow could both go live, the older silently undoing the newer; the drop watchdog could flag a call twice (Phase 5 independent review, 2026-10-10). Two audio finishes at once recorded every phrase twice and spent the voice provider twice (Phase 6 independent review, 2026-10-10). Contact limits were read without a lock, so three simultaneous dials to one person all passed; a case closed while its number was being looked up was still dialled (Phase 7 independent review, 2026-10-10). A relay connection closing ended the call's run even when a newer connection had taken the call over, hanging up on the caller mid-conversation (live call voice link independent review, 2026-10-10).
+- **Seen:** 10 times. Racing final callbacks ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)); two reconciliation checks at once ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)); two replies both firing an integration write ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)); the dial retry bypassing the capacity lock, and inbound capacity decided without it ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)); concurrent rate changes (Phase 0). Two approved changes to one flow could both go live, the older silently undoing the newer; the drop watchdog could flag a call twice (Phase 5 independent review, 2026-10-10). Two audio finishes at once recorded every phrase twice and spent the voice provider twice (Phase 6 independent review, 2026-10-10). Contact limits were read without a lock, so three simultaneous dials to one person all passed; a case closed while its number was being looked up was still dialled (Phase 7 independent review, 2026-10-10). A relay connection closing ended the call's run even when a newer connection had taken the call over, hanging up on the caller mid-conversation (live call voice link independent review, 2026-10-10). A relay connection standing by whose socket closed while its look was under way could still take the call over, and its close then ended the run (live call voice link hardening review, 2026-10-10).
 - **Rule:** Any "read state, decide, write" path that two requests can reach at once takes a lock (`pg_advisory_xact_lock`, `SELECT … FOR UPDATE`) or claims the work atomically, and re-checks inside the lock. Write the simultaneous-requests test first.
 - **Guards:**
   - `tests/telephony.test.ts` › "survives the same final callback arriving three times at once"
@@ -24,12 +24,14 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/knowledge.test.ts` › "approves each level once and in order when three people approve at the same moment, and publishes a draft once"
   - `tests/control-actions.test.ts` › "holds dials back once the minute's quota is used, even when they arrive at the same moment, and lifts when cleared"
   - `tests/relay.test.ts` › "keeps serving the call on a new connection when the old one closes after it"
+  - `tests/relay.test.ts` › "a connection standing by looks again within seconds, stops looking once closed, and never takes the call over after"
 
 ### L-002: Never repeat an action whose outcome is unknown
-- **Seen:** The dial retry re-dialled after a timeout, risking two calls to one person ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)).
-- **Rule:** Retry only after a definite refusal. After a timeout or an unreadable reply, the first attempt may have taken effect: record it as unknown, never retry it automatically.
+- **Seen:** 2 times. The dial retry re-dialled after a timeout, risking two calls to one person ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). A live call that fell back while a reply was being applied ended the run with no sign that the reply was cut off, so whether it had reached a client's system could not be told from the record (live call voice link hardening review, 2026-10-10).
+- **Rule:** Retry only after a definite refusal. After a timeout or an unreadable reply, the first attempt may have taken effect: record it as unknown, never retry it automatically. Anything cut off part-way is recorded as cut off.
 - **Guards:**
   - `tests/concurrency.test.ts` › "does not dial again after a timeout or an unreadable reply"
+  - `tests/relay.test.ts` › "cuts off a reply still being applied when the call falls back: the run ends now, says it was cut off, and the reply cannot land"
 
 ### L-003: Look up data-defined names as own properties only
 - **Seen:** 2 times. Workflow names such as `constructor`, `toString` and `__proto__` passed validation, rendering, conditions and reply paths ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). A client's lexicon topic named like an inherited property (`toString`) broke turn reading (Phase 5 independent review, 2026-10-10).
@@ -214,17 +216,20 @@ Format, checked by `tests/devlog.test.ts`:
 
   - `tests/staff-roles.test.ts` › "keeps an admin added by another admin out until a different admin approves them, so one admin cannot invent a second approver"
 ### L-025: Derived state is valid only for the thing it was derived from
-- **Seen:** A promoted script was looked up by workflow, node and language only, so after a deploy changed the node callers kept hearing the old script until a scheduled screen ran; a script learned in one journey context was spoken in every context; and the screen that looked for a changed node could be tripped by simulating an undeployed draft (Phase 6 independent review, 2026-10-10).
+- **Seen:** 2 times. A promoted script was looked up by workflow, node and language only, so after a deploy changed the node callers kept hearing the old script until a scheduled screen ran; a script learned in one journey context was spoken in every context; and the screen that looked for a changed node could be tripped by simulating an undeployed draft (Phase 6 independent review, 2026-10-10). A relay connection that resumed a call kept the question number it read when it connected; once a reply landed on the connection that had dropped, every later answer was refused as being for an earlier question and the caller was left in silence (live call voice link hardening re-review, 2026-10-10).
 - **Rule:** Anything learned or derived from a definition (a script, a cache, a score) carries what it was derived from (here the node's hash and the journey context) and is used only when that still matches, checked at the point of use, not by a job that may not be running. A rehearsal of something undeployed never counts as evidence about what is live.
 - **Guards:**
   - `tests/learning.test.ts` › "is not demoted by simulating a draft, but stops being spoken the moment a deploy changes its node"
   - `tests/learning.test.ts` › "speaks a script only in the journey context it was learned in"
+  - `tests/relay.test.ts` › "a connection that carries on a call mid-reply catches up: it says the new question once the reply lands, and applies the answer after it"
+  - `tests/relay.test.ts` › "a reconnect that arrives while a reply is being applied says the next question once it lands, without the caller speaking first"
 
 ### L-026: Record what a model cost, even when its answer is thrown away
-- **Seen:** The script distiller was asked before the check for an existing script, so a scan paid for model calls whose tokens were never written down; council tokens were lost when a person decided first (Phase 6 independent review, 2026-10-10).
+- **Seen:** 2 times. The script distiller was asked before the check for an existing script, so a scan paid for model calls whose tokens were never written down; council tokens were lost when a person decided first (Phase 6 independent review, 2026-10-10). A live call's start or reply refused at its last step (the call had fallen back) threw away the model decisions it had paid for, and lines said again on a takeover were never counted as speech (live call voice link hardening re-review, 2026-10-10).
 - **Rule:** Check whether the answer is needed before asking a model, and record the model, tier and tokens of every call that is made, in its own step, whether or not the answer is used.
 - **Guards:**
   - `tests/learning.test.ts` › "does not ask a model to write a script for a node that already has one in review, and refuses to approve a script that fails the rules"
+  - `tests/relay.test.ts` › "records what a model cost on a start refused because the call fell back meanwhile"
 
 ### L-027: A human override must pass the same rule checks as the automatic path
 - **Seen:** A person could approve a script that the rule checks had already failed, and the approval was reported as an error after it had committed (Phase 6 independent review, 2026-10-10).
@@ -241,10 +246,11 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/scheduler.test.ts` › "works through a backlog in batches while each batch is full, and stops at its bound"
 
 ### L-029: An event can arrive before the record that expects it
-- **Seen:** A provider's end-of-call report was processed before the dispatcher had recorded the call against its case, so the outcome was dropped and the retry chain stopped for good (Phase 7 independent review, 2026-10-10).
-- **Rule:** When a record is written after a call to an outside system, look at whether the outside system has already reported by the time it is written, and settle it then. Never rely on the order in which two requests commit.
+- **Seen:** 2 times. A provider's end-of-call report was processed before the dispatcher had recorded the call against its case, so the outcome was dropped and the retry chain stopped for good (Phase 7 independent review, 2026-10-10). A relay connection that arrived while another was still starting the call stood by and never looked again, so if the starter died the caller heard silence; and a start that finished after the call had already fallen back still wrote a run (live call voice link re-check, 2026-10-10).
+- **Rule:** When a record is written after a call to an outside system, look at whether the outside system has already reported by the time it is written, and settle it then. Never rely on the order in which two requests commit. Anything waiting for another request's record looks again on a timer, and a decision already given (a fallback) is checked again when the late record is written.
 - **Guards:**
   - `tests/cases.test.ts` › "does not lose the outcome of a call the provider reported over before it was recorded"
+  - `tests/relay.test.ts` › "does not leave a standing-by connection silent when the one starting the call dies, and a late start then writes nothing"
 
 ### L-030: A request that needs several locks takes them all first, in one fixed order
 - **Seen:** A move into a group diary held the old diary's lock and then waited for the group's members, while a group booking held a member and waited for the other: Postgres broke the deadlock with an error, and half the requests failed with a 500 (Phase 7 appointments independent review, 2026-10-10).
@@ -307,11 +313,14 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/helpers.test.ts` › "drops a test database even when the server's own worker is still in it, and stops on any other error"
 
 ### L-039: Judge a failure by what happened, not by one name for it
-- **Seen:** The live call voice link first treated only the outcome `error` as a broken workflow. A client's system failing ends a run as `integration_failed`, so the caller would have been left in silence and the call hung up, with no callback recorded (found by the relay's own failure test, 2026-10-10). The relay then read every "refused" answer from a run as harmless, so a reply left half-applied by a stopped server left the caller in silence on every turn (live call voice link independent review, 2026-10-10).
+- **Seen:** The live call voice link first treated only the outcome `error` as a broken workflow. A client's system failing ends a run as `integration_failed`, so the caller would have been left in silence and the call hung up, with no callback recorded (found by the relay's own failure test, 2026-10-10). The relay then read every "refused" answer from a run as harmless, so a reply left half-applied by a stopped server left the caller in silence on every turn (live call voice link independent review, 2026-10-10). A connection that took over or resumed a run another had abandoned, or one that ended with an error, read it as a finished call and hung up in silence with no callback; and a standby whose look failed outright swallowed the error and said nothing (live call voice link hardening review, 2026-10-10).
 - **Rule:** Decide that something failed from the record of the failure (here, an error was recorded on the run), not from a list of outcome names that a new kind of failure can miss. Test the path with a failure of a different kind from the one you had in mind.
 - **Guards:**
   - `tests/relay.test.ts` › "never leaves the caller in silence when the workflow fails: records a callback first, says the holding message, and ends"
   - `tests/relay.test.ts` › "falls back, once, when a reply was left half-applied by a server that stopped"
+  - `tests/relay.test.ts` › "gives the caller the fallback, not silence, when the connection starting the call drops and its start then lands and is abandoned"
+  - `tests/relay.test.ts` › "gives the fallback to a connection that takes over or resumes a run that broke or was abandoned"
+  - `tests/relay.test.ts` › "a connection standing by falls back, never goes silent, when its look fails outright"
 
 ### L-040: Never hold a pooled connection while waiting for another from the same pool
 - **Seen:** The live call voice link took a lock on its own pooled connection and then needed more connections to start the call, so ten calls answered at once took every connection and all waited for ever; every route of the server hung, and the pool had no time limit to break it (live call voice link independent review, 2026-10-10).
@@ -335,3 +344,10 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/scheduler.test.ts` › "lets a run that outlived its lease record itself, but never report the newer run as finished or give back its lease"
   - `tests/scheduler.test.ts` › "gives up waiting for a run past its deadline, records it as failed, and keeps the lease since the work may still be going"
   - `tests/scheduler.test.ts` › "stops within its grace period even when a run is stuck, leaving that run unfinished"
+
+### L-043: Take a person's words as an answer only to a question they heard
+- **Seen:** 2 times. A relay connection that took a call over applied the caller's first words as the answer to a question that had gone to the connection that dropped, so a "yes" could become consent to something never heard; words said over the greeting were taken as the answer to the first question (live call voice link hardening review, 2026-10-10). Then a connection that took a call over by its timer still applied words that had arrived while it was doing so (live call voice link hardening re-review, 2026-10-10).
+- **Rule:** Apply an answer only to a question this side knows was put to the person on the line they are on. When that is in doubt (a takeover, words that arrived before the question was sent), ask again instead of applying them.
+- **Guards:**
+  - `tests/relay.test.ts` › "lets a standing-by connection take the call over once the run exists: it says the last lines again, recordings included, and does not apply words said before the caller heard them"
+  - `tests/relay.test.ts` › "does not take words that arrived before the first question was asked as its answer"

@@ -422,7 +422,7 @@ describe.skipIf(!run)('admin UI', () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
     await signIn(page, env.staffToken);
     await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
-    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience', 'tickets', 'qa', 'changes', 'learning', 'cases', 'appointments', 'knowledge']) {
+    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience', 'tickets', 'qa', 'changes', 'learning', 'cases', 'appointments', 'knowledge', 'change-log']) {
       await page.goto(`${base}#/${route}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
@@ -911,6 +911,23 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(ask.getByRole('status')).toContainText('Not allowed: Only a person may waive a fee.');
     await page.close();
   }, 90_000);
+
+  it('shows who changed what and why in the change log, and the panels on the Control Tower', async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 1000 } });
+    await signIn(page, env.staffToken);
+    await expect(page.getByLabel('Runway')).toBeVisible();
+    await expect(page.getByLabel('Learning loop')).toContainText('waiting for review');
+    await expect(page.getByLabel('Modules')).toContainText('Cases');
+    await page.goto(`${base}#/change-log`);
+    const changes = page.getByLabel('Changes');
+    await expect(changes).toContainText('policy.propose');
+    await expect(changes.getByRole('row').filter({ hasText: 'policy.propose' }).first()).toContainText('The first policy.');   // the reason, from the proposal itself
+    await expect(changes).toContainText('staff@daythree.test');
+    await page.getByLabel('Show').selectOption({ label: 'Money and rates' });
+    await expect(changes).not.toContainText('policy.propose');
+    await expect(changes).toContainText('fx.add');
+    await page.close();
+  });
 
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();

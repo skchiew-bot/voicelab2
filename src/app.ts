@@ -27,6 +27,8 @@ import { registerStitchingRoutes } from './routes/stitching.js';
 import { registerWorkflowRoutes } from './routes/workflows.js';
 import type { HttpDeps } from './workflows/integrations.js';
 import { controlTower } from './store/control-tower.js';
+import { changeLog, changeLogQuery } from './store/change-log.js';
+import { controlTowerPanels } from './store/panels.js';
 import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
 import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
 import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
@@ -380,6 +382,15 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   app.get('/internal/control-tower', async (req) => {
     const s = await internal(req);
     return withActor(pool, s.actor, (c) => controlTower(c, key, { publicBaseUrlSet: Boolean(callDeps.baseUrl) }));
+  });
+  app.get('/internal/control-tower/panels', async (req) => {
+    const s = await internal(req);
+    return withActor(pool, s.actor, (c) => controlTowerPanels(c));
+  });
+  app.get('/internal/change-log', async (req) => {
+    const s = await internal(req);
+    const q = changeLogQuery.parse(req.query);
+    return withActor(pool, s.actor, (c) => changeLog(c, q));
   });
   app.get('/internal/progress', async (req) => {
     await internal(req);

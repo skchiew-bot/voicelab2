@@ -38,11 +38,12 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/tracker.test.ts` › "lets a client name a topic like an inherited property without breaking the reading"
 
 ### L-004: Money never passes through a JavaScript number, including on screen
-- **Seen:** 2 times. The funding monitor compared balances as floats ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). The console still showed balances and credits with `Number(…).toLocaleString()` on three screens, found by the dev Control Tower check on 2026-10-09.
+- **Seen:** 3 times. The funding monitor compared balances as floats ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). The console still showed balances and credits with `Number(…).toLocaleString()` on three screens, found by the dev Control Tower check on 2026-10-09. The Control Tower's funding alerts still compared and printed balances with `Number()` (found while building the panels, 2026-10-10).
 - **Rule:** Amounts stay decimal strings or BigInt (`src/money.ts`). In the console, format them with `fmtDecimal` from `admin/src/ui.tsx`, never `Number()` or `parseFloat()`.
 - **Guards:**
   - `tests/billing.test.ts` › "has no floating point drift"
   - `tests/devlog.test.ts` › "keeps money out of floating point in the console"
+  - `tests/control-tower-panels.test.ts` › "names a funding balance in an alert to the last decimal place, never through a floating-point number"
 
 ### L-005: Something that never happened gets no status as if it had
 - **Seen:** 4 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10). A call never answered was recorded as a customer hang-up or a system drop; a QA run with nothing scored was stored as 0; a later normal end cleared a fault already flagged (Phase 5 independent review, 2026-10-10). A plain no-answer was counted as a missed call in the alert, and a callback the dispatcher was late for used up one of the person's retries though nobody was dialled (Phase 7 independent review, 2026-10-10). A delay flagged appointments it never reached as needing a new time, and told their customers they could not go ahead (Phase 7 appointments independent review, 2026-10-10).

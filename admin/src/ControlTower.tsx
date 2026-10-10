@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
-import { api, type PhaseProgress, type Progress, type Tower } from './api';
+import { api, type Panels, type PhaseProgress, type Progress, type Tower } from './api';
+import { TowerPanels } from './TowerPanels';
 import { Errors, fmtDate, fmtDecimal, useLoad } from './ui';
 
 const SEVERITY = { high: 'badge bad', medium: 'badge warn', low: 'badge' } as const;
@@ -46,8 +47,10 @@ function Phase({ p }: { p: PhaseProgress }) {
 export function ControlTower() {
   const tower = useLoad(() => api<Tower>('GET', '/internal/control-tower'));
   const progress = useLoad(() => api<Progress>('GET', '/internal/progress'));
+  const panels = useLoad(() => api<Panels>('GET', '/internal/control-tower/panels'));
   // Live panels refresh by themselves; the progress view changes only when the code does.
   useEffect(() => { const t = setInterval(tower.reload, 15_000); return () => clearInterval(t); }, [tower.reload]);
+  useEffect(() => { const t = setInterval(panels.reload, 60_000); return () => clearInterval(t); }, [panels.reload]);
 
   const phases = progress.data?.phases ?? [];
   const count = (s: string) => phases.filter((p) => p.status === s).length;
@@ -61,7 +64,7 @@ export function ControlTower() {
       <h1>Control Tower</h1>
       <p className="muted">
         {t ? `Updated ${new Date(t.generatedAt).toLocaleTimeString()}. ` : ''}
-        <button className="link" onClick={() => { tower.reload(); progress.reload(); }}>Refresh now</button>
+        <button className="link" onClick={() => { tower.reload(); progress.reload(); panels.reload(); }}>Refresh now</button>
       </p>
       {(tower.error || progress.error) && (t || progress.data) && (
         <div className="errors" role="alert">The latest refresh failed, so what you see below may be out of date{t ? ` (as of ${new Date(t.generatedAt).toLocaleTimeString()})` : ''}.</div>
@@ -146,7 +149,7 @@ export function ControlTower() {
                 <tbody>{t.funding.map((f) => <tr key={`${f.provider_id}-${f.currency}`}><td>{f.provider}</td><td>{fmtDecimal(f.balance)} {f.currency}</td></tr>)}</tbody>
               </table>
             )}
-            <p className="muted">Balances are what staff recorded. Call costs are not deducted from them automatically yet, so there is no runway figure.</p>
+            <p className="muted">Balances are what staff recorded; calls are not deducted from them. Days of funding left are worked out further down.</p>
           </section>
 
           <section className="card" aria-label="Cost and margin">
@@ -163,6 +166,11 @@ export function ControlTower() {
           </section>
         </>
       )}
+
+      {panels.error && panels.data && <div className="errors" role="alert">The panels below could not be refreshed, so they show figures from {new Date(panels.data.generatedAt).toLocaleTimeString()}.</div>}
+      {panels.error && !panels.data && <Errors error={panels.error} />}
+      {panels.data && <TowerPanels p={panels.data} />}
+      <p className="muted"><a href="#/change-log">Change log</a>: every change made, who made it and why.</p>
     </>
   );
 }

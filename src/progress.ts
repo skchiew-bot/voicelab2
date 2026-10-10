@@ -150,12 +150,12 @@ export const PHASES: PhaseProgress[] = [
     ],
   },
   {
-    id: 'CT', name: 'Control Tower', status: 'in_progress', summary: 'One internal console to see and steer the whole platform. Version 1 shows project progress, what needs attention, live calls, provider health, funding and cost.',
+    id: 'CT', name: 'Control Tower', status: 'in_progress', summary: 'One internal console to see and steer the whole platform. It shows project progress, what needs attention, live calls, provider health, funding with days left, cost and margin, concurrency, stitching, deliverability, journey and QA, the learning loop and the business modules, and a change log of who changed what and why.',
     criteria: [
-      { text: 'An operator can answer these from one screen without opening a provider console:', state: 'partly', proof: 'tests', note: 'What needs attention, live calls, provider health, recorded funding balances, and cost and margin totals are on one screen; cost by campaign is one click away on the Calls screen. Funding is not yet deducted automatically as calls are costed, and alerts are shown in the console only.' },
-      { text: 'Every action taken in the Control Tower appears in the change log, with who did it and why.', state: 'not_met', proof: 'none', note: 'Actions are recorded in the audit log, but no change-log screen shows them yet.' },
+      { text: 'An operator can answer these from one screen without opening a provider console:', state: 'partly', proof: 'tests', note: 'What needs attention, live calls, provider health, funding with days left at the last week\'s spend, cost and margin, concurrency against ceilings, and the stitching, deliverability, journey, learning and module panels are on one screen; cost by campaign is one click away on the Calls screen. Days left are worked out from the balance staff recorded (calls are not deducted from it), and alerts are shown in the console only. Tested against fakes; no real provider has been connected.' },
+      { text: 'Every action taken in the Control Tower appears in the change log, with who did it and why.', state: 'partly', proof: 'tests', note: 'The change log shows every audited change, newest first, with who made it and the reason given when it was made (a change request\'s reason, an approval\'s note, a policy\'s summary, a demotion\'s reason). The Control Tower itself does not yet offer its own actions (drain a provider, force failover, change a ceiling); they are taken on their own screens, and many settings changes ask for no reason, so the log says none was recorded.' },
     ],
-    open: ['A change-log screen (actions are recorded in the audit log, but nothing shows them yet)', 'Alerts by email, WhatsApp or Slack', 'Funding runway and burn rate'],
+    open: ['Actions on the Control Tower itself (drain a provider, force failover, set preferred, change the dialling pace), each asking for a reason', 'A reason asked for on settings changes that take none today', 'Alerts by email, WhatsApp or Slack', 'Calls taken off the recorded funding balance automatically', 'Clusters close to the promotion threshold on the learning panel'],
   },
 ];
 

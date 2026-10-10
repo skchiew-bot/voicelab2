@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { fromScaled, toScaled } from '../money.js';
 import { decryptSecrets } from '../secrets.js';
 import { appointmentSummary } from './appointments.js';
 import { caseSummary } from './cases.js';
@@ -119,7 +120,7 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   for (const f of funding) {
     // Funding is recorded by hand today (calls do not deduct from it), so this flags a recorded balance that has run out.
     // A disabled provider is no longer in use, so an empty balance there is not news.
-    if (f.status === 'active' && Number(f.balance) <= 0) add('high', 'funding_empty', `${f.provider}: the recorded funding balance is ${Number(f.balance)} ${f.currency}.`, `#/providers/${f.provider_id}`);
+    if (f.status === 'active' && toScaled(String(f.balance)) <= 0n) add('high', 'funding_empty', `${f.provider}: the recorded funding balance is ${fromScaled(toScaled(String(f.balance)))} ${f.currency}.`, `#/providers/${f.provider_id}`);
   }
 
   // Failover and capacity: what the system is doing to keep calls alive, so a person hears about it too.
@@ -132,8 +133,8 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   }
   for (const f of await fundingStatus(c)) {
     if (f.providerStatus !== 'active') continue;
-    if (f.level === 'critical') add('high', 'funding_critical', `${f.provider}: the funding balance (${Number(f.balance)} ${f.currency}) is below its critical level.`, `#/providers/${f.providerId}`);
-    else if (f.level === 'warn') add('medium', 'funding_low', `${f.provider}: the funding balance (${Number(f.balance)} ${f.currency}) is below its warning level.`, `#/providers/${f.providerId}`);
+    if (f.level === 'critical') add('high', 'funding_critical', `${f.provider}: the funding balance (${fromScaled(toScaled(String(f.balance)))} ${f.currency}) is below its critical level.`, `#/providers/${f.providerId}`);
+    else if (f.level === 'warn') add('medium', 'funding_low', `${f.provider}: the funding balance (${fromScaled(toScaled(String(f.balance)))} ${f.currency}) is below its warning level.`, `#/providers/${f.providerId}`);
   }
   // A call the system dropped is loud: it is an alert the moment it is flagged, until someone has acknowledged it.
   const faults = (await c.query(`SELECT count(*)::int AS n FROM calls c WHERE c.fault AND NOT EXISTS (SELECT 1 FROM fault_acks a WHERE a.call_id = c.id)`)).rows[0].n as number;

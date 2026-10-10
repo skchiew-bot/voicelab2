@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api, type FxRate, type RateCard } from './api';
-import { Errors, Field, fmtDate, useAction, useLoad } from './ui';
+import { Errors, Field, fmtDate, fmtDecimal, useAction, useLoad } from './ui';
 
 function Fx() {
   const rates = useLoad(() => api<FxRate[]>('GET', '/internal/fx'));
@@ -18,7 +18,7 @@ function Fx() {
       {rates.data && rates.data.length > 0 && (
         <table>
           <thead><tr><th>Currency</th><th>Per 1 USD</th><th>Effective from</th></tr></thead>
-          <tbody>{rates.data.map((r) => <tr key={r.id}><td>{r.currency}</td><td>{Number(r.per_usd)}</td><td>{fmtDate(r.effective_from)}</td></tr>)}</tbody>
+          <tbody>{rates.data.map((r) => <tr key={r.id}><td>{r.currency}</td><td>{fmtDecimal(r.per_usd)}</td><td>{fmtDate(r.effective_from)}</td></tr>)}</tbody>
         </table>
       )}
       <form className="grid" aria-label="Add FX rate" onSubmit={async (e) => {
@@ -52,7 +52,7 @@ function Card() {
         <table>
           <thead><tr><th>Effective from</th><th>Inbound / min</th><th>Outbound / min</th><th>Credit value (USD)</th></tr></thead>
           <tbody>{cards.data.map((r) => (
-            <tr key={r.id}><td>{fmtDate(r.effective_from)}</td><td>{Number(r.inbound_credits_per_minute)}</td><td>{Number(r.outbound_credits_per_minute)}</td><td>{Number(r.credit_value_usd)}</td></tr>
+            <tr key={r.id}><td>{fmtDate(r.effective_from)}</td><td>{fmtDecimal(r.inbound_credits_per_minute)}</td><td>{fmtDecimal(r.outbound_credits_per_minute)}</td><td>{fmtDecimal(r.credit_value_usd)}</td></tr>
           ))}</tbody>
         </table>
       )}

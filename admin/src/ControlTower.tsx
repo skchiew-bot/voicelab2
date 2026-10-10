@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { api, type PhaseProgress, type Progress, type Tower } from './api';
-import { Errors, fmtDate, useLoad } from './ui';
+import { Errors, fmtDate, fmtDecimal, useLoad } from './ui';
 
 const SEVERITY = { high: 'badge bad', medium: 'badge warn', low: 'badge' } as const;
 const STATUS = { done: ['Done', 'badge ok'], in_progress: ['In progress', 'badge warn'], not_started: ['Not started', 'badge'] } as const;
@@ -143,7 +143,7 @@ export function ControlTower() {
             {t.funding.length === 0 ? <p className="muted">No funding recorded yet.</p> : (
               <table>
                 <thead><tr><th>Provider</th><th>Recorded balance</th></tr></thead>
-                <tbody>{t.funding.map((f) => <tr key={`${f.provider_id}-${f.currency}`}><td>{f.provider}</td><td>{Number(f.balance).toLocaleString()} {f.currency}</td></tr>)}</tbody>
+                <tbody>{t.funding.map((f) => <tr key={`${f.provider_id}-${f.currency}`}><td>{f.provider}</td><td>{fmtDecimal(f.balance)} {f.currency}</td></tr>)}</tbody>
               </table>
             )}
             <p className="muted">Balances are what staff recorded. Call costs are not deducted from them automatically yet, so there is no runway figure.</p>
@@ -155,7 +155,7 @@ export function ControlTower() {
               <thead><tr><th /><th>Calls</th><th>Cost (USD)</th><th>Cost (MYR)</th><th>Credits drawn</th><th>Margin (USD)</th></tr></thead>
               <tbody>
                 {([['Last 24 hours', t.money.last24h], ['Last 7 days', t.money.last7d]] as const).map(([label, m]) => (
-                  <tr key={label}><td>{label}</td><td>{m.calls}</td><td>{Number(m.cost_usd)}</td><td>{Number(m.cost_myr)}</td><td>{Number(m.credits_drawn)}</td><td>{Number(m.margin_usd)}</td></tr>
+                  <tr key={label}><td>{label}</td><td>{m.calls}</td><td>{fmtDecimal(m.cost_usd)}</td><td>{fmtDecimal(m.cost_myr)}</td><td>{fmtDecimal(m.credits_drawn)}</td><td>{fmtDecimal(m.margin_usd)}</td></tr>
                 ))}
               </tbody>
             </table>

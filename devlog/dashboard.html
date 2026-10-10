@@ -1,0 +1,220 @@
+<title>Voice Lab Dev Control Tower</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: an air-traffic strip board. A status rail on top, then lessons as flight strips, then the build timeline. */
+:root {
+  --bg: #eef1f4;
+  --panel: #ffffff;
+  --ink: #17202b;
+  --muted: #5a6776;
+  --line: #d3dae2;
+  --accent: #1f5f99;
+  --strip: #f6f8fa;
+  --ok: #2e7d4f;
+  --warn: #b26a00;
+  --crit: #b3261e;
+  --info: #1f5f99;
+  --ok-soft: #e3f2e8;
+  --warn-soft: #fbefdc;
+  --crit-soft: #fbe4e2;
+  --info-soft: #e2edf7;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11161c; --panel: #18202a; --ink: #e4e9ef; --muted: #93a1b0; --line: #2a3542; --accent: #7fb3e6; --strip: #1d2632;
+    --ok: #6cc28e; --warn: #e8a64a; --crit: #f08a82; --info: #7fb3e6;
+    --ok-soft: #1b3326; --warn-soft: #3a2c14; --crit-soft: #3d1d1b; --info-soft: #1a2c40;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11161c; --panel: #18202a; --ink: #e4e9ef; --muted: #93a1b0; --line: #2a3542; --accent: #7fb3e6; --strip: #1d2632;
+  --ok: #6cc28e; --warn: #e8a64a; --crit: #f08a82; --info: #7fb3e6;
+  --ok-soft: #1b3326; --warn-soft: #3a2c14; --crit-soft: #3d1d1b; --info-soft: #1a2c40;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--f-body); }
+.wrap { max-width: 1120px; margin: 0 auto; padding-inline: 16px; padding-block: 24px 48px; display: grid; gap: 28px; }
+a { color: var(--accent); }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+h1, h2 { font-family: var(--f-display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(1.6rem, 4vw, 2.2rem); font-weight: 700; letter-spacing: 0.01em; }
+h2 { font-size: 1.15rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.mono, .num { font-family: var(--f-data); font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: end; justify-content: space-between; }
+header .meta { font-family: var(--f-data); font-size: 0.8rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 16px; }
+section { display: grid; gap: 12px; min-width: 0; }
+
+/* Status rail */
+.rail { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.rail div { padding: 14px 16px; border-right: 1px solid var(--line); display: grid; gap: 2px; }
+.rail div:last-child { border-right: 0; }
+.rail .v { font-family: var(--f-data); font-size: 1.5rem; font-weight: 500; font-variant-numeric: tabular-nums; }
+.rail .k { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.rail .s { font-size: 0.8rem; color: var(--muted); }
+
+/* Attention */
+.alerts { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.alerts li { padding: 8px 12px; border-left: 4px solid var(--info); background: var(--info-soft); border-radius: 0 4px 4px 0; }
+.alerts li.critical { border-color: var(--crit); background: var(--crit-soft); }
+.alerts li.warning { border-color: var(--warn); background: var(--warn-soft); }
+.alerts li.clear { border-color: var(--ok); background: var(--ok-soft); }
+
+/* Lessons as flight strips */
+.strips { display: grid; gap: 8px; }
+.strip { display: grid; grid-template-columns: 76px minmax(0, 1fr) auto; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.strip .id { background: var(--strip); border-right: 1px dashed var(--line); padding: 12px 10px; font-family: var(--f-data); font-weight: 500; display: grid; align-content: start; gap: 6px; }
+.strip .body { padding: 12px 14px; min-width: 0; display: grid; gap: 4px; }
+.strip .title { font-weight: 600; }
+.strip .rule { color: var(--muted); font-size: 0.9rem; }
+.strip .side { padding: 12px 14px; display: grid; gap: 6px; align-content: start; justify-items: end; border-left: 1px dashed var(--line); }
+.strip details { font-size: 0.85rem; }
+.strip summary { cursor: pointer; color: var(--accent); }
+.strip details ul { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 2px; }
+.strip details li code { font-family: var(--f-data); font-size: 0.8rem; }
+.pill { display: inline-block; font-family: var(--f-data); font-size: 0.75rem; padding: 1px 8px; border-radius: 999px; white-space: nowrap; background: var(--info-soft); color: var(--info); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.crit { background: var(--crit-soft); color: var(--crit); }
+.strip.repeat .id { box-shadow: inset 4px 0 0 var(--warn); }
+.strip.broken .id { box-shadow: inset 4px 0 0 var(--crit); }
+
+/* PR timeline */
+.prs { display: grid; gap: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.pr { display: grid; grid-template-columns: 64px minmax(0, 1fr) minmax(140px, 220px); gap: 4px 16px; padding: 12px 16px; border-top: 1px solid var(--line); align-items: center; }
+.pr:first-child { border-top: 0; }
+.pr .n { font-family: var(--f-data); color: var(--muted); }
+.pr .t { min-width: 0; }
+.pr .t small { display: block; color: var(--muted); font-size: 0.8rem; }
+.bar { display: flex; height: 10px; border-radius: 2px; overflow: hidden; background: var(--strip); }
+.bar span { display: block; height: 100%; }
+.bar .h { background: var(--crit); } .bar .m { background: var(--warn); } .bar .l { background: var(--info); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+/* Tables */
+.tablebox { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+th, td { text-align: left; padding: 8px 12px; border-top: 1px solid var(--line); vertical-align: top; }
+thead th { border-top: 0; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 500; }
+td.num, th.num { text-align: right; }
+td.mono { white-space: nowrap; }
+.rule code, .strip .title code { font-family: var(--f-data); font-size: 0.85em; background: var(--strip); padding: 0 3px; border-radius: 2px; }
+.empty { padding: 16px; color: var(--muted); }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 28px; }
+footer { font-size: 0.8rem; color: var(--muted); }
+@media (max-width: 640px) {
+  .strip { grid-template-columns: 64px minmax(0, 1fr); }
+  .strip .side { grid-column: 1 / -1; justify-items: start; border-left: 0; border-top: 1px dashed var(--line); grid-auto-flow: column; justify-content: start; }
+  .pr { grid-template-columns: 48px minmax(0, 1fr); }
+  .pr .bars { grid-column: 2; }
+}
+@media (prefers-reduced-motion: no-preference) { .strip, .pr { transition: background-color .15s; } }
+</style>
+
+<div class="wrap" id="app">
+  <header>
+    <div>
+      <h1>Voice Lab Dev Control Tower</h1>
+      <div class="muted">How Claude Code is building Voice Lab: what was done, what went wrong, and what stops it happening again.</div>
+    </div>
+    <div class="meta" id="meta"></div>
+  </header>
+  <div class="rail" id="rail" aria-label="Summary"></div>
+  <section aria-labelledby="att-h"><h2 id="att-h">Needs attention</h2><ul class="alerts" id="attention"></ul></section>
+  <section aria-labelledby="les-h">
+    <h2 id="les-h">Lessons and their guards</h2>
+    <p class="muted" style="margin:0">Every past mistake, the rule that replaces it, and the tests that fail if it comes back. Amber marks a mistake that has happened more than once.</p>
+    <div class="strips" id="lessons"></div>
+  </section>
+  <section aria-labelledby="pr-h">
+    <h2 id="pr-h">Pull requests and review findings</h2>
+    <div class="legend"><span><i style="background:var(--crit)"></i>High</span><span><i style="background:var(--warn)"></i>Medium</span><span><i style="background:var(--info)"></i>Low or unrated</span></div>
+    <div class="prs" id="prs"></div>
+  </section>
+  <div class="cols">
+    <section aria-labelledby="ses-h"><h2 id="ses-h">Sessions</h2><div class="tablebox" id="sessions"></div></section>
+    <section aria-labelledby="fail-h"><h2 id="fail-h">Recent failed actions</h2><div class="tablebox" id="failures"></div></section>
+  </div>
+  <section aria-labelledby="com-h"><h2 id="com-h">Commits</h2><div class="tablebox" id="commits"></div></section>
+  <footer id="foot"></footer>
+</div>
+
+<script>
+const REPORT = /*REPORT*/null;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const day = (iso) => iso ? iso.slice(0, 10) : '—';
+const when = (iso) => iso ? iso.slice(0, 16).replace('T', ' ') + ' UTC' : '—';
+// Only links to GitHub and claude.ai are made clickable.
+const safeUrl = (u) => (/^https:\/\/(github\.com|claude\.ai)\//.test(String(u ?? '')) ? esc(u) : '#');
+const md = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+const tier = (sev) => /^high/i.test(sev) ? 'h' : /^med/i.test(sev) ? 'm' : 'l';
+
+function render(r) {
+  const t = r.totals;
+  $('meta').innerHTML = `<span>${esc(r.repo)}</span><span>${esc(r.branch)} @ ${esc(r.head)}</span><span>Generated ${esc(when(r.generatedAt))}</span>`;
+  const rail = [
+    ['Lessons', t.lessons, `${t.repeats} happened more than once`],
+    ['Guards in place', `${t.guardsOk}/${t.guards}`, t.guardsOk === t.guards ? 'all tests still there' : 'some guards are gone'],
+    ['Review findings', t.findings, `${t.findingsFixed} fixed · ${t.highFindings} high`],
+    ['PRs merged', t.prsMerged, `${t.commits} commits`],
+    ['Sessions', t.sessions, `${t.toolCalls} logged actions`],
+    ['Failed actions', t.failures, 'from the activity log'],
+  ];
+  $('rail').innerHTML = rail.map(([k, v, s]) => `<div><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span><span class="s">${esc(s)}</span></div>`).join('');
+
+  $('attention').innerHTML = r.attention.length
+    ? r.attention.map((a) => `<li class="${esc(a.level)}">${esc(a.text)}</li>`).join('')
+    : '<li class="clear">Nothing needs attention. Every guard is in place and no lesson has repeated.</li>';
+
+  $('lessons').innerHTML = r.lessons.map((l) => {
+    const bad = l.guards.filter((g) => !g.ok).length;
+    const cls = bad ? 'broken' : l.times >= 2 ? 'repeat' : '';
+    return `<article class="strip ${cls}">
+      <div class="id">${esc(l.id)}${l.times >= 2 ? `<span class="pill warn">×${l.times}</span>` : ''}</div>
+      <div class="body"><div class="title">${esc(l.title)}</div><div class="rule">${md(l.rule)}</div>
+        <details><summary>Where it happened and what guards it</summary>
+          <p class="muted" style="margin:6px 0 0">${md(l.seen)}</p>
+          <ul>${l.guards.map((g) => `<li>${g.ok ? '' : '<strong>Missing:</strong> '}<code>${esc(g.file)}</code> · ${esc(g.text)}</li>`).join('')}</ul>
+        </details></div>
+      <div class="side"><span class="pill ${bad ? 'crit' : 'ok'}">${bad ? `${bad} guard${bad > 1 ? 's' : ''} missing` : `${l.guards.length} guard${l.guards.length > 1 ? 's' : ''}`}</span>
+        ${l.prs.length ? `<span class="muted mono" style="font-size:.8rem">${l.prs.map((n) => `#${n}`).join(' ')}</span>` : ''}</div>
+    </article>`;
+  }).join('');
+
+  const maxF = Math.max(1, ...r.prs.map((p) => p.findings.length));
+  $('prs').innerHTML = r.prs.length ? r.prs.slice().reverse().map((p) => {
+    const c = { h: 0, m: 0, l: 0 }; p.findings.forEach((f) => c[tier(f.severity)]++);
+    const w = (n) => `${(n / maxF) * 100}%`;
+    const fixed = p.findings.filter((f) => f.fixed).length;
+    return `<div class="pr"><span class="n">#${p.number}</span>
+      <div class="t"><a href="${safeUrl(p.url)}">${esc(p.title)}</a><small>${p.merged ? `Merged ${esc(day(p.merged))}` : esc(p.state)}${p.lessons.length ? ` · ${esc(p.lessons.join(', '))}` : ''}</small></div>
+      <div class="bars">${p.findings.length ? `<div class="bar" role="img" aria-label="${c.h} high, ${c.m} medium, ${c.l} low findings"><span class="h" style="width:${w(c.h)}"></span><span class="m" style="width:${w(c.m)}"></span><span class="l" style="width:${w(c.l)}"></span></div>
+        <small class="muted mono">${p.findings.length} findings · ${fixed} fixed</small>` : '<small class="muted">No review table</small>'}</div></div>`;
+  }).join('') : '<div class="empty">No pull request data in this report. Run /control-tower to include it.</div>';
+
+  $('sessions').innerHTML = r.sessions.length ? `<table><thead><tr><th>Session</th><th>Last active</th><th class="num">Commits</th><th class="num">Actions</th><th class="num">Failed</th><th class="num">Files edited</th></tr></thead><tbody>${
+    r.sessions.map((s) => `<tr><td>${s.url ? `<a class="mono" href="${safeUrl(s.url)}">${esc(s.id.slice(-8))}</a>` : `<span class="mono">${esc(s.id.slice(-8))}</span>`}</td><td class="mono">${esc(when(s.last))}</td><td class="num">${s.commits}</td><td class="num">${s.tools}</td><td class="num">${s.failures}</td><td class="num">${s.files}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="empty">No sessions recorded yet.</div>';
+
+  $('failures').innerHTML = r.failures.length ? `<table><thead><tr><th>When</th><th>Action</th><th>Failure</th></tr></thead><tbody>${
+    r.failures.map((f) => `<tr><td class="mono">${esc(when(f.ts))}</td><td>${esc(f.tool)}: ${esc(f.target)}</td><td>${esc(f.failure ?? f.error)}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="empty">No failed actions logged. Logging started on 2026-10-09; earlier sessions are covered by their commits and PRs only.</div>';
+
+  $('commits').innerHTML = `<table><thead><tr><th>Date</th><th>Commit</th><th>What changed</th></tr></thead><tbody>${
+    r.commits.map((c) => `<tr><td class="mono">${esc(day(c.date))}</td><td class="mono"><a href="https://github.com/${esc(r.repo)}/commit/${esc(c.sha)}">${esc(c.sha)}</a></td><td>${esc(c.subject)}</td></tr>`).join('')}</tbody></table>`;
+
+  $('foot').textContent = 'A snapshot, regenerated each time /control-tower runs. Sources: git history, devlog/activity, devlog/lessons.md and the repository\'s pull requests.';
+}
+
+if (REPORT) render(REPORT);
+else $('app').insertAdjacentHTML('beforeend', '<p class="muted">This is the template. Generate the dashboard with: node scripts/devlog-report.mjs --html out.html</p>');
+</script>

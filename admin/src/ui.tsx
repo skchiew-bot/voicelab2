@@ -48,4 +48,6 @@ export function useAction() {
   return { pending, error, run };
 }
 
+export { fmtDecimal } from './format';
+
 export const fmtDate = (iso: string) => new Date(iso).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';

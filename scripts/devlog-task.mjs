@@ -120,8 +120,13 @@ if (invoked && invoked === pathToFileURL(realpathSync(fileURLToPath(import.meta.
       console.log(event.event === 'Incident' ? `Recorded ${event.id}.` : `Task ${event.id}: ${event.action} recorded.`);
       const max = readConfig().stopLoss?.maxTaskAttempts;
       if (event.event === 'Task' && max && event.attempt > max) {
-        append({ ts: event.ts, session: event.session, event: 'Alert', kind: 'stop-loss', rule: 'task-attempts', key: event.id });
-        console.log(`STOP-LOSS TRIGGERED (dev Control Tower): task ${event.id} is on attempt ${event.attempt}, over the budget of ${max}. Stop, summarise the evidence, and escalate to the owner.`);
+        // One alert per task and attempt, however often the attempt is updated.
+        const { activity } = await import('./devlog-report.mjs');
+        const key = `${event.id}#${event.attempt}`;
+        if (!activity().some((e) => e.event === 'Alert' && e.rule === 'task-attempts' && e.key === key)) {
+          append({ ts: event.ts, session: event.session, event: 'Alert', kind: 'stop-loss', rule: 'task-attempts', key });
+        }
+        console.log(`STOP-LOSS TRIGGERED (dev Control Tower): task ${event.id} is on attempt ${event.attempt}, over the budget of ${max}. Stop repeating this approach, record the evidence, tell the owner, and continue only with a different approach.`);
       }
     }
   } catch (e) {

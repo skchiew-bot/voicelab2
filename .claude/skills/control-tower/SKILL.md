@@ -12,7 +12,7 @@ Pieces:
 - `.claude/hooks/devlog.mjs`, wired in `.claude/settings.json`: logs each session's actions and failed actions to `devlog/.spool/`, which git ignores. It records the tool, a scrubbed file path or command description, and for a failure only a category (such as `exit 1` or `denied`), never content, prompts, error text, numbers or tokens.
 - `scripts/devlog-flush.mjs`: moves new spool lines into new files under `devlog/activity/`, rebuilt from an allowlist of fields. Run it before every commit; the new files go in that commit.
 - `devlog/lessons.md`: the lessons register, loaded into every session from `CLAUDE.md`. `tests/devlog.test.ts` fails if a lesson loses a guard.
-- The same hook records each shell command's kind (test, typecheck, build, commit, push), subagents, and on every Stop the session's tokens per model and cost: Claude Code's own checkpoint figure plus the messages after it, priced exactly from `devlog/control-tower.json`. It enforces the stop-loss budgets and wasted-effort checks from that file.
+- The same hook records each shell command's kind (test, typecheck, build, commit, push), subagents, and on every Stop the session's tokens per model and cost. It gathers every transcript of the session (a resume in another folder starts a new one that copies earlier messages), counts each message once, and takes Claude Code's largest checkpoint plus the messages after it, priced exactly from `devlog/control-tower.json`. It enforces the stop-loss budgets and wasted-effort checks from that file; they count consecutive failures of the same thing and ignore test runs marked `DEVLOG_EXPECT_RED=1`.
 - `scripts/devlog-task.mjs`: the development control board (start, update, done) and the incident register (`incident`). Events go to the spool like everything else.
 - `devlog/control-tower.json`: budgets, thresholds, model tiers, prices (with their source and date) and an optional RM rate. Change behaviour here, not in code.
 - `devlog/prs.json`: each PR with its review findings (severity and whether fixed), extracted once per PR.
@@ -49,7 +49,7 @@ Prices in `devlog/control-tower.json` must come from a current source (the `clau
 
 ## Rules
 
-- Never record prompt text, command text, command output, phone numbers, credentials or customer data in `devlog/`.
+- Never record prompt text, command text, command output, error text, phone numbers, credentials or customer details (names included) in `devlog/`, including in task and incident text (`--title`, `--impact`, `--action`, `--blocker`, `--next`). The scrubber catches numbers, emails and credentials, not names.
 - The dashboard is internal to the owner. Publish it privately and do not share it.
 - Never edit or delete a file in `devlog/activity/`; a correction is a new file.
 - `--html` must point outside the repository (the scratchpad); the script refuses to overwrite its template.

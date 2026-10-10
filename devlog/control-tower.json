@@ -1,12 +1,13 @@
 {
   "_about": "Dev Control Tower settings, modelled on skchiew-bot/d3ngineering (sections 12, 17-20, 34, 44-46). Edit here; no code change needed.",
   "stopLoss": {
-    "_about": "Section 18. When a budget is reached the hook tells Claude to stop, summarise the evidence and escalate to the owner.",
-    "maxFailedTestRunsInARow": 3,
+    "_about": "Section 18. Consecutive failures only; a pass resets them. When a budget is reached the hook tells Claude to stop repeating that approach, record the evidence and tell the owner. Mark a test run expected to fail with DEVLOG_EXPECT_RED=1 in the command.",
+    "maxFailedTestRunsInARow": 5,
     "maxSameCommandFailures": 3,
     "maxEditsToOneFile": 25,
     "maxSessionCostUSD": "40",
-    "maxTaskAttempts": 3
+    "maxTaskAttempts": 3,
+    "_maxEditsToOneFile": "Edits to one file with no passing test or typecheck run in between."
   },
   "waste": {
     "_about": "Section 19. Signs of effort without progress; the hook warns once per file or command per session.",

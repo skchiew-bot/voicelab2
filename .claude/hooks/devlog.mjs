@@ -12,7 +12,7 @@
 // swallowed and it always exits 0.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -82,17 +82,29 @@ function target(tool, input = {}) {
   return '';
 }
 
-/** What kind of shell command this was, from its text. Only the category is recorded. */
+/**
+ * What kind of shell command this was, judged by the program each part of it starts with, so a
+ * grep that merely mentions vitest is not a test run. Only the category is recorded.
+ * `DEVLOG_EXPECT_RED=1` in a command marks a test run expected to fail (proving a test can fail,
+ * lesson L-010); those never count towards the stop-loss.
+ */
 export function commandKind(command) {
   const c = String(command ?? '');
-  if (/\b(vitest|jest|mocha|pytest|playwright test)\b|\bnpm (run )?test\b|\bnpx vitest\b/.test(c)) return 'test';
-  if (/\b(typecheck|tsc\b)/.test(c)) return 'typecheck';
-  if (/\b(build(:\w+)?|vite build)\b/.test(c)) return 'build';
-  if (/\bgit push\b/.test(c)) return 'push';
-  if (/\bgit commit\b/.test(c)) return 'commit';
-  if (/\bgit (merge|rebase|pull)\b/.test(c)) return 'integrate';
-  if (/\b(npm (ci|install)|pip install)\b/.test(c)) return 'install';
-  return 'other';
+  const expectRed = /\bDEVLOG_EXPECT_RED=1\b/.test(c);
+  const kinds = [
+    ['test', /^(npx\s+)?(vitest|jest|mocha|pytest)\b|^(npx\s+)?playwright\s+test\b|^(npm|pnpm|yarn)\s+(run\s+)?(-s\s+)?test\b/],
+    ['typecheck', /^(npm|pnpm|yarn)\s+(run\s+)?(-s\s+)?typecheck\b|^(npx\s+)?tsc\b/],
+    ['build', /^(npm|pnpm|yarn)\s+(run\s+)?(-s\s+)?build\b|^(npx\s+)?vite\s+build\b/],
+    ['push', /^git\s+push\b/],
+    ['commit', /^git\s+commit\b/],
+    ['integrate', /^git\s+(merge|rebase|pull)\b/],
+    ['install', /^(npm\s+(ci|install|i)|pip\s+install)\b/],
+  ];
+  for (const part of c.split(/&&|\|\||;|\||\n/)) {
+    const cmd = part.trim().replace(/^(\w+=\S*\s+)+/, '').replace(/^(timeout\s+\S+|time|env)\s+/, '').replace(/^(\w+=\S*\s+)+/, '');
+    for (const [kind, re] of kinds) if (re.test(cmd)) return { kind, expectRed };
+  }
+  return { kind: 'other', expectRed };
 }
 
 export function readConfig(dir = root) {
@@ -108,55 +120,48 @@ export function decimalAtLeast(a, b) {
   return BigInt(af.padEnd(n, '0') || '0') >= BigInt(bf.padEnd(n, '0') || '0');
 }
 
-/**
- * Claude Code's own running totals for the session: the last "cost-state" record in the
- * transcript. It covers every model the session used, subagents included. Read from the end.
- */
-export function latestCostState(transcriptPath) {
-  if (!transcriptPath) return null;
-  let text;
-  try {
-    const fd = openSync(transcriptPath, 'r');
-    try {
-      const size = fstatSync(fd).size;
-      const len = Math.min(size, 2 << 20);
-      const buf = Buffer.alloc(len);
-      readSync(fd, buf, 0, len, size - len);
-      text = buf.toString('utf8');
-    } finally { closeSync(fd); }
-  } catch { return null; }
-  const lines = text.split('\n');
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (!lines[i].includes('"cost-state"')) continue;
-    try { const o = JSON.parse(lines[i]); if (o.type === 'cost-state') return o; } catch { /* partial line */ }
-  }
-  return null;
-}
-
 const emptyTokens = () => ({ messages: 0, input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 });
 
+/** Every transcript file of a session: the same file name in any project folder, plus subagents. */
+function sessionFiles(transcriptPath) {
+  const name = path.basename(transcriptPath);
+  const projects = path.dirname(path.dirname(transcriptPath));
+  const mains = new Set([transcriptPath]);
+  try {
+    for (const d of readdirSync(projects)) {
+      const f = path.join(projects, d, name);
+      try { if (statSync(f).isFile()) mains.add(f); } catch { /* not in this folder */ }
+    }
+  } catch { /* no projects folder */ }
+  const subs = [...mains].flatMap((m) => {
+    const dir = path.join(m.replace(/\.jsonl$/, ''), 'subagents');
+    try { return readdirSync(dir).filter((f) => f.endsWith('.jsonl')).map((f) => path.join(dir, f)); } catch { return []; }
+  });
+  return { mains: [...mains], subs };
+}
+
 /**
- * Tokens per model for a session, from its transcript and its subagents' transcripts.
- * - Claude Code writes one line per content block, all with the same message id and usage, so
- *   each message is counted once.
- * - Background calls (such as the permission classifier) are not in the transcript. Claude Code's
- *   "cost-state" checkpoints do include them, so `since` holds only the messages after the last
- *   checkpoint; the session's spend is that checkpoint plus `since`.
+ * Tokens per model for a session, from all its transcripts and its subagents' transcripts.
+ * - Claude Code writes one line per content block, all with the same message id and usage, and a
+ *   session resumed in another folder starts a new transcript holding copies of the earlier
+ *   messages, so each message id is counted once across every file.
+ * - Background calls (such as the permission classifier) are not in any transcript. Claude Code's
+ *   "cost-state" checkpoints include them and only ever grow, so the session's spend is the
+ *   largest checkpoint plus the messages written after it (`since`).
  */
 export function tokenUsage(transcriptPath) {
   const all = {}; const since = {};
-  if (!transcriptPath) return { all, since, checkpointAt: null };
-  const files = [transcriptPath];
-  const subDir = path.join(transcriptPath.replace(/\.jsonl$/, ''), 'subagents');
-  try { for (const f of readdirSync(subDir)) if (f.endsWith('.jsonl')) files.push(path.join(subDir, f)); } catch { /* no subagents */ }
-
-  const seen = new Set(); const messages = []; let checkpointAt = null;
-  files.forEach((f, fileIndex) => {
-    let text; try { text = readFileSync(f, 'utf8'); } catch { return; }
+  if (!transcriptPath) return { all, since, checkpoint: null, checkpointAt: null };
+  const { mains, subs } = sessionFiles(transcriptPath);
+  const seen = new Set(); const messages = []; let checkpoint = null; let checkpointAt = null;
+  for (const f of [...mains, ...subs]) {
+    let text; try { text = readFileSync(f, 'utf8'); } catch { continue; }
     let lastTs = null;
     for (const raw of text.split('\n')) {
-      if (fileIndex === 0 && raw.includes('"cost-state"')) {
-        try { if (JSON.parse(raw).type === 'cost-state') checkpointAt = lastTs ?? checkpointAt; } catch { /* partial */ }
+      if (raw.includes('"cost-state"')) {
+        let o; try { o = JSON.parse(raw); } catch { continue; }
+        if (o?.type === 'cost-state' && Number.isFinite(o.totalCostUSD)
+          && (!checkpoint || decimalAtLeast(usd(o.totalCostUSD), usd(checkpoint.totalCostUSD)))) { checkpoint = o; checkpointAt = lastTs; }
         continue;
       }
       if (!raw.includes('"timestamp"') && !raw.includes('"usage"')) continue;
@@ -169,7 +174,7 @@ export function tokenUsage(transcriptPath) {
       seen.add(id);
       messages.push({ model: m.model, u, ts: e.timestamp ?? '' });
     }
-  });
+  }
   const add = (bucket, { model, u }) => {
     const t = bucket[model] ??= emptyTokens();
     const w1h = count(u.cache_creation?.ephemeral_1h_input_tokens);
@@ -180,11 +185,12 @@ export function tokenUsage(transcriptPath) {
     t.cacheWrite1h += w1h;
     t.cacheWrite5m += Math.max(0, count(u.cache_creation_input_tokens) - w1h);
   };
+  const after = checkpointAt ? new Date(checkpointAt).getTime() : null;
   for (const msg of messages) {
     add(all, msg);
-    if (checkpointAt && msg.ts > checkpointAt) add(since, msg);
+    if (after !== null && new Date(msg.ts).getTime() > after) add(since, msg);
   }
-  return { all, since, checkpointAt };
+  return { all, since, checkpoint, checkpointAt };
 }
 
 // Exact money in 1e-8 USD units, as in src/money.ts (lesson L-004).
@@ -204,8 +210,10 @@ export function priceTokens(model, t, pricing) {
   const p = pricing?.perMTokUSD?.[model];
   if (!p || !t) return null;
   const part = (tokens, rate) => (BigInt(tokens) * toUnits(rate) + 500_000n) / 1_000_000n; // per million, rounded half up
-  return part(t.input, p.input) + part(t.output, p.output) + part(t.cacheRead, p.cacheRead)
-    + part(t.cacheWrite5m, p.cacheWrite5m) + part(t.cacheWrite1h, p.cacheWrite1h);
+  try {
+    return part(t.input, p.input) + part(t.output, p.output) + part(t.cacheRead, p.cacheRead)
+      + part(t.cacheWrite5m, p.cacheWrite5m) + part(t.cacheWrite1h, p.cacheWrite1h);
+  } catch { return null; } // a malformed price counts as no price: reported, never guessed
 }
 
 const usd = (v) => (Number.isFinite(v) && v >= 0 ? v.toFixed(6) : '0.000000'); // Claude Code reports a float; fix it once, here
@@ -239,7 +247,8 @@ function history(file) {
 
 /**
  * Stop-loss (d3ngineering section 18) and wasted-effort (section 19) checks over this session's
- * log, including the line just recorded. Each alert fires once per session per rule and key.
+ * log, including the line just recorded. They look for effort without progress, not for normal
+ * work: only consecutive failures count, a pass resets them, and each alert fires once per streak.
  */
 export function checks(past, line, cfg) {
   const stop = cfg.stopLoss ?? {}; const waste = cfg.waste ?? {};
@@ -248,28 +257,33 @@ export function checks(past, line, cfg) {
   const out = [];
   const add = (kind, rule, key, message) => { if (!fired.has(`${rule}|${key}`)) { fired.add(`${rule}|${key}`); out.push({ kind, rule, key, message }); } };
   const tools = all.filter((e) => e.event === 'PostToolUse' || e.event === 'PostToolUseFailure');
+  const trailingFailures = (list) => {
+    let n = 0; let first = null;
+    for (let i = list.length - 1; i >= 0 && list[i].ok === false; i--) { n++; first = list[i].ts; }
+    return { n, first };
+  };
 
-  if (line.kind === 'test' && line.ok === false && stop.maxFailedTestRunsInARow) {
-    const tests = tools.filter((e) => e.kind === 'test');
-    let streak = 0; let first = line.ts;
-    for (let i = tests.length - 1; i >= 0 && tests[i].ok === false; i--) { streak++; first = tests[i].ts; }
-    if (streak >= stop.maxFailedTestRunsInARow) {
-      add('stop-loss', 'failed-test-runs', first, `${streak} test runs in a row have failed.`);
-    }
+  if (line.kind === 'test' && line.ok === false && !line.expectRed && stop.maxFailedTestRunsInARow) {
+    const { n, first } = trailingFailures(tools.filter((e) => e.kind === 'test' && !e.expectRed));
+    if (n >= stop.maxFailedTestRunsInARow) add('stop-loss', 'failed-test-runs', first, `${n} test runs in a row have failed.`);
   }
-  if (line.tool === 'Bash' && line.ok === false && line.target && stop.maxSameCommandFailures) {
-    const n = tools.filter((e) => e.tool === 'Bash' && e.ok === false && e.target === line.target).length;
-    if (n >= stop.maxSameCommandFailures) add('stop-loss', 'same-command-failures', line.target, `"${line.target}" has failed ${n} times.`);
+  if (line.tool === 'Bash' && line.ok === false && line.cmd && !line.expectRed && stop.maxSameCommandFailures) {
+    // The same command text (known only by a hash kept in the local spool), failing again and again.
+    const { n, first } = trailingFailures(tools.filter((e) => e.tool === 'Bash' && e.cmd === line.cmd));
+    if (n >= stop.maxSameCommandFailures) add('stop-loss', 'same-command-failures', `${line.cmd}@${first}`, `The same command ("${line.target}") has failed ${n} times in a row.`);
   }
-  const edits = (f) => tools.filter((e) => /^(Edit|Write|NotebookEdit)$/.test(e.tool) && e.target === f);
-  if (/^(Edit|Write|NotebookEdit)$/.test(line.tool) && line.target && stop.maxEditsToOneFile) {
-    const n = edits(line.target).length;
-    if (n >= stop.maxEditsToOneFile) add('stop-loss', 'edits-to-one-file', line.target, `${line.target} has been edited ${n} times this session.`);
+  const isEdit = (e) => /^(Edit|Write|NotebookEdit)$/.test(e.tool) && e.ok !== false;
+  if (isEdit(line) && line.target && stop.maxEditsToOneFile) {
+    // Churn: edits to one file with no passing test or typecheck run in between.
+    const lastCheck = tools.filter((e) => (e.kind === 'test' || e.kind === 'typecheck') && e.ok).at(-1)?.ts ?? '';
+    const n = tools.filter((e) => isEdit(e) && e.target === line.target && e.ts > lastCheck).length;
+    if (n >= stop.maxEditsToOneFile) add('stop-loss', 'edits-to-one-file', `${line.target}@${lastCheck || 'start'}`, `${line.target} has been edited ${n} times with no passing test or typecheck run in between.`);
   }
   if (line.tool === 'Read' && line.target && waste.maxReadsOfOneFileWithoutEdit) {
-    const lastEdit = edits(line.target).at(-1)?.ts ?? '';
-    const reads = tools.filter((e) => e.tool === 'Read' && e.target === line.target && e.ts > lastEdit).length;
-    if (reads >= waste.maxReadsOfOneFileWithoutEdit) add('waste', 'rereads', line.target, `${line.target} has been read ${reads} times without a change in between.`);
+    // The same part of a file read again and again; reading a large file in chunks is fine.
+    const lastEdit = tools.filter((e) => isEdit(e) && e.target === line.target).at(-1)?.ts ?? '';
+    const reads = tools.filter((e) => e.tool === 'Read' && e.target === line.target && e.range === line.range && e.ts > lastEdit).length;
+    if (reads >= waste.maxReadsOfOneFileWithoutEdit) add('waste', 'rereads', `${line.target}@${lastEdit || 'start'}`, `${line.target} has been read ${reads} times without a change in between.`);
   }
   if (line.event === 'Usage' && stop.maxSessionCostUSD && decimalAtLeast(line.costUSD, stop.maxSessionCostUSD)) {
     add('stop-loss', 'session-cost', String(stop.maxSessionCostUSD), `This session has cost ${line.costUSD} USD, at or over the ${stop.maxSessionCostUSD} USD budget.`);
@@ -279,7 +293,7 @@ export function checks(past, line, cfg) {
 
 export function alertText(a) {
   return a.kind === 'stop-loss'
-    ? `STOP-LOSS TRIGGERED (dev Control Tower): ${a.message} Stop autonomous work on this, summarise the evidence, and escalate to the owner before trying again. If the owner already approved going on, record that with \`node scripts/devlog-task.mjs incident\`.`
+    ? `STOP-LOSS TRIGGERED (dev Control Tower): ${a.message} Stop repeating this approach. Record the evidence (\`node scripts/devlog-task.mjs update <id> --blocker "…"\` and an incident), tell the owner in your next message, and continue only with a different approach; if there is none, ask.`
     : `WASTED EFFORT (dev Control Tower): ${a.message} Change approach: summarise what you know, then act on it or ask.`;
 }
 
@@ -310,14 +324,20 @@ function main() {
     line.tool = scrub(ev.tool_name, 80);
     line.target = target(ev.tool_name, ev.tool_input);
     line.ok = event === 'PostToolUse';
-    if (ev.tool_name === 'Bash') line.kind = commandKind(ev.tool_input?.command);
+    if (ev.tool_name === 'Bash') {
+      const { kind, expectRed } = commandKind(ev.tool_input?.command);
+      line.kind = kind;
+      if (expectRed) line.expectRed = true;
+      // Kept only in the local spool (the flush drops it), to tell the same command from another.
+      line.cmd = createHash('sha256').update(String(ev.tool_input?.command ?? '')).digest('hex').slice(0, 16);
+    }
+    if (ev.tool_name === 'Read') line.range = `${count(ev.tool_input?.offset)}:${count(ev.tool_input?.limit)}`;
     if (typeof ev.duration_ms === 'number') line.ms = ev.duration_ms;
     if (!line.ok) line.failure = failureKind(ev.tool_name, ev.error, ev.is_interrupt);
   } else if (event === 'Stop' || event === 'SessionEnd') {
     if (event === 'SessionEnd') line.reason = scrub(ev.reason, 40);
-    const { all, since, checkpointAt } = tokenUsage(ev.transcript_path);
-    const cs = latestCostState(ev.transcript_path);
-    if (Object.keys(all).length === 0 && !cs && event === 'Stop') return 0; // nothing to record yet
+    const { all, since, checkpoint, checkpointAt } = tokenUsage(ev.transcript_path);
+    if (Object.keys(all).length === 0 && !checkpoint && event === 'Stop') return 0; // nothing to record yet
     if (event === 'SessionEnd') appendLine({ ts: line.ts, session: line.session, event: 'SessionEnd', reason: line.reason });
     const pricing = readConfig().pricing;
     const unpriced = new Set();
@@ -331,13 +351,11 @@ function main() {
     };
     const visible = priceAll(all);
     const after = priceAll(since);
-    // A session can span several transcripts (a resume in another directory starts a new one); the
-    // report adds up the latest record for each. A hash names the transcript without its local path.
-    line.transcript = createHash('sha256').update(String(ev.transcript_path)).digest('hex').slice(0, 12);
+    // One record covers the whole session (every transcript); the report keeps the latest.
     Object.assign(line, { event: 'Usage', at: event, tokens: all });
-    if (cs) {
+    if (checkpoint) {
       // Claude Code's own figure (complete, background calls included) plus what came after it.
-      line.checkpoint = usageFrom(cs);
+      line.checkpoint = usageFrom(checkpoint);
       line.checkpointAt = checkpointAt;
       line.costUSD = fromUnits(toUnits(line.checkpoint.costUSD) + after);
       line.costBasis = 'checkpoint+since';
@@ -351,6 +369,11 @@ function main() {
     line.agentId = scrub(ev.agent_id ?? '', 40);
   } else if (event === 'UserPromptSubmit') {
     // Counts turns only. The prompt itself is not recorded: it can hold anything the owner pasted.
+    // A cost stop-loss raised at the end of the last turn reached only the owner; tell Claude now.
+    const past = history(spoolFile(line.session));
+    const lastPrompt = past.filter((e) => e.event === 'UserPromptSubmit').at(-1)?.ts ?? '';
+    const cost = past.filter((e) => e.event === 'Alert' && e.rule === 'session-cost' && e.ts > lastPrompt).at(-1);
+    if (cost) context += alertText({ kind: 'stop-loss', message: `This session has reached its ${cost.key} USD cost budget.` }) + '\n';
   } else {
     return 0;
   }

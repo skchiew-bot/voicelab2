@@ -31,7 +31,7 @@ function commits() {
     const [sha, date, subject, trailer, parents] = r.split('\x1f');
     const session = /session_[\w]+/.exec(trailer ?? '')?.[0] ?? null;
     const pr = /\(#(\d+)\)$|pull request #(\d+)/.exec(subject ?? '');
-    return { sha, date, subject, session, merge: (parents ?? '').trim().includes(' '), pr: pr ? Number(pr[1] ?? pr[2]) : null };
+    return { sha, date: new Date(date).toISOString(), subject, session, merge: (parents ?? '').trim().includes(' '), pr: pr ? Number(pr[1] ?? pr[2]) : null };
   });
 }
 
@@ -107,7 +107,8 @@ export function buildBoard(events = activity(), now = new Date()) {
     for (const k of ['title', 'epic', 'workstream', 'phase', 'owner', 'status', 'progress', 'attempt', 'tests', 'blocker', 'next', 'pr']) {
       if (e[k] !== undefined) t[k] = e[k];
     }
-    if (e.action === 'done') t.finished = e.ts;
+    if (e.action === 'done') { t.finished = e.ts; t.blocker = ''; }
+    else if (e.status && !['done', 'abandoned'].includes(e.status)) delete t.finished; // reopened
     if (!t.sessions.includes(e.session)) t.sessions.push(e.session);
     t.events++; t.updated = e.ts;
     tasks.set(e.id, t);
@@ -163,7 +164,7 @@ export function build(opts = {}) {
     }
     if (e.event === 'SubagentStart') s.subagents[e.agentId ?? e.ts] = { type: e.agentType, started: e.ts, active: true };
     if (e.event === 'SubagentStop' && s.subagents[e.agentId]) s.subagents[e.agentId].active = false;
-    if (e.event === 'Usage') s.usage.set(e.transcript ?? 'unknown', e); // the latest record per transcript
+    if (e.event === 'Usage') s.usage.set('session', e); // each record covers the whole session; keep the latest
     if (e.event === 'Alert') s.alerts++;
     if (e.event === 'Task') s.tasks.add(e.id);
   }
@@ -197,8 +198,9 @@ export function build(opts = {}) {
   const taskCost = new Map();
   for (const s of sessionRows) {
     if (!s.tasks.length) continue;
-    const share = s.costUnits / BigInt(s.tasks.length);
-    for (const id of s.tasks) taskCost.set(id, (taskCost.get(id) ?? 0n) + share);
+    const n = BigInt(s.tasks.length);
+    const share = s.costUnits / n;
+    s.tasks.forEach((id, i) => taskCost.set(id, (taskCost.get(id) ?? 0n) + share + (i === 0 ? s.costUnits - share * n : 0n))); // the remainder goes to the first task, so nothing is lost
   }
   const sessionsById = new Map(sessionRows.map((s) => [s.id, s]));
   for (const t of board) {
@@ -222,7 +224,10 @@ export function build(opts = {}) {
       const acc = byModel[m] ??= { model: m, tier: tierOf(m, cfg.modelTiers), sessions: 0, messages: 0, input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, tools: 0, failures: 0, tests: 0, testsFailed: 0 };
       acc.sessions++;
       for (const k of ['messages', 'input', 'output', 'cacheRead', 'cacheWrite5m', 'cacheWrite1h']) acc[k] += t[k];
-      acc.tools += s.tools; acc.failures += s.failures; acc.tests += s.tests; acc.testsFailed += s.testsFailed;
+      // Tool calls and test runs belong to the model that led the session (the most output), not to
+      // a subagent's model that happened to be used alongside it.
+      const lead = Object.entries(s.models).sort((a, b) => b[1].output - a[1].output)[0]?.[0];
+      if (m === lead) { acc.ledSessions = (acc.ledSessions ?? 0) + 1; acc.tools += s.tools; acc.failures += s.failures; acc.tests += s.tests; acc.testsFailed += s.testsFailed; }
     }
   }
   let cacheSaved = 0n;
@@ -256,6 +261,8 @@ export function build(opts = {}) {
     failedTestRuns: sessionRows.reduce((n, s) => n + s.testsFailed, 0),
     unpriced: [...new Set(events.filter((e) => e.event === 'Usage').flatMap((e) => e.unpriced ?? []))],
     partial: sessionRows.some((s) => s.costBasis === 'partial'),
+    unmetered: sessionRows.filter((s) => !s.metered && s.tools > 0).length, // logged activity but no usage record
+    unassignedSpend: money(spend - sum([...taskCost.values()]), cfg), // spend in sessions that recorded no task
     pricing: { source: cfg.pricing?.source ?? null, asOf: cfg.pricing?.asOf ?? null },
     currency: cfg.currency?.myrPerUsd ? { myrPerUsd: cfg.currency.myrPerUsd, asOf: cfg.currency.asOf, source: cfg.currency.source } : null,
   };
@@ -273,7 +280,8 @@ export function build(opts = {}) {
   // Logging gaps: a session that committed well after its last logged event was not being
   // logged (for example, Claude Code opened it outside the repository, so the hooks never loaded).
   const lastLogged = new Map();
-  for (const e of events) if (e.event !== 'Task' && e.event !== 'Incident') lastLogged.set(e.session, e.ts);
+  // Only what the hooks record on their own counts; usage, tasks or incidents recorded by hand do not.
+  for (const e of events) if (['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure'].includes(e.event)) lastLogged.set(e.session, e.ts);
   const gaps = [];
   for (const id of commitSessions) {
     const logged = lastLogged.get(id);
@@ -287,7 +295,7 @@ export function build(opts = {}) {
     workload: {
       openPrs: prs.filter((p) => p.state === 'open').length,
       openTasks: board.filter((t) => !['done', 'abandoned'].includes(t.status)).length,
-      blockedTasks: board.filter((t) => t.status === 'blocked' || t.blocker).length,
+      blockedTasks: board.filter((t) => !['done', 'abandoned'].includes(t.status) && (t.status === 'blocked' || t.blocker)).length,
       incidents7d: incidents.filter((i) => i.ts >= since(7)).length,
       securityIncidents: incidents.filter((i) => i.type === 'security').length,
       failedTestRuns7d: events.filter((e) => e.kind === 'test' && e.ok === false && e.ts >= since(7)).length,

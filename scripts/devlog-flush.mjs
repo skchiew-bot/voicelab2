@@ -63,8 +63,9 @@ export function clean(raw) {
 
   if (raw.event === 'SessionStart') {
     set('source', id(raw.source));
-    // Branch names look like tokens to the scrubber; keep them when they are plain branch names.
-    if (typeof raw.branch === 'string') out.branch = /^[\w./-]{1,100}$/.test(raw.branch) ? raw.branch : scrub(raw.branch, 100);
+    // This project's own branch names look like tokens to the scrubber, so keep those as they are;
+    // any other branch name is scrubbed (it could hold a number or a token).
+    if (typeof raw.branch === 'string') out.branch = /^(main|claude\/[a-z0-9.-]{1,80})$/.test(raw.branch) ? raw.branch : scrub(raw.branch, 100);
     if (/^[0-9a-f]{4,40}$/.test(raw.head ?? '')) out.head = raw.head;
     set('behind_main', nat(raw.behind_main));
   }
@@ -73,7 +74,8 @@ export function clean(raw) {
     out.target = raw.target === '(outside project)' ? raw.target : scrub(raw.target, 160);
     out.ok = raw.event === 'PostToolUse';
     if (KINDS.has(raw.kind)) out.kind = raw.kind;
-    if (typeof raw.ms === 'number') out.ms = raw.ms;
+    if (raw.expectRed === true) out.expectRed = true;
+    set('ms', nat(raw.ms, 86_400_000));
     if (!out.ok) {
       // Older lines kept error text; keep only its category.
       const known = /^(exit \d+|interrupted|denied|not found|timeout|invalid input|rate limited|other)$/;
@@ -96,7 +98,8 @@ export function clean(raw) {
     if (raw.kind !== 'stop-loss' && raw.kind !== 'waste') return null;
     out.kind = raw.kind;
     set('rule', id(raw.rule));
-    out.key = scrub(raw.key, 160);
+    // A key that is a timestamp stays readable; anything else is scrubbed.
+    out.key = typeof raw.key === 'string' && /^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(raw.key) ? raw.key : scrub(raw.key, 160);
   }
   if (raw.event === 'SubagentStart' || raw.event === 'SubagentStop') {
     set('agentType', text(raw.agentType, 60));

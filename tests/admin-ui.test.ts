@@ -316,6 +316,20 @@ describe.skipIf(!run)('admin UI', () => {
     await num.getByLabel('Client').selectOption({ label: 'Screens Co' });
     await num.getByRole('button', { name: 'Register number' }).click();
     await expect(page.getByRole('cell', { name: '+60312340000' })).toBeVisible();
+    // Which workflow answers the number: only that client's workflows live in production are offered, and none is the test message.
+    const answering = page.getByLabel('Workflow answering +60312340000');
+    await expect(answering).toHaveValue('');
+    const sc = (await env.call(env.staffToken, 'GET', '/internal/tenants')).json().find((t: { name: string }) => t.name === 'Screens Co').id;
+    const made = (await env.call(env.staffToken, 'POST', `/internal/tenants/${sc}/workflows`, { name: 'answer_flow', definition: { start: 'a', nodes: { a: { type: 'speak', speech: 'fixed', text: 'Hello', transitions: [{ to: 'b' }] }, b: { type: 'end', outcome: 'x' } } } })).json();
+    await env.call(env.staffToken, 'POST', `/internal/tenants/${sc}/workflows`, { name: 'draft_flow', definition: { start: 'a', nodes: { a: { type: 'end', outcome: 'x' } } } });
+    for (const [m, u, b] of [['POST', 'deploy', { versionId: made.version.id, environment: 'staging' }], ['POST', 'simulate', { scenarios: [{ name: 's', variables: {}, expect: { outcome: 'x' } }] }], ['POST', 'deploy', { versionId: made.version.id, environment: 'production' }]] as const) {
+      expect((await env.call(env.staffToken, m, `/internal/workflows/${made.workflow.id}/${u}`, b)).statusCode).toBeLessThan(300);
+    }
+    await page.reload();
+    await expect(answering.locator('option')).toHaveText(['Test message only', 'answer_flow']);
+    await answering.selectOption({ label: 'answer_flow' });
+    await expect.poll(async () => (await env.call(env.staffToken, 'GET', '/internal/dids')).json().find((x: { e164: string }) => x.e164 === '+60312340000').inbound_workflow_id).toBe(made.workflow.id);
+    await expect(answering).toHaveValue(made.workflow.id);
 
     // Do not call: nothing is allowed until a country is declared.
     await page.getByRole('link', { name: 'Do not call' }).click();

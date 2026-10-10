@@ -11,9 +11,10 @@ import { renderText } from './render.js';
 export interface RecordingRef { id: string; durationMs: number }
 export interface RecordingIndex { find(language: string, text: string): RecordingRef | undefined }
 
+/** One piece of a line, in order. `text` is the words themselves, held in memory to say them; it is never stored. */
 export type Segment =
-  | { kind: 'recorded'; characters: number; recordingId: string; durationMs: number }
-  | { kind: 'synth'; characters: number };
+  | { kind: 'recorded'; characters: number; recordingId: string; durationMs: number; text: string }
+  | { kind: 'synth'; characters: number; text: string };
 
 export interface SpeechPlan {
   segments: Segment[];
@@ -37,7 +38,7 @@ interface Piece { text: string; live: boolean }
 /** The whole line as one piece of live speech. */
 export function synthOnly(line: string): SpeechPlan {
   const n = count(line);
-  return { segments: n > 0 ? [{ kind: 'synth', characters: n }] : [], synthCharacters: n, recordedCharacters: 0, seams: 0 };
+  return { segments: n > 0 ? [{ kind: 'synth', characters: n, text: line }] : [], synthCharacters: n, recordedCharacters: 0, seams: 0 };
 }
 
 /**
@@ -59,10 +60,10 @@ export function planSpeech(
 
   const segments: Segment[] = [];
   let live = '';
-  const flush = () => { if (count(live) > 0) segments.push({ kind: 'synth', characters: count(live) }); live = ''; };
+  const flush = () => { if (count(live) > 0) segments.push({ kind: 'synth', characters: count(live), text: live }); live = ''; };
   for (const p of pieces) {
     const ref = !p.live && index && normalizeSpoken(p.text) !== '' ? index.find(language, p.text) : undefined;
-    if (ref) { flush(); segments.push({ kind: 'recorded', characters: count(p.text), recordingId: ref.id, durationMs: ref.durationMs }); }
+    if (ref) { flush(); segments.push({ kind: 'recorded', characters: count(p.text), recordingId: ref.id, durationMs: ref.durationMs, text: p.text }); }
     else live += p.text;
   }
   flush();

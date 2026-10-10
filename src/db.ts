@@ -7,7 +7,8 @@ pg.types.setTypeParser(20, (v) => Number(v));
 export type Actor = { kind: 'internal'; readOnly?: boolean } | { kind: 'client'; tenantId: string };
 
 export function createPool(connectionString: string): pg.Pool {
-  return new pg.Pool({ connectionString });
+  // A request that cannot get a connection in time fails, rather than waiting for ever behind the others.
+  return new pg.Pool({ connectionString, connectionTimeoutMillis: 15_000 });
 }
 
 /**

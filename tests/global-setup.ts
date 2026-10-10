@@ -45,7 +45,9 @@ export async function prepareCluster(adminUrl = ADMIN_URL): Promise<ClusterState
   } catch (err) {
     return { state: 'failed', reason: (err as Error).message };
   } finally {
-    if (created) await dropDatabase(admin, name).catch(() => {});
+    if (created) {
+      await dropDatabase(admin, name).catch((err) => console.warn(`Could not drop the scratch database ${name}: ${(err as Error).message}`));
+    }
     await admin.end();
   }
 }

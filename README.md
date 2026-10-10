@@ -48,7 +48,7 @@ All requests send `Authorization: Bearer <token>`. `/internal/*` is Daythree sta
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /me` | Who the token belongs to, their role, and whether they are read only |
-| `GET /internal/users`, `POST /internal/staff`, `POST /internal/users/:id/disable` | Who can sign in; add staff (token shown once); disable a user for good (admins only) |
+| `GET /internal/users`, `POST /internal/staff`, `POST /internal/users/:id/approve`, `POST /internal/users/:id/disable` | Who can sign in (admins only); add staff (token shown once; a new admin works only after a different admin approves them); disable a user for good |
 | `GET /health` | Database and migration check (no auth) |
 | `GET /internal/adapters` | Adapter parameter declarations, used to build the provider form |
 | `POST /internal/providers` | Add a provider; secrets are encrypted and never returned |

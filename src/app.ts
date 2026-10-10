@@ -35,7 +35,7 @@ import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-r
 import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
 import { parseTwilio, twimlHold, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
 import { createProvider, getProvider, listProviders, preflight, recheckProvider, setCapability } from './store/providers.js';
-import { createProject, createTenant, createUser, disableUser, listProjects, listTenants, listUsers, STAFF_ROLES, type Role } from './store/tenants.js';
+import { ACTIVE, approveAdmin, createProject, createTenant, createUser, disableUser, listProjects, listTenants, listUsers, STAFF_ROLES, type Role } from './store/tenants.js';
 
 interface Session { userId: string; email: string; role: Role; actor: Actor }
 
@@ -69,9 +69,10 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   async function authenticate(req: FastifyRequest): Promise<Session> {
     const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1];
     if (!token) throw new AppError(401, 'Missing bearer token.');
-    const { rows } = await pool.query('SELECT id, email, tenant_id, role, disabled_at FROM users WHERE token_hash = $1', [hashToken(token)]);
+    const { rows } = await pool.query(`SELECT id, email, tenant_id, role, disabled_at, (${ACTIVE}) AS active FROM users WHERE token_hash = $1`, [hashToken(token)]);
     const u = rows[0];
     if (!u || u.disabled_at) throw new AppError(401, 'Invalid token.');
+    if (!u.active) throw new AppError(401, 'This admin is waiting for another admin to approve them.');
     const actor: Actor = u.role === 'internal_admin' ? { kind: 'internal' }
       : u.role === 'internal_viewer' ? { kind: 'internal', readOnly: true }
       : { kind: 'client', tenantId: u.tenant_id };
@@ -95,6 +96,15 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     if (s.role !== 'internal_admin') throw new AppError(403, 'Admins only.');
     return s;
   }
+
+  // Read-only staff are refused any change before a route runs, whatever the route parses first or forgets to check.
+  app.addHook('onRequest', async (req) => {
+    if (req.method === 'GET' || req.method === 'HEAD' || !req.url.startsWith('/internal/')) return;
+    const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1];
+    if (!token) return; // the route's own check refuses it
+    const { rows } = await pool.query('SELECT role FROM users WHERE token_hash = $1', [hashToken(token)]);
+    if (rows[0]?.role === 'internal_viewer') throw new AppError(403, 'Read-only access: this user can look but not change anything.');
+  });
 
   // Webhooks are signed over the exact bytes sent, so keep the raw JSON body alongside the parsed one.
   app.removeContentTypeParser('application/json');
@@ -136,13 +146,18 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   // ------------------------------------------------------------ users
   // Who can sign in. Tokens are shown once, when the user is added; only their hash is kept.
   app.get('/internal/users', async (req) => {
-    const s = await internal(req);
+    const s = await admin(req); // every client user's email: admins only
     return withActor(pool, s.actor, listUsers);
   });
   app.post('/internal/staff', async (req, reply) => {
     const s = await admin(req);
     const body = z.object({ email: z.string().email(), role: z.enum(STAFF_ROLES) }).parse(req.body);
     return reply.status(201).send(await withActor(pool, s.actor, (c) => createUser(c, s.userId, { tenantId: null, ...body })));
+  });
+  app.post('/internal/users/:id/approve', async (req) => {
+    const s = await admin(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    return withActor(pool, s.actor, (c) => approveAdmin(c, s.userId, id));
   });
   app.post('/internal/users/:id/disable', async (req) => {
     const s = await admin(req);

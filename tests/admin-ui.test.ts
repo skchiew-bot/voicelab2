@@ -948,6 +948,12 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(switcher.locator('option:checked')).toHaveText('Switch A');
     await page.getByRole('link', { name: 'Cases', exact: true }).click();
     await expect(field(page, 'Client$').locator('option:checked')).toHaveText('Switch A');
+    // A do-not-call list's scope never comes from the menu: it still starts on the national registry.
+    await page.getByRole('link', { name: 'Do not call', exact: true }).click();
+    const scope = page.locator('select').filter({ has: page.locator('option', { hasText: 'National registry' }) });
+    await expect(scope.locator('option', { hasText: "Switch A's opt-outs" })).toHaveCount(1); // the clients have loaded
+    await expect(scope.locator('option:checked')).toHaveText('National registry');
+    await page.getByRole('link', { name: 'Cases', exact: true }).click();
     // A remembered client that is gone is not treated as chosen.
     await page.evaluate(() => localStorage.setItem('voicelab.client', '00000000-0000-4000-8000-000000000000'));
     await page.reload();
@@ -956,7 +962,7 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(page.getByRole('heading', { name: 'Cases', level: 1 })).toBeVisible();
     await expect(page.getByLabel('Open a case')).toHaveCount(0); // nothing is loaded or offered for the missing client
     await ctx.close();
-  });
+  }, 60_000);
 
   it('lets an admin add read-only staff, who can look but are told plainly they cannot change anything, and disable them', async () => {
     const ctx = await browser.newContext({ viewport: { width: 1200, height: 900 } });
@@ -969,6 +975,16 @@ describe.skipIf(!run)('admin UI', () => {
     await form.getByRole('button', { name: 'Add' }).click();
     const token = (await page.getByRole('status').locator('code').textContent())!;
     expect(token.length).toBeGreaterThan(20);
+
+    // A new admin waits for a different admin: its creator's Approve is refused, with the reason.
+    await form.getByLabel(/^Email/).fill('second-admin@daythree.test');
+    await form.getByLabel(/^Role/).selectOption({ label: 'Staff admin' });
+    await form.getByRole('button', { name: 'Add' }).click();
+    await expect(page.getByRole('status')).toContainText('another admin (not you) approves');
+    const pendingRow = page.getByRole('row').filter({ hasText: 'second-admin@daythree.test' });
+    await expect(pendingRow).toContainText('Waiting for another admin to approve');
+    await pendingRow.getByRole('button', { name: 'Approve' }).click();
+    await expect(page.getByText(/another admin has to approve them/)).toBeVisible();
 
     const viewerPage = await (await browser.newContext({ viewport: { width: 1200, height: 900 } })).newPage();
     await signIn(viewerPage, token);
@@ -987,7 +1003,7 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(viewerPage.getByLabel('API token')).toBeVisible(); // signed out: the token no longer works
     await viewerPage.context().close();
     await ctx.close();
-  });
+  }, 60_000);
 
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();

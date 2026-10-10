@@ -95,12 +95,13 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/knowledge-policy.test.ts` › "never puts the value of a variable into the reason it gives"
 
 ### L-010: A test that cannot fail proves nothing
-- **Seen:** 5 times. The Control Tower drift test passed with wrong data ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The Phase 2 production gate accepted scenarios that asserted nothing ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). The guard for L-015 pointed at a code comment, not a test, so it could never fail (independent review, 2026-10-10). A report test asserted the sum of two transcripts' costs and so locked in a double count; three new tests passed with the code they protect broken (independent review and mutation checks, 2026-10-10).
+- **Seen:** 6 times. The Control Tower drift test passed with wrong data ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The Phase 2 production gate accepted scenarios that asserted nothing ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). The guard for L-015 pointed at a code comment, not a test, so it could never fail (independent review, 2026-10-10). A report test asserted the sum of two transcripts' costs and so locked in a double count; three new tests passed with the code they protect broken (independent review and mutation checks, 2026-10-10). The read-only test accepted a 400 as a refusal, so it passed with the read-only check removed for every route that parses its input first; a browser check passed before the screen had loaded its data (Phase 0 independent review and mutation checks, 2026-10-10).
 - **Rule:** Before trusting a new test, break the code it protects and watch the test fail. Match exactly, not loosely. A test that asserts today's output can lock in today's bug: assert what is true, worked out by hand.
 - **Guards:**
   - `tests/control-tower.test.ts` › "matches the plan's Control Tower criteria exactly"
   - `tests/devlog.test.ts` › "guards a code lesson with a test title, not a comment"
 
+  - `tests/staff-roles.test.ts` › "is refused every change, on every route, and nothing in the database moves"
 ### L-011: Show old data as old
 - **Seen:** A failed Control Tower refresh left stale numbers looking current, and a slow older request could overwrite a newer one ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)).
 - **Rule:** Every live screen shows when its data is from, says so when an update fails, and lets the newest request win.
@@ -196,12 +197,13 @@ Format, checked by `tests/devlog.test.ts`:
   - `.github/workflows/delete-merged-branches.yml` › "Refusing to delete the default branch."
 
 ### L-024: A check the checked party can pass by itself proves nothing
-- **Seen:** The first branch audit counted any branch linked to a board task as part of the plan, and its instructions told sessions to link a task to clear the fork warning: a session could invent a task and approve its own branch (independent review, 2026-10-10).
+- **Seen:** 2 times. The first branch audit counted any branch linked to a board task as part of the plan, and its instructions told sessions to link a task to clear the fork warning: a session could invent a task and approve its own branch (independent review, 2026-10-10). Any admin could add a second admin through the API and use it to approve their own flow change, policy or knowledge version, since the "different person" checks compare user ids (Phase 0 independent review, 2026-10-10).
 - **Rule:** When a check guards against the agent's own work drifting, the agent must not be able to satisfy it alone. Show self-declared evidence (a task link) as its own class for the owner to confirm, and never create evidence just to clear a warning.
 - **Guards:**
   - `tests/devlog.test.ts` › "classes every branch as the trunk, part of the plan, task-only or a fork"
   - `CLAUDE.md` › "never create or link a task just to clear a warning"
 
+  - `tests/staff-roles.test.ts` › "keeps an admin added by another admin out until a different admin approves them, so one admin cannot invent a second approver"
 ### L-025: Derived state is valid only for the thing it was derived from
 - **Seen:** A promoted script was looked up by workflow, node and language only, so after a deploy changed the node callers kept hearing the old script until a scheduled screen ran; a script learned in one journey context was spoken in every context; and the screen that looked for a changed node could be tripped by simulating an undeployed draft (Phase 6 independent review, 2026-10-10).
 - **Rule:** Anything learned or derived from a definition (a script, a cache, a score) carries what it was derived from (here the node's hash and the journey context) and is used only when that still matches, checked at the point of use, not by a job that may not be running. A rehearsal of something undeployed never counts as evidence about what is live.
@@ -267,3 +269,9 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:**
   - `tests/config.test.ts` › "starts with a setting left empty by the install file, as if it were not set"
   - `tests/staff-roles.test.ts` › "creates the first admin once, and running it again to upgrade changes nothing"
+
+### L-035: Choose the scope of a protective record on purpose, never from a screen-wide default
+- **Seen:** The tenant switcher pre-filled the do-not-call form with the chosen client, so a national list pasted while a client was chosen would have been stored as that one client's opt-outs, and every other client could still dial those numbers (Phase 0 independent review, 2026-10-10).
+- **Rule:** A menu-wide choice may decide what a screen shows, never what a record protects or who it belongs to. Forms that create do-not-call entries, numbers or workflows start empty and are chosen each time.
+- **Guards:**
+  - `tests/admin-ui.test.ts` › "follows one chosen client across screens and reloads, and forgets a client that no longer exists"

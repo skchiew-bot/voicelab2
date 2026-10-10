@@ -92,7 +92,7 @@ export function Tenants() {
       <form className="inline" aria-label="Add client" onSubmit={async (e) => {
         e.preventDefault();
         const t = await run(() => api<Tenant>('POST', '/internal/tenants', { name }));
-        if (t) { setName(''); tenants.reload(); shared.reload(); setSelected(t.id); }
+        if (t) { setName(''); tenants.reload(); await shared.reload(); setSelected(t.id); }
       }}>
         <Field label="New client"><input value={name} onChange={(e) => setName(e.target.value)} required /></Field>
         <button type="submit" disabled={pending}>Add client</button>

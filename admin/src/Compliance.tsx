@@ -1,10 +1,8 @@
 import { useState } from 'react';
-import { useClient } from './client';
 import { api, type DncRegistry, type Tenant } from './api';
 import { Errors, Field, useAction, useLoad } from './ui';
 
 export function Compliance() {
-  const [client] = useClient();
   const regs = useLoad(() => api<DncRegistry[]>('GET', '/internal/dnc/registries'));
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
 
@@ -14,7 +12,7 @@ export function Compliance() {
   const declare = useAction();
 
   const [lCountry, setLCountry] = useState('');
-  const [lTenant, setLTenant] = useState(client);
+  const [lTenant, setLTenant] = useState('');
   const [lNumbers, setLNumbers] = useState('');
   const [lSource, setLSource] = useState('');
   const [loaded, setLoaded] = useState<{ added: number; duplicates: number; invalid: string[] } | null>(null);

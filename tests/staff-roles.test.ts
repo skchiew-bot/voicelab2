@@ -16,7 +16,20 @@ beforeAll(async () => {
   const v = await env.call(env.staffToken, 'POST', '/internal/staff', { email: 'viewer@daythree.test', role: 'internal_viewer' });
   expect(v.statusCode).toBe(201);
   viewer = v.json().token;
+  // Real records, so the read-only comparison runs the screens' real code, not just their "not found" paths.
+  const must = async (r: Promise<{ statusCode: number; json: () => any }>) => { const x = await r; expect(x.statusCode, JSON.stringify(x.json())).toBe(201); return x.json(); };
+  const KL = 'Asia/Kuala_Lumpur';
+  ids.id = (await must(env.call(env.staffToken, 'POST', '/internal/providers', { adapterKey: 'twilio', name: 'tw', params: { accountSid: 'AC123', authToken: 'FAKE_TOKEN_x', twimlAppVoiceUrl: 'https://example.com/voice' } }))).id;
+  await must(env.call(env.staffToken, 'POST', `/internal/tenants/${tenantId}/workflows/from-template`, { template: 'debt_collection_my' }));
+  ids.diaryId = (await must(env.call(env.staffToken, 'POST', `/internal/tenants/${tenantId}/diaries`, { name: 'Desk', kind: 'individual', officerRef: 'officer-1', timeZone: KL }))).id;
+  ids.caseId = (await must(env.call(env.staffToken, 'POST', `/internal/tenants/${tenantId}/cases`, { caseRef: 'C-1', phone: '+60123450001', country: 'MY', currency: 'MYR', openingBalance: '100', timeZone: KL }))).id;
+  ids.articleId = (await must(env.call(env.staffToken, 'POST', `/internal/tenants/${tenantId}/knowledge`, { slug: 'fees', title: 'Fees', body: 'A late fee applies after seven days.', tags: [] }))).id;
+  ids.workflowId = (await env.pool.query('SELECT id FROM workflows ORDER BY created_at LIMIT 1')).rows[0].id;
+  ids.caseId ??= (await env.pool.query('SELECT id FROM cases LIMIT 1')).rows[0].id;
+  ids.articleId ??= (await env.pool.query('SELECT id FROM knowledge_articles LIMIT 1')).rows[0].id;
+  for (const [k, val] of Object.entries(ids)) expect(val, k).toMatch(/^[0-9a-f-]{36}$/);
 });
+const ids: Record<string, string> = {};
 afterAll(async () => { await env?.teardown(); });
 
 /** Every route the API declares, read from the source so a new route is covered without editing this test. */
@@ -28,7 +41,7 @@ function routes() {
   }
   return out;
 }
-const fill = (p: string) => p.replace(/:tenantId/g, tenantId).replace(/:[A-Za-z]+/g, () => randomUUID());
+const fill = (p: string) => p.replace(/:tenantId/g, tenantId).replace(/:([A-Za-z]+)/g, (_m, name: string) => ids[name] ?? randomUUID());
 const inject = (token: string, method: string, url: string, payload?: unknown) =>
   env.app.inject({ method: method as 'GET', url, payload: payload as object, headers: { authorization: `Bearer ${token}` } });
 
@@ -41,14 +54,19 @@ async function rowCounts() {
 
 describe('read-only staff', () => {
   it('can read every internal screen the way an admin can, in a read-only transaction that never fails', async () => {
-    const gets = routes().filter((r) => r.method === 'GET' && r.path.startsWith('/internal/'));
+    const gets = routes().filter((r) => r.method === 'GET' && r.path.startsWith('/internal/') && r.path !== '/internal/users');
     expect(gets.length).toBeGreaterThan(50);
+    let found = 0;
     for (const r of gets) {
       const url = fill(r.path);
       const [a, v] = [await inject(env.staffToken, 'GET', url), await inject(viewer, 'GET', url)];
       expect({ route: r.path, status: v.statusCode }).toEqual({ route: r.path, status: a.statusCode });
       expect(v.statusCode).toBeLessThan(500);
+      if (v.statusCode === 200) found++;
     }
+    expect(found).toBeGreaterThan(60); // most screens answered with real data, not "not found"
+    // The list of every user's email is for admins only.
+    expect((await inject(viewer, 'GET', '/internal/users')).statusCode).toBe(403);
   });
 
   it('is refused every change, on every route, and nothing in the database moves', async () => {
@@ -57,11 +75,8 @@ describe('read-only staff', () => {
     const before = await rowCounts();
     for (const r of changes) {
       const res = await inject(viewer, r.method, fill(r.path), {});
-      expect({ route: r.path, refused: res.statusCode === 403 || res.statusCode === 400 }).toEqual({ route: r.path, refused: true });
+      expect({ route: r.path, status: res.statusCode }).toEqual({ route: r.path, status: 403 });
     }
-    // The tenant routes take a real client, so the refusal there must be the role, not a bad request.
-    expect((await inject(viewer, 'POST', `/internal/tenants/${tenantId}/projects`, { name: 'x' })).statusCode).toBe(403);
-    expect((await inject(viewer, 'POST', '/internal/tenants', { name: 'x' })).statusCode).toBe(403);
     expect(await rowCounts()).toEqual(before);
   });
 
@@ -106,9 +121,9 @@ describe('managing who can sign in', () => {
     expect(off.json().disabled_at).toBeTruthy();
     expect((await inject(u.json().token, 'GET', '/client/credits')).statusCode).toBe(401);
     expect((await env.call(env.staffToken, 'POST', `/internal/users/${u.json().id}/disable`)).statusCode).toBe(409);
-    await expect(env.pool.query('UPDATE users SET disabled_at = NULL, disabled_by = NULL WHERE id = $1', [u.json().id])).rejects.toThrow(/only be disabled, once/);
+    await expect(env.pool.query('UPDATE users SET disabled_at = NULL, disabled_by = NULL WHERE id = $1', [u.json().id])).rejects.toThrow(/only be approved once and disabled once/);
     await expect(env.pool.query('DELETE FROM users WHERE id = $1', [u.json().id])).rejects.toThrow(/never deleted/);
-    await expect(env.pool.query("UPDATE users SET role = 'internal_admin', tenant_id = NULL WHERE email = 'viewer@daythree.test'")).rejects.toThrow(/only be disabled, once/);
+    await expect(env.pool.query("UPDATE users SET role = 'internal_admin', tenant_id = NULL WHERE email = 'viewer@daythree.test'")).rejects.toThrow(/only be approved once and disabled once/);
     expect((await env.pool.query("SELECT count(*)::int AS n FROM audit_log WHERE action = 'user.disable' AND entity_id = $1", [u.json().id])).rows[0].n).toBe(1);
   });
 
@@ -119,7 +134,7 @@ describe('managing who can sign in', () => {
   });
 
   it('never leaves the platform without an active admin, even when two admins disable each other at once', async () => {
-    const mk = async (email: string) => { const r = await env.call(env.staffToken, 'POST', '/internal/staff', { email, role: 'internal_admin' }); expect(r.statusCode).toBe(201); return r.json(); };
+    const mk = activeAdmin;
     // Start from exactly two active admins: disable everyone else first.
     const a = await mk('a@daythree.test'); const b = await mk('b@daythree.test');
     for (const u of (await env.call(env.staffToken, 'GET', '/internal/users')).json() as { id: string; role: string; disabled_at: string | null; email: string }[]) {
@@ -170,6 +185,57 @@ describe('managing who can sign in', () => {
     await expect(withActor(env.pool, { kind: 'internal' }, (c) => disableUser(c, ids['viewer@daythree.test'], ids['a@daythree.test']))).rejects.toThrow(/Only an active admin/);
   });
 });
+
+describe('a second person for every new admin', () => {
+  let boss: { id: string; token: string };
+  beforeAll(async () => { boss = await activeAdmin('boss@daythree.test'); });
+
+  it('keeps an admin added by another admin out until a different admin approves them, so one admin cannot invent a second approver', async () => {
+    const made = await env.call(boss.token, 'POST', '/internal/staff', { email: 'Twin@DayThree.test', role: 'internal_admin' });
+    expect(made.statusCode).toBe(201);
+    expect(made.json()).toMatchObject({ email: 'twin@daythree.test', pendingApproval: true });
+    const twin = made.json();
+    // The new identity can do nothing at all, so it can approve nothing its creator proposed.
+    const blocked = await inject(twin.token, 'GET', '/internal/tenants');
+    expect(blocked.statusCode).toBe(401);
+    expect(blocked.json().error).toMatch(/waiting for another admin/);
+    expect((await inject(twin.token, 'POST', `/internal/tenants/${tenantId}/projects`, { name: 'p' })).statusCode).toBe(401);
+    // Its creator cannot approve it, and nor can a read-only user.
+    expect((await env.call(boss.token, 'POST', `/internal/users/${twin.id}/approve`)).statusCode).toBe(403);
+    expect((await inject(viewer, 'POST', `/internal/users/${twin.id}/approve`)).statusCode).toBe(403);
+    // A different admin can.
+    const other = await activeAdmin('other@daythree.test');
+    const ok = await env.call(other.token, 'POST', `/internal/users/${twin.id}/approve`);
+    expect(ok.statusCode).toBe(200);
+    expect((await inject(twin.token, 'GET', '/internal/tenants')).statusCode).toBe(200);
+    expect((await env.call(other.token, 'POST', `/internal/users/${twin.id}/approve`)).statusCode).toBe(409);
+    expect((await env.pool.query("SELECT count(*)::int AS n FROM audit_log WHERE action = 'user.approve' AND entity_id = $1", [twin.id])).rows[0].n).toBe(1);
+    // The database holds the rule too.
+    const pend = await env.call(boss.token, 'POST', '/internal/staff', { email: 'self@daythree.test', role: 'internal_admin' });
+    expect(pend.statusCode).toBe(201);
+    await expect(env.pool.query('UPDATE users SET approved_at = now(), approved_by = created_by WHERE id = $1', [pend.json().id])).rejects.toThrow(/users_approved_by_another/);
+  });
+
+  it('treats an email in another case as the same person', async () => {
+    expect((await env.call(boss.token, 'POST', '/internal/staff', { email: 'VIEWER@daythree.test', role: 'internal_viewer' })).statusCode).toBe(409);
+  });
+
+  it('needs no approval for read-only staff or client users, who can approve nothing', async () => {
+    const v = await env.call(boss.token, 'POST', '/internal/staff', { email: 'look2@daythree.test', role: 'internal_viewer' });
+    expect(v.statusCode).toBe(201);
+    expect(v.json().pendingApproval).toBe(false);
+    expect((await inject(v.json().token, 'GET', '/internal/tenants')).statusCode).toBe(200);
+  });
+});
+
+/** An admin made the way the installer makes one (no creator), so it is active without approval. */
+async function activeAdmin(email: string) {
+  const { bootstrapAdmin } = await import('../src/store/tenants.js');
+  const { withActor } = await import('../src/db.js');
+  const r = await withActor(env.pool, { kind: 'internal' }, (c) => bootstrapAdmin(c, email));
+  if (!r.created) throw new Error('admin already exists');
+  return r as { id: string; token: string };
+}
 
 describe('the installer', () => {
   it('creates the first admin once, and running it again to upgrade changes nothing', async () => {

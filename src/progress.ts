@@ -18,7 +18,7 @@ const notMet = (text: string): Criterion => ({ text, state: 'not_met', proof: 'n
 export const PHASES: PhaseProgress[] = [
   {
     id: '0', name: 'Foundations', status: 'in_progress',
-    summary: 'The shared backbone that every later phase plugs into. Built and tested, with a tenant switcher, read-only staff, user management and an install path run end to end. The job queue is the one item left.',
+    summary: 'The shared backbone that every later phase plugs into. Built and tested, with a tenant switcher, read-only staff, user management (a new admin needs another admin to approve them) and an install path run end to end. The job queue is the one item left.',
     criteria: [
       { text: 'An operator can add a provider through the UI and enter its parameters and charging mechanism, without a code change.', state: 'met', proof: 'tests', note: 'Driven in a real browser.' },
       { text: 'A rate change creates a new version, and old records keep their original rate.', state: 'met', proof: 'tests' },

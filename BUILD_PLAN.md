@@ -406,6 +406,14 @@ Not built: no SMS, WhatsApp or email provider (messages are queued, not sent); t
   - Content is scoped per tenant and works across channels.
   - Policy changes get stricter versioning and approval than knowledge changes.
 
+**Knowledge base and policy status (in progress)** Built and tested against fakes:
+- **Knowledge** is scoped to one client and written once for every channel: each article has full text and an optional spoken short form (else one is derived, with no web address). A version is written as a draft, and a different person publishes it, which retires the one it replaces; every version is kept and what it said never changes. Search is by word overlap, in the language asked for (else English), in the form for the channel. A phone number is refused.
+- **Policy** is data: action rules that allow or deny what the bot may do (under a condition, or up to an exact-decimal limit) and phrases it may never say. The default is to refuse: an action no rule allows is not allowed, and a doubt denies. Every answer is kept (without the call's variables).
+- **A policy change** needs at least two approval levels, each decided in order by a different person who is not the proposer, and then someone other than the proposer puts it live; the version moves to a new major number when what is allowed or forbidden changes and a minor one when only a message does, with the difference listed in words. Going back to an older policy is a new proposal with the same approvals. One proposal at a time.
+- **The call engine** holds every line a model writes and every promoted script to the policy in force (a banned phrase turns the line down, with the rule named, and the written fallback is used), tells the model what it must never say, and gives it the published knowledge that matches the node's prompt.
+
+Not built: the policy does not yet check the text a client writes into a workflow or the actions a workflow takes, and a workflow does not call the policy check itself; ranking is by word overlap, not embeddings; no model is connected, so nothing shows that it uses the knowledge it is given.
+
 ---
 
 ## Control Tower Workstream

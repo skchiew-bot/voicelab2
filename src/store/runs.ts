@@ -15,6 +15,9 @@ import { evaluateScenario, gateProblems, MAX_REPLIES, MAX_SCENARIOS, type Scenar
 import { audit } from './audit.js';
 import { recordStepDecisions } from './ai-decisions.js';
 import { caseVariables } from './cases.js';
+import { publishedArticles } from './knowledge.js';
+import { policyGuard } from './policy.js';
+import { rank } from '../knowledge/search.js';
 import { activePromotions, logLearningTurns } from './learning.js';
 import { getJourneyConfig } from './journey.js';
 import { recordingIndex } from './recordings.js';
@@ -142,9 +145,9 @@ export async function startRun(d: RunDeps, actorId: string | null, e: { workflow
       // A call that belongs to a case carries on where the case left off; the caller's own variables win.
       if (call.case_id) caseVars = await caseVariables(c, call.case_id);
     }
-    return { wf, resolved, integrations: await integrationsFor(c, wf.tenant_id, d.key, e.environment, d.integrationHttp), recordings: await recordingIndex(c, wf.tenant_id), journey: await getJourneyConfig(c, wf.tenant_id), promoted: await activePromotions(c, wf.tenant_id), caseVars };
+    return { wf, resolved, integrations: await integrationsFor(c, wf.tenant_id, d.key, e.environment, d.integrationHttp), recordings: await recordingIndex(c, wf.tenant_id), journey: await getJourneyConfig(c, wf.tenant_id), promoted: await activePromotions(c, wf.tenant_id), caseVars, articles: await publishedArticles(c, wf.tenant_id), policy: await policyGuard(c, wf.tenant_id) };
   });
-  const deps: Deps = { load: (n) => ctx.resolved.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings, journey: ctx.journey, promoted: ctx.promoted };
+  const deps: Deps = { load: (n) => ctx.resolved.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings, journey: ctx.journey, promoted: ctx.promoted, policy: ctx.policy, knowledge: (q, lang) => rank(ctx.articles, q, { language: lang, channel: 'voice', limit: 3 }) };
   let out: { state: RunState; records: StepRecord[] };
   try { out = await engineStart(ctx.resolved.entryName, { ...ctx.caseVars, ...e.variables }, deps); }
   catch (err) { if (err instanceof PhoneInVariable) throw new AppError(400, err.message); throw err; }
@@ -183,9 +186,9 @@ export async function replyRun(d: RunDeps, runId: string, text: string, expected
         WHERE id = $1 AND status = 'awaiting_reply' AND state_version = $2`, [runId, run.state_version]);
     if (claim.rowCount === 0) throw new AppError(409, 'This call moved on while your reply was arriving. Nothing was changed.');
     const defs = await loadPinned(c, run.pins);
-    return { run, defs, integrations: await integrationsFor(c, run.tenant_id, d.key, run.environment, d.integrationHttp), recordings: await recordingIndex(c, run.tenant_id), journey: await getJourneyConfig(c, run.tenant_id), promoted: await activePromotions(c, run.tenant_id) };
+    return { run, defs, integrations: await integrationsFor(c, run.tenant_id, d.key, run.environment, d.integrationHttp), recordings: await recordingIndex(c, run.tenant_id), journey: await getJourneyConfig(c, run.tenant_id), promoted: await activePromotions(c, run.tenant_id), articles: await publishedArticles(c, run.tenant_id), policy: await policyGuard(c, run.tenant_id) };
   });
-  const deps: Deps = { load: (n) => ctx.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings, journey: ctx.journey, promoted: ctx.promoted };
+  const deps: Deps = { load: (n) => ctx.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings, journey: ctx.journey, promoted: ctx.promoted, policy: ctx.policy, knowledge: (q, lang) => rank(ctx.articles, q, { language: lang, channel: 'voice', limit: 3 }) };
   let out: { state: RunState; records: StepRecord[] };
   try { out = await engineReply(unseal(ctx.run.state as RunState, ctx.run.sealed, d.key, runId), text, deps); }
   catch (err) {

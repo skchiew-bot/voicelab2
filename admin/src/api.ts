@@ -187,3 +187,9 @@ export interface DiaryRow { id: string; name: string; kind: 'individual' | 'grou
 export interface AgendaRow { id: string; diary: string; contact_ref: string; kind: 'at_location' | 'field_visit'; starts_at: string; ends_at: string; travel_minutes: number; status: string; fee: string; location: string | null; visit_address: string | null }
 export interface NotificationRow { id: string; appointment_id: string; recipient_kind: string; recipient_ref: string; channel: string; kind: string; body: string; status: string; created_at: string }
 export interface AppointmentSummary { needsReschedule: number; upcoming: number; unsentOverAnHour: number }
+
+export interface KnowledgeRow { id: string; slug: string; language: string; title: string; retired_at: string | null; published_version: number | null; drafts: number }
+export interface KnowledgeVersion { id: string; version: number; title: string; body: string; voice_text: string | null; status: string; review_note: string | null }
+export interface KnowledgeArticle { id: string; slug: string; language: string; retiredAt: string | null; versions: KnowledgeVersion[] }
+export interface PolicyVersion { id: string; version: string; status: string; summary: string; rules: unknown[]; diff: string[]; proposedBy: string | null; progress: { level: number; name: string; decision: string | null; note: string | null }[]; nextLevel: number }
+export interface PolicyOverview { levels: string[]; live: PolicyVersion | null; pending: PolicyVersion | null; history: PolicyVersion[] }

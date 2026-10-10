@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useClient } from './client';
 import { api, type TemplateInfo, type Tenant, type WorkflowSummary } from './api';
 import { Errors, Field, useAction, useLoad } from './ui';
 
@@ -11,18 +12,19 @@ const STARTER = JSON.stringify({
 }, null, 2);
 
 export function Workflows() {
+  const [client] = useClient();
   const list = useLoad(() => api<WorkflowSummary[]>('GET', '/internal/workflows'));
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
   const templates = useLoad(() => api<TemplateInfo[]>('GET', '/internal/workflow-templates'));
   const tname = (id: string) => tenants.data?.find((t) => t.id === id)?.name ?? id.slice(0, 8);
 
-  const [tplTenant, setTplTenant] = useState('');
+  const [tplTenant, setTplTenant] = useState(client);
   const [tpl, setTpl] = useState('');
   const [prefix, setPrefix] = useState('');
   const fromTpl = useAction();
   const [created, setCreated] = useState<string | null>(null);
 
-  const [tenant, setTenant] = useState('');
+  const [tenant, setTenant] = useState(client);
   const [name, setName] = useState('');
   const [def, setDef] = useState(STARTER);
   const blank = useAction();

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useClient } from './client';
 import { api, type CaseRow, type CasesSummary, type CaseView, type Tenant } from './api';
 import { Errors, Field, fmtDate, fmtDecimal, useAction, useLoad } from './ui';
 
@@ -60,7 +61,7 @@ function Detail({ id, onChange }: { id: string; onChange: () => void }) {
 
 export function Cases() {
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
-  const [tenantId, setTenantId] = useState(''); const [open, setOpen] = useState<string | null>(null);
+  const [tenantId, setTenantId] = useClient(); const [open, setOpen] = useState<string | null>(null);
   const cases = useLoad(() => (tenantId ? api<CaseRow[]>('GET', `/internal/tenants/${tenantId}/cases`) : Promise.resolve([])), [tenantId]);
   const summary = useLoad(() => (tenantId ? api<CasesSummary>('GET', `/internal/tenants/${tenantId}/cases-summary`) : Promise.resolve(null)), [tenantId]);
   const act = useAction();

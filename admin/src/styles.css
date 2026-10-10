@@ -81,3 +81,5 @@ ol.transcript { list-style: none; padding: 0; display: flex; flex-direction: col
 ol.transcript li.caller { text-align: right; }
 ol.transcript li.note { color: var(--muted); font-style: italic; }
 td.actions { white-space: nowrap; }
+.switcher { display: flex; gap: .4rem; align-items: center; color: var(--muted); font-size: .9rem; }
+.switcher select { max-width: 14rem; }

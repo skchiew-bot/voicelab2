@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useClient } from './client';
 import { api, type OutboundReport, type Tenant } from './api';
 import { Errors, Field, useLoad } from './ui';
 
@@ -7,7 +8,7 @@ const pct = (v: number | null) => (v === null ? 'no attempts yet' : `${v}%`);
 
 export function Outbound() {
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
-  const [tenantId, setTenantId] = useState('');
+  const [tenantId, setTenantId] = useClient();
   const [days, setDays] = useState('7');
   const report = useLoad(() => {
     const to = new Date(); const from = new Date(to.getTime() - Number(days) * 24 * 3600 * 1000);

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useClient } from './client';
 import { api, type LearningOverview, type Promotion, type PromotionEvent, type PromotionFinancial, type Tenant } from './api';
 import { Errors, Field, fmtDate, fmtDecimal, useAction, useLoad } from './ui';
 
@@ -36,7 +37,7 @@ function History({ id }: { id: string }) {
 
 export function Learning() {
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
-  const [tenantId, setTenantId] = useState('');
+  const [tenantId, setTenantId] = useClient();
   const overview = useLoad(() => (tenantId ? api<LearningOverview>('GET', `/internal/tenants/${tenantId}/learning`) : Promise.resolve(null)), [tenantId]);
   const promos = useLoad(() => (tenantId ? api<Promotion[]>('GET', `/internal/tenants/${tenantId}/learning/promotions`) : Promise.resolve([])), [tenantId]);
   const [open, setOpen] = useState<string | null>(null);

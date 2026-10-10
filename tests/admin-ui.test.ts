@@ -552,7 +552,7 @@ describe.skipIf(!run)('admin UI', () => {
 
     // record it from a file
     await page.goto(`${base}#/recordings`);
-    await field(page, 'Client').selectOption({ label: 'Stitch UI Co' });
+    await field(page, 'Client$').selectOption({ label: 'Stitch UI Co' });
     const wav = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WAVE'), Buffer.alloc(64, 1)]);
     await field(page, 'Words spoken').fill(', welcome.');
     await page.getByLabel(/^Audio file/).setInputFiles({ name: 'welcome.wav', mimeType: 'audio/wav', buffer: wav });
@@ -573,7 +573,7 @@ describe.skipIf(!run)('admin UI', () => {
 
     // outbound results, with nothing dialled yet
     await page.goto(`${base}#/outbound`);
-    await field(page, 'Client').selectOption({ label: 'Stitch UI Co' });
+    await field(page, 'Client$').selectOption({ label: 'Stitch UI Co' });
     await expect(page.getByLabel('Rates')).toContainText('no attempts yet');
     await expect(page.getByLabel('Best times to call back')).toContainText('No callback times captured');
     await page.close();
@@ -704,7 +704,7 @@ describe.skipIf(!run)('admin UI', () => {
 
     // quality: criteria, then a batch
     await page.goto(`${base}#/qa`);
-    await field(page, 'Client').selectOption({ label: 'Journey UI Co' });
+    await field(page, 'Client$').selectOption({ label: 'Journey UI Co' });
     await page.getByRole('button', { name: 'Save criteria' }).click();
     await expect(page.getByRole('region', { name: 'Criteria', exact: true })).toContainText('Every workflow · version 1');
     await page.getByRole('button', { name: 'Score finished calls' }).click();
@@ -762,7 +762,7 @@ describe.skipIf(!run)('admin UI', () => {
     const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
     await signIn(page, env.staffToken);
     await page.goto(`${base}#/learning`);
-    await page.getByLabel('Client').selectOption({ label: 'Loop UI Co' });
+    await field(page, 'Client$').selectOption({ label: 'Loop UI Co' });
     await expect(page.getByLabel('Loop status')).toContainText('1 promoted · 1 waiting for review');
     const waiting = page.getByLabel('Script for wait_node');
     await expect(waiting).toContainText('Waiting for review');
@@ -785,7 +785,7 @@ describe.skipIf(!run)('admin UI', () => {
     const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
     await signIn(page, env.staffToken);
     await page.goto(`${base}#/cases`);
-    await page.getByLabel('Client').selectOption({ label: 'Cases UI Co' });
+    await field(page, 'Client$').selectOption({ label: 'Cases UI Co' });
     const form = page.getByLabel('Open a case');
     await form.getByLabel(/^Case reference/).fill('UI-1');
     await form.getByLabel(/^Phone number/).fill('+60123450999');
@@ -810,7 +810,7 @@ describe.skipIf(!run)('admin UI', () => {
     await env.pool.query(`UPDATE cases SET status = 'decision_required' WHERE case_ref = 'UI-1'`);
     await detail.getByRole('button', { name: 'Hide' }).isVisible().catch(() => undefined);
     await page.reload();
-    await page.getByLabel('Client').selectOption({ label: 'Cases UI Co' });
+    await field(page, 'Client$').selectOption({ label: 'Cases UI Co' });
     await page.getByLabel('Cases list').getByRole('button', { name: 'Open' }).click();
     const aged = page.getByRole('region', { name: 'Case', exact: true });
     await expect(aged).toContainText('Needs a decision');
@@ -835,7 +835,7 @@ describe.skipIf(!run)('admin UI', () => {
     const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
     await signIn(page, env.staffToken);
     await page.goto(`${base}#/appointments`);
-    await page.getByLabel('Client').selectOption({ label: 'Diary UI Co' });
+    await field(page, 'Client$').selectOption({ label: 'Diary UI Co' });
     await page.getByLabel('Diaries').getByRole('button', { name: 'Aminah' }).click();
     await page.getByLabel(/^Day/).fill(date);
     const agenda = page.getByLabel('Agenda');
@@ -861,7 +861,7 @@ describe.skipIf(!run)('admin UI', () => {
     const page = await browser.newPage({ viewport: { width: 1100, height: 1000 } });
     await signIn(page, env.staffToken);
     await page.goto(`${base}#/knowledge`);
-    await page.getByLabel('Client').selectOption({ label: 'Knowledge UI Co' });
+    await field(page, 'Client$').selectOption({ label: 'Knowledge UI Co' });
     const articles = page.getByLabel('Articles');
     await articles.getByLabel(/^Article name/).fill('late-fees');
     await articles.getByLabel(/^Title/).fill('Late payment fees');
@@ -897,13 +897,13 @@ describe.skipIf(!run)('admin UI', () => {
     await call(t2, 'POST', `/internal/policy-versions/${pending}/decision`, { decision: 'approved' });
     await call(t3, 'POST', `/internal/policy-versions/${pending}/decision`, { decision: 'approved' });
     await page.reload();
-    await page.getByLabel('Client').selectOption({ label: 'Knowledge UI Co' });
+    await field(page, 'Client$').selectOption({ label: 'Knowledge UI Co' });
     await expect(page.getByLabel('Policy 1.0')).toContainText('approved');
     await page.getByLabel('Policy 1.0').getByRole('button', { name: 'Put live' }).click();
     await expect(page.getByLabel('Policy 1.0')).toContainText('You proposed this change');                     // someone else must put it live
     await call(t4, 'POST', `/internal/policy-versions/${pending}/activate`);
     await page.reload();
-    await page.getByLabel('Client').selectOption({ label: 'Knowledge UI Co' });
+    await field(page, 'Client$').selectOption({ label: 'Knowledge UI Co' });
     await expect(page.getByLabel('Policy 1.0')).toContainText('live');
     const ask = page.getByLabel('Policy', { exact: true });
     await ask.getByLabel(/^Ask the policy/).fill('waive_fee');
@@ -927,6 +927,66 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(changes).not.toContainText('policy.propose');
     await expect(changes).toContainText('fx.add');
     await page.close();
+  });
+
+  it('follows one chosen client across screens and reloads, and forgets a client that no longer exists', async () => {
+    for (const name of ['Switch A', 'Switch B']) expect((await env.call(env.staffToken, 'POST', '/internal/tenants', { name })).statusCode).toBe(201);
+    const ctx = await browser.newContext({ viewport: { width: 1200, height: 900 } }); // its own storage: nothing remembered yet
+    const page = await ctx.newPage();
+    await signIn(page, env.staffToken);
+    const switcher = page.getByLabel('Working on');
+    await expect(switcher).toHaveValue('');
+    await switcher.selectOption({ label: 'Switch B' });
+    await page.goto(`${base}#/cases`);
+    await expect(field(page, 'Client$').locator('option:checked')).toHaveText('Switch B');
+    await page.getByRole('link', { name: 'Quality', exact: true }).click();
+    await expect(field(page, 'Client$').locator('option:checked')).toHaveText('Switch B');
+    await page.reload();
+    await expect(field(page, 'Client$').locator('option:checked')).toHaveText('Switch B');
+    // Choosing on a screen changes it everywhere.
+    await field(page, 'Client$').selectOption({ label: 'Switch A' });
+    await expect(switcher.locator('option:checked')).toHaveText('Switch A');
+    await page.getByRole('link', { name: 'Cases', exact: true }).click();
+    await expect(field(page, 'Client$').locator('option:checked')).toHaveText('Switch A');
+    // A remembered client that is gone is not treated as chosen.
+    await page.evaluate(() => localStorage.setItem('voicelab.client', '00000000-0000-4000-8000-000000000000'));
+    await page.reload();
+    await expect(page.getByLabel('Working on').locator('option:checked')).toHaveText('All clients');
+    await expect(field(page, 'Client$')).toHaveValue('');
+    await expect(page.getByRole('heading', { name: 'Cases', level: 1 })).toBeVisible();
+    await expect(page.getByLabel('Open a case')).toHaveCount(0); // nothing is loaded or offered for the missing client
+    await ctx.close();
+  });
+
+  it('lets an admin add read-only staff, who can look but are told plainly they cannot change anything, and disable them', async () => {
+    const ctx = await browser.newContext({ viewport: { width: 1200, height: 900 } });
+    const page = await ctx.newPage();
+    await signIn(page, env.staffToken);
+    await page.getByRole('link', { name: 'Users', exact: true }).click();
+    const form = page.getByLabel('Add staff');
+    await form.getByLabel(/^Email/).fill('looker@daythree.test');
+    await form.getByLabel(/^Role/).selectOption({ label: 'Staff, read only' });
+    await form.getByRole('button', { name: 'Add' }).click();
+    const token = (await page.getByRole('status').locator('code').textContent())!;
+    expect(token.length).toBeGreaterThan(20);
+
+    const viewerPage = await (await browser.newContext({ viewport: { width: 1200, height: 900 } })).newPage();
+    await signIn(viewerPage, token);
+    await expect(viewerPage.getByText('Read only', { exact: true })).toBeVisible();
+    await viewerPage.getByRole('link', { name: 'Clients', exact: true }).click();
+    await viewerPage.getByLabel('New client').fill('Should not exist');
+    await viewerPage.getByRole('button', { name: 'Add client' }).click();
+    await expect(viewerPage.getByText(/Read-only access/)).toBeVisible();
+    expect((await env.pool.query("SELECT count(*)::int AS n FROM tenants WHERE name = 'Should not exist'")).rows[0].n).toBe(0);
+
+    page.once('dialog', (d) => d.accept());
+    const row = page.getByRole('row').filter({ hasText: 'looker@daythree.test' });
+    await row.getByRole('button', { name: 'Disable' }).click();
+    await expect(row).toContainText('Disabled');
+    await viewerPage.reload();
+    await expect(viewerPage.getByLabel('API token')).toBeVisible(); // signed out: the token no longer works
+    await viewerPage.context().close();
+    await ctx.close();
   });
 
   it('keeps the signed-in session across a reload', async () => {

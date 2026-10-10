@@ -35,9 +35,9 @@ import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-r
 import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
 import { parseTwilio, twimlHold, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
 import { createProvider, getProvider, listProviders, preflight, recheckProvider, setCapability } from './store/providers.js';
-import { createProject, createTenant, createUser, listProjects, listTenants } from './store/tenants.js';
+import { createProject, createTenant, createUser, disableUser, listProjects, listTenants, listUsers, STAFF_ROLES, type Role } from './store/tenants.js';
 
-interface Session { userId: string; email: string; actor: Actor }
+interface Session { userId: string; email: string; role: Role; actor: Actor }
 
 const adminDist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'admin', 'dist');
 
@@ -69,19 +69,30 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   async function authenticate(req: FastifyRequest): Promise<Session> {
     const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1];
     if (!token) throw new AppError(401, 'Missing bearer token.');
-    const { rows } = await pool.query('SELECT id, email, tenant_id, role FROM users WHERE token_hash = $1', [hashToken(token)]);
+    const { rows } = await pool.query('SELECT id, email, tenant_id, role, disabled_at FROM users WHERE token_hash = $1', [hashToken(token)]);
     const u = rows[0];
-    if (!u) throw new AppError(401, 'Invalid token.');
-    return {
-      userId: u.id,
-      email: u.email,
-      actor: u.role === 'internal_admin' ? { kind: 'internal' } : { kind: 'client', tenantId: u.tenant_id },
-    };
+    if (!u || u.disabled_at) throw new AppError(401, 'Invalid token.');
+    const actor: Actor = u.role === 'internal_admin' ? { kind: 'internal' }
+      : u.role === 'internal_viewer' ? { kind: 'internal', readOnly: true }
+      : { kind: 'client', tenantId: u.tenant_id };
+    return { userId: u.id, email: u.email, role: u.role, actor };
   }
 
+  /**
+   * Staff only. A read-only staff member may only read: anything else is refused here, before the route runs,
+   * so every route (including ones that only look, like a simulation, which a viewer cannot run) fails closed.
+   */
   async function internal(req: FastifyRequest): Promise<Session> {
     const s = await authenticate(req);
     if (s.actor.kind !== 'internal') throw new AppError(403, 'Internal access only.');
+    if (s.actor.readOnly && req.method !== 'GET' && req.method !== 'HEAD') throw new AppError(403, 'Read-only access: this user can look but not change anything.');
+    return s;
+  }
+
+  /** Managing who can sign in is for admins only. */
+  async function admin(req: FastifyRequest): Promise<Session> {
+    const s = await internal(req);
+    if (s.role !== 'internal_admin') throw new AppError(403, 'Admins only.');
     return s;
   }
 
@@ -119,7 +130,24 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   // Who am I: the admin UI uses this to validate a pasted token and pick its menus.
   app.get('/me', async (req) => {
     const s = await authenticate(req);
-    return { email: s.email, role: s.actor.kind === 'internal' ? 'internal_admin' : 'client' };
+    return { email: s.email, role: s.role, readOnly: s.actor.kind === 'internal' && Boolean(s.actor.readOnly) };
+  });
+
+  // ------------------------------------------------------------ users
+  // Who can sign in. Tokens are shown once, when the user is added; only their hash is kept.
+  app.get('/internal/users', async (req) => {
+    const s = await internal(req);
+    return withActor(pool, s.actor, listUsers);
+  });
+  app.post('/internal/staff', async (req, reply) => {
+    const s = await admin(req);
+    const body = z.object({ email: z.string().email(), role: z.enum(STAFF_ROLES) }).parse(req.body);
+    return reply.status(201).send(await withActor(pool, s.actor, (c) => createUser(c, s.userId, { tenantId: null, ...body })));
+  });
+  app.post('/internal/users/:id/disable', async (req) => {
+    const s = await admin(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    return withActor(pool, s.actor, (c) => disableUser(c, s.userId, id));
   });
 
   // --------------------------------------------------------- adapters
@@ -157,7 +185,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     return reply.status(201).send(await withActor(pool, s.actor, (c) => createProject(c, s.userId, tenantId, body.name)));
   });
   app.post('/internal/tenants/:tenantId/users', async (req, reply) => {
-    const s = await internal(req);
+    const s = await admin(req);
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(req.params);
     const body = z.object({ email: z.string().email(), role: z.enum(['tenant_admin', 'tenant_user']) }).parse(req.body);
     return reply.status(201).send(await withActor(pool, s.actor, (c) => createUser(c, s.userId, { tenantId, ...body })));

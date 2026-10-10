@@ -1,14 +1,16 @@
 import { useState } from 'react';
+import { useClient } from './client';
 import { api, type PoolNumber, type Provider, type Tenant } from './api';
 import { Errors, Field, useAction, useLoad } from './ui';
 
 export function Numbers() {
+  const [client] = useClient();
   const numbers = useLoad(() => api<PoolNumber[]>('GET', '/internal/dids'));
   const providers = useLoad(() => api<Provider[]>('GET', '/internal/providers'));
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
   const [providerId, setProviderId] = useState('');
   const [e164, setE164] = useState('');
-  const [tenantId, setTenantId] = useState('');
+  const [tenantId, setTenantId] = useState(client);
   const [country, setCountry] = useState('MY');
   const [label, setLabel] = useState('');
   const { pending, error, run } = useAction();

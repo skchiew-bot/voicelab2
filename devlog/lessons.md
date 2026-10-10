@@ -260,3 +260,10 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:**
   - `tests/control-tower-panels.test.ts` › "count dials and outcomes as the Outbound screen does: finished dials only, each call's latest outcome, and no outcome as unknown"
   - `tests/control-tower-panels.test.ts` › "count every workflow in the stitching totals, not just the twenty it lists, and credit a child workflow's lines to it"
+
+### L-034: Run an install or a deploy for real; a file that validates can still fail to start
+- **Seen:** The Docker install had a compose file that validated, but it was never run. The first real run (Phase 0, 2026-10-10) crashed on a fresh install: the compose file passes `PUBLIC_BASE_URL` as an empty string, and the settings check refused it. Running the installer a second time to upgrade then failed with a raw database error, because the first admin already existed.
+- **Rule:** Before calling an install, deploy or start-up path done, run it from nothing and run it again on top of itself. Treat a setting left empty as not set, and make every step safe to repeat.
+- **Guards:**
+  - `tests/config.test.ts` › "starts with a setting left empty by the install file, as if it were not set"
+  - `tests/staff-roles.test.ts` › "creates the first admin once, and running it again to upgrade changes nothing"

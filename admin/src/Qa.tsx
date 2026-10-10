@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useClient } from './client';
 import { api, type AiUsage, type QaScore, type QaSet, type QaSummary, type Tenant } from './api';
 import { Errors, Field, fmtDate, useAction, useLoad } from './ui';
 
@@ -10,7 +11,7 @@ const STARTER = JSON.stringify([
 
 export function Qa() {
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
-  const [tenantId, setTenantId] = useState('');
+  const [tenantId, setTenantId] = useClient();
   const sets = useLoad(() => (tenantId ? api<QaSet[]>('GET', `/internal/tenants/${tenantId}/qa-criteria`) : Promise.resolve([])), [tenantId]);
   const scores = useLoad(() => (tenantId ? api<QaScore[]>('GET', `/internal/qa/scores?tenantId=${tenantId}`) : Promise.resolve([])), [tenantId]);
   const summary = useLoad(() => (tenantId ? api<QaSummary>('GET', `/internal/tenants/${tenantId}/qa/summary`) : Promise.resolve(null)), [tenantId]);

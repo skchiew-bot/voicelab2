@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useClient } from './client';
 import { api, type KnowledgeArticle, type KnowledgeRow, type PolicyOverview, type PolicyVersion, type Tenant } from './api';
 import { Errors, Field, useAction, useLoad } from './ui';
 
@@ -57,7 +58,7 @@ function PolicyCard({ v, onChange }: { v: PolicyVersion; onChange: () => void })
 
 export function Knowledge() {
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
-  const [tenantId, setTenantId] = useState(''); const [open, setOpen] = useState<string | null>(null);
+  const [tenantId, setTenantId] = useClient(); const [open, setOpen] = useState<string | null>(null);
   const articles = useLoad(() => (tenantId ? api<KnowledgeRow[]>('GET', `/internal/tenants/${tenantId}/knowledge`) : Promise.resolve([])), [tenantId]);
   const policy = useLoad(() => (tenantId ? api<PolicyOverview>('GET', `/internal/tenants/${tenantId}/policy`) : Promise.resolve(null)), [tenantId]);
   const act = useAction(); const pol = useAction();

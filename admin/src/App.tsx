@@ -24,6 +24,7 @@ import { Workflows } from './Workflows';
 import { Rates } from './Rates';
 import { Tenants } from './Tenants';
 import { Users } from './Users';
+import { Jobs } from './Jobs';
 import { ClientProvider, ClientSwitcher, useClient } from './client';
 
 interface Me { email: string; role: string; readOnly: boolean }
@@ -94,7 +95,7 @@ function Shell({ me, hash, onSignOut }: { me: Me; hash: string; onSignOut: () =>
   const providerId = /^#\/providers\/([\w-]+)$/.exec(hash)?.[1];
   const workflowId = /^#\/workflows\/([\w-]+)$/.exec(hash)?.[1];
   const replay = /^#\/replay\/(call|run)\/([\w-]+)$/.exec(hash);
-  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers', 'workflows', 'recordings', 'outbound', 'resilience', 'tickets', 'faults', 'qa', 'changes', 'learning', 'cases', 'appointments', 'knowledge', 'change-log', 'replay', 'users'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
+  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers', 'workflows', 'recordings', 'outbound', 'resilience', 'tickets', 'faults', 'qa', 'changes', 'learning', 'cases', 'appointments', 'knowledge', 'change-log', 'replay', 'users', 'jobs'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
 
   return (
     <div className="shell">
@@ -120,6 +121,7 @@ function Shell({ me, hash, onSignOut }: { me: Me; hash: string; onSignOut: () =>
         <a href="#/knowledge" aria-current={section === 'knowledge' ? 'page' : undefined}>Knowledge</a>
         <a href="#/change-log" aria-current={section === 'change-log' ? 'page' : undefined}>Change log</a>
         <a href="#/users" aria-current={section === 'users' ? 'page' : undefined}>Users</a>
+        <a href="#/jobs" aria-current={section === 'jobs' ? 'page' : undefined}>Jobs</a>
         <span className="spacer" />
         <ClientSwitcher />
         {me.readOnly && <span className="badge warn" title="You can open every screen but not change anything.">Read only</span>}
@@ -128,6 +130,7 @@ function Shell({ me, hash, onSignOut }: { me: Me; hash: string; onSignOut: () =>
       <main key={client}>
         {section === 'tenants' ? <Tenants />
           : section === 'users' ? <Users />
+          : section === 'jobs' ? <Jobs />
           : section === 'rates' ? <Rates />
           : section === 'numbers' ? <Numbers />
           : section === 'recordings' ? <Recordings />

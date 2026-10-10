@@ -16,7 +16,7 @@ import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, gateOutbound, normalizeE164, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
-import { addNumber, callKnown, callQueued, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { addNumber, callKnown, callQueued, costCall, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
 import { registerJourneyRoutes } from './routes/journey.js';
 import { registerAppointmentRoutes } from './routes/appointments.js';
 import { registerCaseRoutes } from './routes/cases.js';
@@ -33,6 +33,13 @@ import { listDeliveries, listSubscriptions, sendTest, subscribe, subscriptionSch
 import { actionSchema, controlState, runAction } from './store/control-actions.js';
 import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
 import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
+import { countsOf, createScheduler, drain, listJobs, runJobNow, updateJob, type Job } from './scheduler.js';
+import { sweepFaults } from './store/call-end.js';
+import { expireQueued } from './store/concurrency.js';
+import { abandonStaleRuns } from './store/runs.js';
+import { checkPayments, cleanNote, dispatchDue, sweepAgeing } from './store/cases.js';
+import { sweepAudio, sweepDrift } from './store/learning.js';
+import { sweepReminders } from './store/appointments.js';
 import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
 import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
 import { parseTwilio, twimlHold, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
@@ -428,7 +435,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   // ------------------------------------------------- control tower
   app.get('/internal/control-tower', async (req) => {
     const s = await internal(req);
-    return withActor(pool, s.actor, (c) => controlTower(c, key, { publicBaseUrlSet: Boolean(callDeps.baseUrl), mailConnected: Boolean(deps.mailer) }));
+    return withActor(pool, s.actor, (c) => controlTower(c, key, { publicBaseUrlSet: Boolean(callDeps.baseUrl), mailConnected: Boolean(deps.mailer), jobs: scheduler.names }));
   });
   app.get('/internal/control-tower/panels', async (req) => {
     const s = await internal(req);
@@ -436,6 +443,50 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   });
   // ------------------------------------------------- alerts by email
   const alertDeps = { pool, key, publicBaseUrl: callDeps.baseUrl || undefined, mailer: deps.mailer };
+
+  // ------------------------------------------------- scheduled jobs
+  // The same work the sweep endpoints do, with their default settings, run by the app itself (src/scheduler.ts).
+  const runDeps = { pool, key, integrationHttp: deps.integrationHttp };
+  const caseDeps = { calls: callDeps, ...deps.cases };
+  const learnDeps = { pool, ...deps.learning };
+  const sys = <T>(fn: (c: pg.PoolClient) => Promise<T>) => withActor(pool, { kind: 'internal' }, fn);
+  const jobs: Job[] = [
+    { name: 'alerts-email', everySeconds: 60, run: () => sweepAlerts(alertDeps) },
+    // A backlog (many callbacks locked to one time) is worked through in batches within the run, so callbacks are not
+    // missed only because one batch is small. Bounded, and a batch smaller than its limit means nothing more is due.
+    { name: 'cases-dispatch', everySeconds: 60, run: () => drain(() => dispatchDue(caseDeps, () => new Date(), 20), 20, 10) },
+    { name: 'queue-expire', everySeconds: 60, run: async () => {
+      const out = await sys((c) => expireQueued(c, null, 300));
+      return { expired: out.expired, hungUp: await hangUpCalls(callDeps, out.hangups) };
+    } },
+    { name: 'faults-sweep', everySeconds: 300, run: () => sys((c) => sweepFaults(c)) },
+    { name: 'workflow-runs-sweep', everySeconds: 900, run: () => abandonStaleRuns(runDeps, null, { olderThanMinutes: 60 }) },
+    { name: 'reconcile', everySeconds: 3600, run: () => reconcileSweep(callDeps, null, { olderThanMinutes: 60, limit: 50 }) },
+    { name: 'learning-sweep', everySeconds: 3600, run: async () => ({ ...countsOf(await sweepAudio(learnDeps, null)), ...countsOf(await sweepDrift(learnDeps, null)) }) },
+    { name: 'payment-checks', everySeconds: 3600, perTenant: true, run: (t) => checkPayments(caseDeps, t!) },
+    { name: 'case-ageing', everySeconds: 86400, perTenant: true, run: (t) => sys((c) => sweepAgeing(c, t!)) },
+    { name: 'appointment-reminders', everySeconds: 900, perTenant: true, run: (t) => sys((c) => sweepReminders(c, t!)) },
+    // Extra channel charges are not run automatically: they bill a month at today's entitlement, which has no history,
+    // so a client added or upgraded mid-month would be charged for the whole month. An operator runs them by hand.
+  ];
+  const scheduler = createScheduler(pool, jobs, { log: (m) => app.log.error(m) });
+  app.decorate('scheduler', scheduler);
+  app.addHook('onClose', async () => { await scheduler.stop(); });
+  const reason = z.string().trim().min(3, 'Say why.').max(500).transform((t) => cleanNote(t, 'reason')!);
+  app.get('/internal/scheduler', async (req) => { const s = await internal(req); return withActor(pool, s.actor, listJobs); });
+  app.put('/internal/scheduler/:name', async (req) => {
+    const s = await admin(req);
+    const { name } = z.object({ name: z.string().max(60) }).parse(req.params);
+    const b = z.object({ enabled: z.boolean().optional(), everySeconds: z.number().int().min(60).max(2_678_400).optional(), reason })
+      .refine((x) => x.enabled !== undefined || x.everySeconds !== undefined, 'Change something: turn it on or off, or set how often it runs.').parse(req.body);
+    return withActor(pool, s.actor, (c) => updateJob(c, s.userId, name, b));
+  });
+  app.post('/internal/scheduler/:name/run', async (req) => {
+    const s = await admin(req);
+    const { name } = z.object({ name: z.string().max(60) }).parse(req.params);
+    const b = z.object({ reason }).parse(req.body);
+    return withActor(pool, s.actor, (c) => runJobNow(c, s.userId, name, b.reason));
+  });
   app.post('/internal/alerts/sweep', async (req) => { await internal(req); return sweepAlerts(alertDeps); });
   app.get('/internal/alerts/subscriptions', async (req) => { const s = await internal(req); return withActor(pool, s.actor, (c) => listSubscriptions(c)); });
   app.put('/internal/alerts/subscriptions', async (req) => { const s = await admin(req); const b = subscriptionSchema.parse(req.body); return withActor(pool, s.actor, (c) => subscribe(c, s.userId, b)); });
@@ -598,4 +649,8 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   }
 
   return app;
+}
+
+declare module 'fastify' {
+  interface FastifyInstance { scheduler: ReturnType<typeof createScheduler> }
 }

@@ -18,14 +18,13 @@ const notMet = (text: string): Criterion => ({ text, state: 'not_met', proof: 'n
 export const PHASES: PhaseProgress[] = [
   {
     id: '0', name: 'Foundations', status: 'in_progress',
-    summary: 'The shared backbone that every later phase plugs into. Built and tested, with a tenant switcher, read-only staff, user management (a new admin needs another admin to approve them) and an install path run end to end. The job queue is the one item left.',
+    summary: 'The shared backbone that every later phase plugs into. Built and tested, with a tenant switcher, read-only staff, user management (a new admin needs another admin to approve them) and an install path run end to end, and scheduled jobs that the app runs itself on Postgres.',
     criteria: [
       { text: 'An operator can add a provider through the UI and enter its parameters and charging mechanism, without a code change.', state: 'met', proof: 'tests', note: 'Driven in a real browser.' },
       { text: 'A rate change creates a new version, and old records keep their original rate.', state: 'met', proof: 'tests' },
       { text: "A client user can't read internal-ledger data, and a test proves it.", state: 'met', proof: 'tests' },
     ],
     open: [
-      'Redis and the job queue. Nothing in Phase 0 needs them, but the sweeps later phases added (reconciliation, dropped calls, learning, cases, reminders) still have to be run on a schedule by the deployment',
       'The install was run end to end only in a cloud sandbox (with the sandbox\'s certificate added to the image build), not on a real host',
       'Client admins and client users can do the same things: the client portal only reads credits and projects so far',
     ],
@@ -41,7 +40,7 @@ export const PHASES: PhaseProgress[] = [
     open: [
       'Live proof of Twilio and Telnyx call control (the providers\' docs were unreachable while building, so formats were written from memory)',
       'No voicebot yet: every answered call plays a test message and hangs up',
-      'Telnyx automatic reconciliation, and a schedule for the reconciliation sweep',
+      'Telnyx automatic reconciliation (the reconciliation sweep now runs every hour as a scheduled job)',
       'Voice usage (characters, tokens) is not yet fed into cost records',
     ],
   },
@@ -89,7 +88,7 @@ export const PHASES: PhaseProgress[] = [
       'A caller waiting in the inbound queue hears a hold message; nothing yet starts the workflow when their turn comes',
       'Funding is still not deducted as calls are costed, so the monitor warns from entered balances only',
       'Failures are detected from errors at dial time and from reported samples, not yet from provider webhooks',
-      'A failed provider recovers only through probes (`probeProviders` must be scheduled; a telephony provider has no probe yet)',
+      'A failed provider recovers only through probes (`probeProviders` is not a scheduled job yet, because no voice provider is connected to probe; a telephony provider has no probe yet)',
       'Hanging up a timed-out queued caller on Twilio uses a request written from memory, unchecked against the live service',
     ],
   },
@@ -104,7 +103,6 @@ export const PHASES: PhaseProgress[] = [
         note: "A call that ends after the workflow failed, or while it was still working, is flagged as a fault when the end is reported, with a Control Tower alert and a ticket; a watchdog flags a drop that never came with an end event once the failure is older than the agreed latency (60 s unless changed). Tested with simulated provider events: who really hung up is judged from the workflow's state, not from anything the providers report, and the watchdog must be run on a schedule." },
     ], open: [
       'No real call has been replayed: no live provider events have reached this code, and the call audio is not recorded',
-      'The watchdog (`POST /internal/faults/sweep`) must be run on a schedule by the deployment; nothing calls it automatically',
       'Who ended a call is inferred from the workflow, because what the providers report about who hung up has not been checked against the live services',
       'Mood and intent are read by word lists (English and Bahasa Malaysia, extendable per client); a model for turns the lists cannot read is not connected',
       'QA judgement questions need a model; none is connected, so they are left out of the score and the scorecard says it is incomplete',
@@ -124,7 +122,6 @@ export const PHASES: PhaseProgress[] = [
     ], open: [
       'No real council model, distiller model or voice provider is connected; councils, distilling by a model and recording are exercised with stand-ins, and the rules do the rest',
       'Clustering uses word overlap and a threshold, not embeddings; it has not been tuned on real conversations',
-      'The sweep (`POST /internal/learning/sweep`) that finishes approved scripts and screens promoted nodes for drift must be run on a schedule by the deployment',
       'The frequency, similarity, confidence and drift thresholds are conservative defaults and have not been tuned',
       'Drift compares how callers reacted before and after promotion; a change in the caller population over the same period would look like drift',
       'A promoted script is a layer over the workflow, not a part of its version: promoting or demoting changes what an in-flight call says at its next line',
@@ -138,7 +135,7 @@ export const PHASES: PhaseProgress[] = [
     criteria: [], open: [
       'Case management has been tested only against fakes: the lookup of a number to dial at the moment of a call, and the client\'s payment-status system, are stand-ins; no client system is connected',
       'Messages on other channels (WhatsApp, SMS, email) are not sent by the platform: case and appointment messages are queued for the client\'s own sender (`/internal/tenants/:id/case-outbox`, `/internal/tenants/:id/notifications`), and no provider for them exists',
-      'The dispatcher (`POST /internal/cases/dispatch`), the payment check and ageing sweep, and the appointment reminder sweep must be run on a schedule by the deployment; callbacks are placed within the agreed lateness of their time only if the dispatcher runs at least that often',
+      'The dispatcher, the payment check, the ageing sweep and the appointment reminders run as scheduled jobs (every minute, hourly, daily and every 15 minutes); a callback is placed within its agreed lateness only if the dispatcher runs at least that often, so its interval should stay at a minute',
       'Promises are recorded through the API; a workflow does not yet record one from what a caller says on a call',
       'Quiet hours and contact limits apply to every dial only for a client with a contact policy; a client without one has no limits. The daily and weekly limits are rolling 24 hours and 7 days, not calendar days in the contact\'s zone',
       'It is assumed, not checked against a real system, that the client\'s payment-status integration reports the total paid since the case was opened, as an exact decimal string; a total that goes down is ignored and logged each time it is seen',

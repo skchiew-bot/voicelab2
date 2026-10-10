@@ -32,8 +32,8 @@ Sources: [AWS Malaysia region launch](https://aws.amazon.com/blogs/aws/now-open-
 - **Secrets**: AWS Secrets Manager holds `VOICELAB_SECRET_KEY` and `DATABASE_URL`, injected into the task. Provider
   credentials stay encrypted in the database (never in environment variables on the server).
 - **Logs**: CloudWatch Logs in the region. The app never logs phone numbers, secrets or provider error text unscrubbed.
-- **Scheduled jobs**: EventBridge Scheduler calls the app's internal endpoints with a staff token kept in Secrets
-  Manager (see the schedule below). Nothing in the app runs them by itself.
+- **Scheduled jobs**: the app runs them itself (see below). Both tasks run the scheduler; each job runs on one task at a
+  time. No EventBridge rules and no scheduler token are needed.
 
 ## Settings
 
@@ -47,21 +47,27 @@ Sources: [AWS Malaysia region launch](https://aws.amazon.com/blogs/aws/now-open-
 
 ## Scheduled jobs
 
-Each is a `POST` to the app with the scheduler's staff token. Suggested cadence; adjust once real traffic is seen.
+The app runs these itself on every server where `SCHEDULER` is `on` (the default), and records each run. Each job runs on
+one server at a time, so two tasks are safe. The console's **Jobs** screen shows when each last ran and how it went, and
+lets an admin turn one off, change how often it runs, or run it now (with a reason). The Control Tower raises an alert if a
+job keeps failing or is overdue, which is also how you would notice that no server is running jobs.
 
-| Job | Endpoint | Every |
+| Job | What it does | Every |
 | --- | --- | --- |
-| Email new Control Tower alerts | `/internal/alerts/sweep` | 1 minute |
-| Place due case callbacks | `/internal/cases/dispatch` | 1 minute |
-| Give up waiting callers | `/internal/queue/expire` | 1 minute |
-| Flag dropped calls | `/internal/faults/sweep` | 5 minutes |
-| Abandon stalled workflow runs | `/internal/workflow-runs/sweep` | 15 minutes |
-| Reconcile call costs with providers | `/internal/reconcile/run` | 1 hour |
-| Learning loop (audio, drift) | `/internal/learning/sweep` | 1 hour |
-| Payment checks, per client | `/internal/tenants/:id/cases/check-payments` | 1 hour |
-| Case ageing, per client | `/internal/tenants/:id/cases/sweep-ageing` | daily |
-| Appointment reminders, per client | `/internal/tenants/:id/appointments/sweep-reminders` | 15 minutes |
-| Extra channel charges, per client | `/internal/tenants/:id/channel-charges` | monthly |
+| `alerts-email` | Emails new Control Tower alerts | 1 minute |
+| `cases-dispatch` | Places due case callbacks | 1 minute |
+| `queue-expire` | Gives up callers who waited too long | 1 minute |
+| `faults-sweep` | Flags dropped calls | 5 minutes |
+| `workflow-runs-sweep` | Abandons stalled workflow runs | 15 minutes |
+| `appointment-reminders` | Queues appointment reminders, per client | 15 minutes |
+| `reconcile` | Reconciles call costs with providers | 1 hour |
+| `learning-sweep` | Learning loop (audio, drift) | 1 hour |
+| `payment-checks` | Payment checks, per client | 1 hour |
+| `case-ageing` | Case ageing, per client | daily |
+
+Each job's endpoint (for example `POST /internal/reconcile/run`) still exists for running it by hand. Extra channel
+charges (`POST /internal/tenants/:id/channel-charges`) are deliberately not scheduled: they bill a past month at today's
+entitlement, so an operator runs them once a month.
 
 ## Steps
 
@@ -75,7 +81,7 @@ Each is a `POST` to the app with the scheduler's staff token. Suggested cadence;
    `scripts/setup.sh` does locally).
 7. **Service**: create the ECS service (two tasks) behind the load balancer; health check `GET /health`.
 8. **Domain**: point the domain at the load balancer; issue the ACM certificate; set `PUBLIC_BASE_URL`.
-9. **Scheduler**: create the scheduled jobs above.
+9. **Scheduled jobs**: nothing to set up; check the console's **Jobs** screen shows each job running.
 10. **Twilio, step 2 of the live test**: add the Twilio provider in the console (credentials are checked on save), add a
     Twilio number, set its voice webhook to Voice Lab, declare the do-not-call position for Malaysia, add rates and the
     FX rate, then place one outbound test call from the console to a phone you hold. Proven when the call's events

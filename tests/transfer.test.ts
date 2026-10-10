@@ -445,6 +445,22 @@ describe('a live caller passed to a person', () => {
     await dialled(b.callSid, b.callId, { CallStatus: 'completed', DialCallDuration: '61' });   // a retry prices nothing twice
     expect(await head(b.callId)).toHaveLength(1);
 
+    // Pricing that fails outright when the late report lands undoes only the pricing: Twilio still gets its answer, and the
+    // call stays waiting for a person (it shows as unpriced in the Control Tower), with the failure audited.
+    const f = await handedOver();
+    await relayEnded(f.callSid, f.callId);
+    await end(f.callSid, '90');
+    await env.pool.query(`CREATE FUNCTION refuse_cost() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'pricing broke'; END $$;
+      CREATE TRIGGER refuse_cost BEFORE INSERT ON call_costs FOR EACH ROW EXECUTE FUNCTION refuse_cost()`);
+    try {
+      const r = await dialled(f.callSid, f.callId, { CallStatus: 'completed', DialCallDuration: '61' });
+      expect(r.statusCode).toBe(200); expect(r.body).toBe(HANGUP);
+    } finally { await env.pool.query('DROP TRIGGER refuse_cost ON call_costs; DROP FUNCTION refuse_cost()'); }
+    expect((await env.pool.query('SELECT cost_status, transfer_seconds FROM calls WHERE id = $1', [f.callId])).rows[0]).toEqual({ cost_status: 'pending', transfer_seconds: '61.000' });
+    expect((await env.pool.query(`SELECT count(*)::int AS n FROM audit_log WHERE action = 'transfer.cost_failed' AND entity_id = $1`, [f.callId])).rows[0].n).toBe(1);
+    expect(await callbacks(f.callId)).toHaveLength(1);
+    expect((await post(`/internal/calls/${f.callId}/cost/retry`, {})).json()).toEqual({ cost_status: 'recorded' });
+
     // Twilio never reports the dial: a person settles the leg from the provider's records, once, and it is audited.
     const c = await handedOver();
     await relayEnded(c.callSid, c.callId);

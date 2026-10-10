@@ -289,10 +289,17 @@ export async function settleAgentLeg(c: pg.PoolClient, actorId: string | null, c
   await audit(c, actorId, 'transfer.agent_leg_settled', 'call', callId, { seconds });
 }
 
-/** A call already over whose cost was waiting for its agent leg is costed now. */
+/**
+ * A call already over whose cost was waiting for its agent leg is costed now. Pricing never takes the transfer down
+ * with it: if it fails outright, only the pricing is undone, the call stays waiting (the Control Tower shows a call
+ * left unpriced), and the transfer's own record and callback stand.
+ */
 async function costIfEnded(c: pg.PoolClient, callId: string) {
   const r = (await c.query('SELECT ended_at, cost_status FROM calls WHERE id = $1', [callId])).rows[0];
-  if (r?.ended_at && r.cost_status === 'pending') await costCall(c, null, callId);
+  if (!r?.ended_at || r.cost_status !== 'pending') return;
+  await c.query('SAVEPOINT transfer_cost');
+  try { await costCall(c, null, callId); await c.query('RELEASE SAVEPOINT transfer_cost'); }
+  catch { await c.query('ROLLBACK TO SAVEPOINT transfer_cost'); await audit(c, null, 'transfer.cost_failed', 'call', callId, {}); }
 }
 
 /**

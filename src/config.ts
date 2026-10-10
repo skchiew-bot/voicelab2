@@ -13,7 +13,8 @@ const schema = z.object({
 export type Config = z.infer<typeof schema>;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const parsed = schema.safeParse(env);
+  // A setting left empty counts as not set: the install file passes `PUBLIC_BASE_URL=` through as an empty string.
+  const parsed = schema.safeParse(Object.fromEntries(Object.entries(env).filter(([, v]) => v !== '')));
   if (!parsed.success) {
     const missing = parsed.error.issues.map((i) => i.path.join('.')).join(', ');
     throw new Error(`Missing or invalid settings: ${missing}. See .env.example.`);

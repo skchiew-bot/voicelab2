@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useClient } from './client';
 import { api, type AgendaRow, type DiaryRow, type NotificationRow, type Tenant, type AppointmentSummary } from './api';
 import { Errors, Field, fmtDate, fmtDecimal, useAction, useLoad } from './ui';
 
@@ -7,7 +8,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 export function Appointments() {
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
-  const [tenantId, setTenantId] = useState(''); const [diaryId, setDiaryId] = useState(''); const [date, setDate] = useState(today());
+  const [tenantId, setTenantId] = useClient(); const [diaryId, setDiaryId] = useState(''); const [date, setDate] = useState(today());
   const diaries = useLoad(() => (tenantId ? api<DiaryRow[]>('GET', `/internal/tenants/${tenantId}/diaries`) : Promise.resolve([])), [tenantId]);
   const agenda = useLoad(() => (diaryId ? api<AgendaRow[]>('GET', `/internal/diaries/${diaryId}/agenda?date=${date}`) : Promise.resolve([])), [diaryId, date]);
   const outbox = useLoad(() => (tenantId ? api<NotificationRow[]>('GET', `/internal/tenants/${tenantId}/notifications`) : Promise.resolve([])), [tenantId]);

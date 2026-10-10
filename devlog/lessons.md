@@ -9,7 +9,7 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:** one or more lines `` `path` › "exact text" ``. The text must appear in that file, usually a test title. The test fails if a guard's file or text is removed, so a lesson cannot quietly lose its protection.
 
 ### L-001: Check-then-act needs a lock or an atomic claim
-- **Seen:** 6 times. Racing final callbacks ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)); two reconciliation checks at once ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)); two replies both firing an integration write ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)); the dial retry bypassing the capacity lock, and inbound capacity decided without it ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)); concurrent rate changes (Phase 0). Two approved changes to one flow could both go live, the older silently undoing the newer; the drop watchdog could flag a call twice (Phase 5 independent review, 2026-10-10). Two audio finishes at once recorded every phrase twice and spent the voice provider twice (Phase 6 independent review, 2026-10-10). Contact limits were read without a lock, so three simultaneous dials to one person all passed; a case closed while its number was being looked up was still dialled (Phase 7 independent review, 2026-10-10).
+- **Seen:** 8 times. Racing final callbacks ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)); two reconciliation checks at once ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)); two replies both firing an integration write ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)); the dial retry bypassing the capacity lock, and inbound capacity decided without it ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)); concurrent rate changes (Phase 0). Two approved changes to one flow could both go live, the older silently undoing the newer; the drop watchdog could flag a call twice (Phase 5 independent review, 2026-10-10). Two audio finishes at once recorded every phrase twice and spent the voice provider twice (Phase 6 independent review, 2026-10-10). Contact limits were read without a lock, so three simultaneous dials to one person all passed; a case closed while its number was being looked up was still dialled (Phase 7 independent review, 2026-10-10).
 - **Rule:** Any "read state, decide, write" path that two requests can reach at once takes a lock (`pg_advisory_xact_lock`, `SELECT … FOR UPDATE`) or claims the work atomically, and re-checks inside the lock. Write the simultaneous-requests test first.
 - **Guards:**
   - `tests/telephony.test.ts` › "survives the same final callback arriving three times at once"
@@ -29,7 +29,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/concurrency.test.ts` › "does not dial again after a timeout or an unreadable reply"
 
 ### L-003: Look up data-defined names as own properties only
-- **Seen:** Workflow names such as `constructor`, `toString` and `__proto__` passed validation, rendering, conditions and reply paths ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). A client's lexicon topic named like an inherited property (`toString`) broke turn reading (Phase 5 independent review, 2026-10-10).
+- **Seen:** 2 times. Workflow names such as `constructor`, `toString` and `__proto__` passed validation, rendering, conditions and reply paths ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). A client's lexicon topic named like an inherited property (`toString`) broke turn reading (Phase 5 independent review, 2026-10-10).
 - **Rule:** Never use `in` or `obj[name]` on names that come from data. Use `own()`, and reject reserved names.
 - **Guards:**
   - `tests/workflow-hardening.test.ts` › "reserved names cannot be used for nodes, variables, captures or stored values"
@@ -46,7 +46,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/control-tower-panels.test.ts` › "names a funding balance in an alert to the last decimal place, never through a floating-point number"
 
 ### L-005: Something that never happened gets no status as if it had
-- **Seen:** 4 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10). A call never answered was recorded as a customer hang-up or a system drop; a QA run with nothing scored was stored as 0; a later normal end cleared a fault already flagged (Phase 5 independent review, 2026-10-10). A plain no-answer was counted as a missed call in the alert, and a callback the dispatcher was late for used up one of the person's retries though nobody was dialled (Phase 7 independent review, 2026-10-10). A delay flagged appointments it never reached as needing a new time, and told their customers they could not go ahead (Phase 7 appointments independent review, 2026-10-10). The Control Tower's funding runway said "no spend" when the spend was in another currency, and its contact rate read answered calls with no outcome as not contacted (Control Tower panels independent review, 2026-10-10). Draining a client's only provider for planned maintenance failed every dial, so each case callback used up one of the person's retries (Control Tower actions independent review, 2026-10-10).
+- **Seen:** 9 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10). A call never answered was recorded as a customer hang-up or a system drop; a QA run with nothing scored was stored as 0; a later normal end cleared a fault already flagged (Phase 5 independent review, 2026-10-10). A plain no-answer was counted as a missed call in the alert, and a callback the dispatcher was late for used up one of the person's retries though nobody was dialled (Phase 7 independent review, 2026-10-10). A delay flagged appointments it never reached as needing a new time, and told their customers they could not go ahead (Phase 7 appointments independent review, 2026-10-10). The Control Tower's funding runway said "no spend" when the spend was in another currency, and its contact rate read answered calls with no outcome as not contacted (Control Tower panels independent review, 2026-10-10). Draining a client's only provider for planned maintenance failed every dial, so each case callback used up one of the person's retries (Control Tower actions independent review, 2026-10-10).
 - **Rule:** Give "never started" or "unknown" its own state (such as `not_applicable`, or `null` rather than 0) and keep it out of failure counts, alerts, retries and anything that recommends an action.
 - **Guards:**
   - `tests/phase3.test.ts` › "will not lock a DID because of a call that never went out"
@@ -62,7 +62,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/control-actions.test.ts` › "holds dials back instead of failing them, so a case callback keeps its retries, and voice providers cannot be drained to nothing"
 
 ### L-006: One bad record must not take a whole feature down
-- **Seen:** 3 times. One unreadable secret returned a 500 for the whole Control Tower ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). One provider priced in a currency with no exchange rate made every pooled dial fail ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). A very large number gave a 500 instead of a 400 ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). One script's audio failure aborted the whole sweep, so drift screening stopped for everyone (Phase 6 independent review, 2026-10-10).
+- **Seen:** 4 times. One unreadable secret returned a 500 for the whole Control Tower ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). One provider priced in a currency with no exchange rate made every pooled dial fail ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). A very large number gave a 500 instead of a 400 ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). One script's audio failure aborted the whole sweep, so drift screening stopped for everyone (Phase 6 independent review, 2026-10-10).
 - **Rule:** Handle the bad item where it is: report it as an alert, rank it last, or refuse that input with a 4xx. Keep everything else working.
 - **Guards:**
   - `tests/control-tower.test.ts` › "is reported as an alert and does not take the whole Control Tower down"
@@ -86,7 +86,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/phase3.test.ts` › "locks the caller ID the contact sees, even when the same number is registered at two providers"
 
 ### L-009: A privacy rule must hold across every boundary
-- **Seen:** A child workflow could speak or send a parent's sensitive value. Phone numbers nested in values, or written in local form, got through ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). Free text a person types (a decision note, a close reason, a callback note) could have stored a customer's number in an append-only table (Phase 7 independent review, 2026-10-10). A policy answer's reason repeated the value of a call variable (a phone number passing as an amount) into an append-only table (Phase 7 knowledge independent review, 2026-10-10).
+- **Seen:** 3 times. A child workflow could speak or send a parent's sensitive value. Phone numbers nested in values, or written in local form, got through ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). Free text a person types (a decision note, a close reason, a callback note) could have stored a customer's number in an append-only table (Phase 7 independent review, 2026-10-10). A policy answer's reason repeated the value of a call variable (a phone number passing as an amount) into an append-only table (Phase 7 knowledge independent review, 2026-10-10).
 - **Rule:** Enforce sensitivity and number rules across workflows, nesting levels and every input path (start variables, integration replies), both at publish time and at run time.
 - **Guards:**
   - `tests/workflow-hardening.test.ts` › "a parent's sensitive variable cannot be spoken by the workflow it hands over to"
@@ -96,12 +96,13 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/knowledge-policy.test.ts` › "never puts the value of a variable into the reason it gives"
 
 ### L-010: A test that cannot fail proves nothing
-- **Seen:** 5 times. The Control Tower drift test passed with wrong data ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The Phase 2 production gate accepted scenarios that asserted nothing ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). The guard for L-015 pointed at a code comment, not a test, so it could never fail (independent review, 2026-10-10). A report test asserted the sum of two transcripts' costs and so locked in a double count; three new tests passed with the code they protect broken (independent review and mutation checks, 2026-10-10).
+- **Seen:** 6 times. The Control Tower drift test passed with wrong data ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The Phase 2 production gate accepted scenarios that asserted nothing ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). The guard for L-015 pointed at a code comment, not a test, so it could never fail (independent review, 2026-10-10). A report test asserted the sum of two transcripts' costs and so locked in a double count; three new tests passed with the code they protect broken (independent review and mutation checks, 2026-10-10). The read-only test accepted a 400 as a refusal, so it passed with the read-only check removed for every route that parses its input first; a browser check passed before the screen had loaded its data (Phase 0 independent review and mutation checks, 2026-10-10).
 - **Rule:** Before trusting a new test, break the code it protects and watch the test fail. Match exactly, not loosely. A test that asserts today's output can lock in today's bug: assert what is true, worked out by hand.
 - **Guards:**
   - `tests/control-tower.test.ts` › "matches the plan's Control Tower criteria exactly"
   - `tests/devlog.test.ts` › "guards a code lesson with a test title, not a comment"
 
+  - `tests/staff-roles.test.ts` › "is refused every change, on every route, and nothing in the database moves"
 ### L-011: Show old data as old
 - **Seen:** A failed Control Tower refresh left stale numbers looking current, and a slow older request could overwrite a newer one ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)).
 - **Rule:** Every live screen shows when its data is from, says so when an update fails, and lets the newest request win.
@@ -123,7 +124,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "warns at session start when the branch is behind origin/main"
 
 ### L-014: When a request could mean two things, ask which
-- **Seen:** "Control Tower" names both the product's operations console (`BUILD_PLAN.md`) and the owner's dashboard for monitoring development. A request for the second was built as the first (session on 2026-10-09). The dev Control Tower was then designed without asking whether a reference existed; the owner already had one in `skchiew-bot/d3ngineering` (session on 2026-10-10).
+- **Seen:** 2 times. "Control Tower" names both the product's operations console (`BUILD_PLAN.md`) and the owner's dashboard for monitoring development. A request for the second was built as the first (session on 2026-10-09). The dev Control Tower was then designed without asking whether a reference existed; the owner already had one in `skchiew-bot/d3ngineering` (session on 2026-10-10).
 - **Rule:** If a term has two meanings in this repo, or a request could fit either, ask before building. Before designing something new for the owner, ask whether they already have a design or an example to follow. "Control Tower" alone means the product console; the development monitor is the "dev Control Tower" (`/control-tower`).
 - **Guards:**
   - `CLAUDE.md` › "dev Control Tower"
@@ -164,14 +165,14 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "writes to the spool, which git ignores, so the working tree stays clean"
 
 ### L-020: Check that monitoring is running, not just installed
-- **Seen:** After a restart, Claude Code reopened a session with `/home/user` as its project folder, outside the repository, so the repository's hooks never loaded and nothing was logged for half an hour, silently (session on 2026-10-10). The drift screen swallowed errors and said nothing about nodes it could not judge (Phase 6 independent review, 2026-10-10).
+- **Seen:** 2 times. After a restart, Claude Code reopened a session with `/home/user` as its project folder, outside the repository, so the repository's hooks never loaded and nothing was logged for half an hour, silently (session on 2026-10-10). The drift screen swallowed errors and said nothing about nodes it could not judge (Phase 6 independent review, 2026-10-10).
 - **Rule:** A monitor must report its own gaps. The dev Control Tower flags any session that commits while not being logged; when you see that warning, say so and record what ran by hand instead of leaving the gap. Usage can be recorded by running the hook with a Stop event for the session's transcript; it gathers every transcript of the session and counts each message once.
 - **Guards:**
   - `tests/devlog.test.ts` › "folds the board, splits a session's cost between its tasks exactly, links incidents to guarded lessons, and finds logging gaps"
   - `tests/learning.test.ts` › "does not stop the sweep when one script's audio fails, and names what it could not judge"
 
 ### L-021: A guardrail that fires on normal work is worse than none
-- **Seen:** The first stop-loss rules told Claude to stop after three unrelated commands that shared a description, a `grep` that mentioned `vitest`, a large file read in chunks, and test runs broken on purpose to prove a test can fail (independent review, 2026-10-10). The Phase 5 turn reader treated a plain "no" and "no, thank you" as upset, so two declined questions handed a call to a person; the drop watchdog treated a reply still being worked on as dropped (Phase 5 independent review, 2026-10-10).
+- **Seen:** 2 times. The first stop-loss rules told Claude to stop after three unrelated commands that shared a description, a `grep` that mentioned `vitest`, a large file read in chunks, and test runs broken on purpose to prove a test can fail (independent review, 2026-10-10). The Phase 5 turn reader treated a plain "no" and "no, thank you" as upset, so two declined questions handed a call to a person; the drop watchdog treated a reply still being worked on as dropped (Phase 5 independent review, 2026-10-10).
 - **Rule:** Before a guardrail can stop work, test it against normal work as well as the failure it targets: count consecutive failures of the same thing, reset on success, and give deliberate exceptions a way through (`DEVLOG_EXPECT_RED=1`).
 - **Guards:**
   - `tests/devlog.test.ts` › "does not count test runs expected to fail, or commands that only mention a test runner"
@@ -181,7 +182,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/tracker.test.ts` › "reads a plain "no" or "no, thank you" as neutral or kind, and two declined questions do not hand the call to a person"
 
 ### L-022: Compare times as times, not as text
-- **Seen:** The report compared git commit dates written with a +08:00 offset against UTC log timestamps as strings, so logging gaps, audit completeness and session times were wrong for anyone outside UTC (independent review, 2026-10-10). A date column read on a server east of UTC came back as the day before, so a promise was judged broken a day early (Phase 7 independent review, 2026-10-10). A group booking counted an officer's busy-ness by the server's UTC day, so early-morning work in Kuala Lumpur counted towards the wrong day (Phase 7 appointments independent review, 2026-10-10).
+- **Seen:** 3 times. The report compared git commit dates written with a +08:00 offset against UTC log timestamps as strings, so logging gaps, audit completeness and session times were wrong for anyone outside UTC (independent review, 2026-10-10). A date column read on a server east of UTC came back as the day before, so a promise was judged broken a day early (Phase 7 independent review, 2026-10-10). A group booking counted an officer's busy-ness by the server's UTC day, so early-morning work in Kuala Lumpur counted towards the wrong day (Phase 7 appointments independent review, 2026-10-10).
 - **Rule:** Turn every timestamp into one form (`new Date(x).toISOString()`, or milliseconds) at the edge, before comparing or sorting.
 - **Guards:**
   - `tests/devlog.test.ts` › "finds logging gaps"
@@ -189,7 +190,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/appointments.test.ts` › "counts a group member's load by their own calendar day"
 
 ### L-023: Keep every branch accountable to the plan, and the trunk as the default
-- **Seen:** The repository's default branch on GitHub was still the first session branch (`claude/elegant-fermat-er13o8`), long merged, so clones and the GitHub page showed stale code; seven merged branches were never deleted; and nothing checked that a branch belonged to the plan (found by the dev Control Tower branch audit, 2026-10-10). A cloud session could not delete merged branches when asked: the git proxy refuses deletes and no GitHub tool deletes a branch, so a workflow now does it ([#20](https://github.com/skchiew-bot/voicelab2/pull/20)).
+- **Seen:** 2 times. The repository's default branch on GitHub was still the first session branch (`claude/elegant-fermat-er13o8`), long merged, so clones and the GitHub page showed stale code; seven merged branches were never deleted; and nothing checked that a branch belonged to the plan (found by the dev Control Tower branch audit, 2026-10-10). A cloud session could not delete merged branches when asked: the git proxy refuses deletes and no GitHub tool deletes a branch, so a workflow now does it ([#20](https://github.com/skchiew-bot/voicelab2/pull/20)).
 - **Rule:** Every branch is either named for a plan phase or carries a PR titled with one. A branch justified only by a board task is listed for the owner to confirm, and anything else is a fork; never create or link a task just to clear the warning. The default branch is `main`. Deleting branches and changing the default are the owner's calls: report them, never do them unasked. Merged `claude/` branches are deleted on merge by the `delete-merged-branches` workflow; when the owner asks, run that workflow (a cloud session cannot delete a branch with git).
 - **Guards:**
   - `tests/devlog.test.ts` › "classes every branch as the trunk, part of the plan, task-only or a fork"
@@ -197,12 +198,13 @@ Format, checked by `tests/devlog.test.ts`:
   - `.github/workflows/delete-merged-branches.yml` › "Refusing to delete the default branch."
 
 ### L-024: A check the checked party can pass by itself proves nothing
-- **Seen:** The first branch audit counted any branch linked to a board task as part of the plan, and its instructions told sessions to link a task to clear the fork warning: a session could invent a task and approve its own branch (independent review, 2026-10-10).
+- **Seen:** 2 times. The first branch audit counted any branch linked to a board task as part of the plan, and its instructions told sessions to link a task to clear the fork warning: a session could invent a task and approve its own branch (independent review, 2026-10-10). Any admin could add a second admin through the API and use it to approve their own flow change, policy or knowledge version, since the "different person" checks compare user ids (Phase 0 independent review, 2026-10-10).
 - **Rule:** When a check guards against the agent's own work drifting, the agent must not be able to satisfy it alone. Show self-declared evidence (a task link) as its own class for the owner to confirm, and never create evidence just to clear a warning.
 - **Guards:**
   - `tests/devlog.test.ts` › "classes every branch as the trunk, part of the plan, task-only or a fork"
   - `CLAUDE.md` › "never create or link a task just to clear a warning"
 
+  - `tests/staff-roles.test.ts` › "keeps an admin added by another admin out until a different admin approves them, so one admin cannot invent a second approver"
 ### L-025: Derived state is valid only for the thing it was derived from
 - **Seen:** A promoted script was looked up by workflow, node and language only, so after a deploy changed the node callers kept hearing the old script until a scheduled screen ran; a script learned in one journey context was spoken in every context; and the screen that looked for a changed node could be tripped by simulating an undeployed draft (Phase 6 independent review, 2026-10-10).
 - **Rule:** Anything learned or derived from a definition (a script, a cache, a score) carries what it was derived from (here the node's hash and the journey context) and is used only when that still matches, checked at the point of use, not by a job that may not be running. A rehearsal of something undeployed never counts as evidence about what is live.
@@ -268,3 +270,16 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** Parse what a person types against the exact form you expect and refuse anything else with a message. Never let a value that failed to parse fall through to an empty, null or default meaning, especially one that loosens a safeguard.
 - **Guards:**
   - `tests/admin-ui.test.ts` › "takes an action from the Control Tower only with a reason, and shows it in the change log"
+
+### L-035: Run an install or a deploy for real; a file that validates can still fail to start
+- **Seen:** The Docker install had a compose file that validated, but it was never run. The first real run (Phase 0, 2026-10-10) crashed on a fresh install: the compose file passes `PUBLIC_BASE_URL` as an empty string, and the settings check refused it. Running the installer a second time to upgrade then failed with a raw database error, because the first admin already existed.
+- **Rule:** Before calling an install, deploy or start-up path done, run it from nothing and run it again on top of itself. Treat a setting left empty as not set, and make every step safe to repeat.
+- **Guards:**
+  - `tests/config.test.ts` › "starts with a setting left empty by the install file, as if it were not set"
+  - `tests/staff-roles.test.ts` › "creates the first admin once, and running it again to upgrade changes nothing"
+
+### L-036: Choose the scope of a protective record on purpose, never from a screen-wide default
+- **Seen:** The tenant switcher pre-filled the do-not-call form with the chosen client, so a national list pasted while a client was chosen would have been stored as that one client's opt-outs, and every other client could still dial those numbers (Phase 0 independent review, 2026-10-10).
+- **Rule:** A menu-wide choice may decide what a screen shows, never what a record protects or who it belongs to. Forms that create do-not-call entries, numbers or workflows start empty and are chosen each time.
+- **Guards:**
+  - `tests/admin-ui.test.ts` › "follows one chosen client across screens and reloads, and forgets a client that no longer exists"

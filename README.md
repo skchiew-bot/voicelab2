@@ -39,15 +39,16 @@ Register the numbers you own with `POST /internal/numbers`; an inbound call is r
 
 ## Admin console
 
-Staff sign in with an API token. The console opens on the **Control Tower** (what needs attention, project progress, live calls, provider health, funding, cost and margin). Other screens: Workflows, Providers, Clients, Rates (FX and the client rate card), Numbers, Do not call, and Calls (cost by campaign, each call's timeline and cost lines, reconciliation and re-pricing). Providers: add one from a form built from the adapter's declared settings, set capabilities, add charging versions, confirm rates, record funding. Clients: add a client, grant credits, add projects, create users (their token is shown once).
+Staff sign in with an API token. The console opens on the **Control Tower** (what needs attention, project progress, live calls, provider health, funding, cost and margin). Other screens: Workflows, Providers, Clients, Rates (FX and the client rate card), Numbers, Do not call, and Calls (cost by campaign, each call's timeline and cost lines, reconciliation and re-pricing). Providers: add one from a form built from the adapter's declared settings, set capabilities, add charging versions, confirm rates, record funding. Clients: add a client, grant credits, add projects, create users (their token is shown once). The **Working on** menu picks one client for every screen that works on one client. Users: add staff (admin, or read only: every screen, no changes) and disable any user; a disabled token stops working at once.
 
 ## API (Phase 0)
 
-All requests send `Authorization: Bearer <token>`. `/internal/*` is Daythree staff only; `/client/*` is a tenant's own data.
+All requests send `Authorization: Bearer <token>`. `/internal/*` is Daythree staff only (read-only staff may only `GET`); `/client/*` is a tenant's own data.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /me` | Who the token belongs to |
+| `GET /me` | Who the token belongs to, their role, and whether they are read only |
+| `GET /internal/users`, `POST /internal/staff`, `POST /internal/users/:id/approve`, `POST /internal/users/:id/disable` | Who can sign in (admins only); add staff (token shown once; a new admin works only after a different admin approves them); disable a user for good |
 | `GET /health` | Database and migration check (no auth) |
 | `GET /internal/adapters` | Adapter parameter declarations, used to build the provider form |
 | `POST /internal/providers` | Add a provider; secrets are encrypted and never returned |

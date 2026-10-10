@@ -1,7 +1,7 @@
 import { loadConfig } from './config.js';
 import { createPool, withActor } from './db.js';
 import { migrate } from './migrate.js';
-import { createUser } from './store/tenants.js';
+import { bootstrapAdmin } from './store/tenants.js';
 
 const [cmd, ...args] = process.argv.slice(2);
 const config = loadConfig();
@@ -16,9 +16,10 @@ try {
     const email = args[0];
     if (!email) throw new Error('Usage: npm run bootstrap -- <admin-email>');
     await migrate(pool);
-    const user = await withActor(pool, { kind: 'internal' }, (c) =>
-      createUser(c, null, { tenantId: null, email, role: 'internal_admin' }));
-    console.log(`Admin created: ${user.email}\nAPI token (save it now, it is not shown again):\n${user.token}`);
+    const user = await withActor(pool, { kind: 'internal' }, (c) => bootstrapAdmin(c, email));
+    if (user.created) console.log(`Admin created: ${user.email}\nAPI token (save it now, it is not shown again):\n${user.token}`);
+    else if (user.role !== 'internal_admin' || user.disabled) throw new Error(`${user.email} already exists but is not an active admin. Choose another email.`);
+    else console.log(`Admin ${user.email} already exists; nothing changed. Sign in with the token saved when it was created.`);
   } else {
     console.log('Commands: migrate | bootstrap <admin-email>');
     process.exitCode = 1;

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api, type CreditSummary, type Project, type Tenant } from './api';
+import { useClient, useClientList } from './client';
 import { Errors, Field, fmtDecimal, useAction, useLoad } from './ui';
 
 function TenantPanel({ tenant }: { tenant: Tenant }) {
@@ -74,7 +75,8 @@ function TenantPanel({ tenant }: { tenant: Tenant }) {
 export function Tenants() {
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
   const [name, setName] = useState('');
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useClient();
+  const shared = useClientList();
   const { pending, error, run } = useAction();
   const current = tenants.data?.find((t) => t.id === selected);
 
@@ -90,7 +92,7 @@ export function Tenants() {
       <form className="inline" aria-label="Add client" onSubmit={async (e) => {
         e.preventDefault();
         const t = await run(() => api<Tenant>('POST', '/internal/tenants', { name }));
-        if (t) { setName(''); tenants.reload(); setSelected(t.id); }
+        if (t) { setName(''); tenants.reload(); await shared.reload(); setSelected(t.id); }
       }}>
         <Field label="New client"><input value={name} onChange={(e) => setName(e.target.value)} required /></Field>
         <button type="submit" disabled={pending}>Add client</button>

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useClient } from './client';
 import { api, apiObjectUrl, type Recording, type Tenant } from './api';
 import { Errors, Field, useAction, useLoad } from './ui';
 
@@ -25,7 +26,7 @@ function Play({ id }: { id: string }) {
 
 export function Recordings() {
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
-  const [tenantId, setTenantId] = useState('');
+  const [tenantId, setTenantId] = useClient();
   const list = useLoad(() => (tenantId ? api<Recording[]>('GET', `/internal/tenants/${tenantId}/recordings`) : Promise.resolve([])), [tenantId]);
   const [language, setLanguage] = useState('en');
   const [text, setText] = useState('');

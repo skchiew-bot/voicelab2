@@ -23,6 +23,11 @@ import { WorkflowDetail } from './WorkflowDetail';
 import { Workflows } from './Workflows';
 import { Rates } from './Rates';
 import { Tenants } from './Tenants';
+import { Users } from './Users';
+import { ClientProvider, ClientSwitcher, useClient } from './client';
+
+interface Me { email: string; role: string; readOnly: boolean }
+const STAFF = ['internal_admin', 'internal_viewer'];
 
 function useHash() {
   const [hash, setHash] = useState(location.hash || '#/tower');
@@ -34,20 +39,20 @@ function useHash() {
   return hash;
 }
 
-function Login({ onDone }: { onDone: () => void }) {
+function Login({ onDone }: { onDone: (me: Me) => void }) {
   const [token, setLocal] = useState('');
   const { pending, error, run } = useAction();
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setToken(token.trim());
-    const me = await run(() => api<{ role: string }>('GET', '/me'));
+    const me = await run(() => api<Me>('GET', '/me'));
     if (!me) { setToken(null); return; }
-    if (me.role !== 'internal_admin') {
+    if (!STAFF.includes(me.role)) {
       setToken(null);
       alert('This console is for Daythree staff. Use the client portal instead.');
       return;
     }
-    onDone();
+    onDone(me);
   }
   return (
     <main className="login">
@@ -65,25 +70,31 @@ function Login({ onDone }: { onDone: () => void }) {
 }
 
 export function App() {
-  const [signedIn, setSignedIn] = useState(false);
+  const [me, setMe] = useState<Me | null>(null);
   const [checking, setChecking] = useState(Boolean(getToken()));
   const hash = useHash();
 
   useEffect(() => {
     if (!getToken()) return;
-    api<{ role: string }>('GET', '/me')
-      .then((me) => setSignedIn(me.role === 'internal_admin'))
+    api<Me>('GET', '/me')
+      .then((m) => setMe(STAFF.includes(m.role) ? m : null))
       .catch(() => setToken(null))
       .finally(() => setChecking(false));
   }, []);
 
   if (checking) return <main className="login"><p className="muted">Loading…</p></main>;
-  if (!signedIn) return <Login onDone={() => setSignedIn(true)} />;
+  if (!me) return <Login onDone={setMe} />;
+  return <ClientProvider><Shell me={me} hash={hash} onSignOut={() => { setToken(null); setMe(null); }} /></ClientProvider>;
+}
+
+function Shell({ me, hash, onSignOut }: { me: Me; hash: string; onSignOut: () => void }) {
+  // Changing client starts the screen afresh, so nothing chosen for the last client (a case, a diary) is carried over.
+  const [client] = useClient();
 
   const providerId = /^#\/providers\/([\w-]+)$/.exec(hash)?.[1];
   const workflowId = /^#\/workflows\/([\w-]+)$/.exec(hash)?.[1];
   const replay = /^#\/replay\/(call|run)\/([\w-]+)$/.exec(hash);
-  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers', 'workflows', 'recordings', 'outbound', 'resilience', 'tickets', 'faults', 'qa', 'changes', 'learning', 'cases', 'appointments', 'knowledge', 'change-log', 'replay'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
+  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers', 'workflows', 'recordings', 'outbound', 'resilience', 'tickets', 'faults', 'qa', 'changes', 'learning', 'cases', 'appointments', 'knowledge', 'change-log', 'replay', 'users'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
 
   return (
     <div className="shell">
@@ -108,11 +119,15 @@ export function App() {
         <a href="#/appointments" aria-current={section === 'appointments' ? 'page' : undefined}>Appointments</a>
         <a href="#/knowledge" aria-current={section === 'knowledge' ? 'page' : undefined}>Knowledge</a>
         <a href="#/change-log" aria-current={section === 'change-log' ? 'page' : undefined}>Change log</a>
+        <a href="#/users" aria-current={section === 'users' ? 'page' : undefined}>Users</a>
         <span className="spacer" />
-        <button className="link" onClick={() => { setToken(null); setSignedIn(false); }}>Sign out</button>
+        <ClientSwitcher />
+        {me.readOnly && <span className="badge warn" title="You can open every screen but not change anything.">Read only</span>}
+        <button className="link" onClick={onSignOut}>Sign out</button>
       </nav>
-      <main>
+      <main key={client}>
         {section === 'tenants' ? <Tenants />
+          : section === 'users' ? <Users />
           : section === 'rates' ? <Rates />
           : section === 'numbers' ? <Numbers />
           : section === 'recordings' ? <Recordings />

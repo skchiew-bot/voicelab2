@@ -165,6 +165,10 @@ export async function startRunSpoken(d: RunDeps, actorId: string | null, e: Star
   catch (err) { if (err instanceof PhoneInVariable) throw new AppError(400, err.message); throw err; }
 
   return asInternal(d, async (c) => {
+    // A live call that has already fallen back (its caller heard the holding line) gets no run, however long this start took.
+    if (e.kind === 'live' && e.callId && (await c.query('SELECT relay_failed FROM calls WHERE id = $1 FOR UPDATE', [e.callId])).rows[0]?.relay_failed) {
+      throw new AppError(409, 'This call has already fallen back, so the workflow was not started on it.');
+    }
     const id = randomUUID();
     const held = seal(out.state, d.key, id);
     await c.query(

@@ -18,7 +18,7 @@ import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from 
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, gateOutbound, normalizeE164, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
 import { addNumber, callKnown, callQueued, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
-import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, type RelayDeps, type RelaySession } from './store/relay.js';
+import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, standbyCheck, STARTING_GRACE_MS, type RelayDeps, type RelaySession } from './store/relay.js';
 import { recordingAudio } from './store/recordings.js';
 import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
 import { DEFAULT_FALLBACK } from './resilience/fallback.js';
@@ -604,11 +604,23 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
       const send = (out: RelayOutbound[]) => { for (const m of out) if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(m)); };
       // The relay must say which call it is for straight away; a connection that does not is closed.
       const setupTimer = setTimeout(() => { if (!session) socket.close(1008, 'No setup'); }, 10_000);
+      // A connection standing by while another starts the call looks again later, so it is never left silent.
+      let standbyTimer: NodeJS.Timeout | undefined;
+      const armStandby = () => {
+        standbyTimer = setTimeout(() => {
+          queue = queue.then(async () => {
+            if (!session) return;
+            const r = await standbyCheck(relayDeps, session);
+            send(r.send);
+            if (r.again) armStandby();
+          }).catch(() => undefined);
+        }, STARTING_GRACE_MS + 1_000);
+      };
       socket.on('message', (data: Buffer) => {
         const m = parseRelay(data.toString('utf8'));
         if (!m) return;
         // The question the call was on when these words arrived (before setup has finished, worked out once it has).
-        const askedAt = session ? session.version : undefined;
+        const askedAt = session?.runId ? session.version : undefined;
         // One message at a time, in order: a turn finishes before the next is looked at.
         queue = queue.then(async () => {
           if (m.type === 'setup') {
@@ -618,6 +630,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
             session = r.session;
             send(r.send);
             if (!session) socket.close(1008, 'Unknown call');
+            else if (!session.runId && !session.ended) armStandby();
             return;
           }
           if (session) send(await onRelayMessage(relayDeps, session, m, askedAt));
@@ -630,7 +643,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
         });
       });
       socket.on('close', () => {
-        clearTimeout(setupTimer);
+        clearTimeout(setupTimer); clearTimeout(standbyTimer);
         queue = queue.then(() => (session ? closeRelay(relayDeps, session) : undefined)).catch(() => undefined);
       });
     });

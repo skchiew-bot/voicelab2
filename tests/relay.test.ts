@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { parseKey } from '../src/secrets.js';
-import { failed, mediaLink, mediaLinkValid, MEDIA_LINK_SECONDS, openRelay, relayCallToken, STUCK_REPLY_MS } from '../src/store/relay.js';
+import { failed, mediaLink, mediaLinkValid, MEDIA_LINK_SECONDS, onRelayMessage, openRelay, relayCallToken, standbyCheck, STARTING_GRACE_MS, STUCK_REPLY_MS } from '../src/store/relay.js';
+import { startRunSpoken } from '../src/store/runs.js';
 import { parseRelay, relaySettings, sayMessages, twimlRelay } from '../src/telephony/relay.js';
 import type { WorkflowDefinition } from '../src/workflows/definition.js';
 
@@ -299,6 +300,7 @@ describe('a live call through the speech relay', () => {
     const got = await line.until(4);
     expect(got.slice(2).map((m) => m.type)).toEqual(['text', 'end']);
     expect(await callbacks(callId)).toBe(1);
+    expect((await runOf(callId))[0]).toMatchObject({ status: 'ended', outcome: 'abandoned', sealed: null });   // ended now, not at the next sweep
     line.ws.close(); await line.closed;
     // a reconnect after the fallback ends the line and records nothing more
     const again = await connect();
@@ -311,6 +313,52 @@ describe('a live call through the speech relay', () => {
     const session = { providerId: twilioId, callId, tenantId: tenant, projectId: null, runId: null, version: 0, ended: false, owner: 'x' };
     await Promise.all([failed(relayDeps(), { ...session }), failed(relayDeps(), { ...session })]);
     expect(await callbacks(callId)).toBe(1);
+  });
+
+  it('falls back, without starting anything, when the connection that was starting the call died before it began', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    const { callSid, callId } = await ring();
+    await env.pool.query(`UPDATE calls SET relay_owner = gen_random_uuid(), relay_claimed_at = now() - make_interval(secs => $2) WHERE id = $1`, [callId, STARTING_GRACE_MS / 1000 + 5]);
+    const o = await openRelay(relayDeps(), twilioId, setup(callSid, callId));
+    expect(o.send.map((m) => m.type)).toEqual(['text', 'end']);
+    expect(await runOf(callId)).toHaveLength(0);
+    expect(await callbacks(callId)).toBe(1);
+  });
+
+  it('does not leave a standing-by connection silent when the one starting the call dies, and a late start then writes nothing', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    const { callSid, callId } = await ring();
+    await env.pool.query(`UPDATE calls SET relay_owner = gen_random_uuid(), relay_claimed_at = now() WHERE id = $1`, [callId]);   // another connection is starting it
+    const d = relayDeps();
+    const o = await openRelay(d, twilioId, setup(callSid, callId));
+    expect(o.send).toEqual([]);
+    expect(await standbyCheck(d, o.session!)).toEqual({ send: [], again: true });                 // still within its time: look again later
+    expect(await onRelayMessage(d, o.session!, prompt('hello?') as never)).toEqual([]);
+    await env.pool.query(`UPDATE calls SET relay_claimed_at = now() - make_interval(secs => $2) WHERE id = $1`, [callId, STARTING_GRACE_MS / 1000 + 5]);
+    const r = await standbyCheck(d, o.session!);
+    expect(r.send.map((m) => m.type)).toEqual(['text', 'end']);
+    expect(await callbacks(callId)).toBe(1);
+    // the start was only slow, not dead: it finishes after the fallback, and writes no run
+    await expect(startRunSpoken(d.runs, null, { workflowId: wfId, environment: 'production', kind: 'live', variables: {}, callId })).rejects.toThrow(/already fallen back/);
+    expect(await runOf(callId)).toHaveLength(0);
+  });
+
+  it('lets a standing-by connection take the call over once the run exists: it repeats the last line, and applies its first answer to the question the call is on', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    const d = relayDeps();
+    for (const how of ['timer', 'answer'] as const) {
+      const { callSid, callId } = await ring();
+      await env.pool.query(`UPDATE calls SET relay_owner = gen_random_uuid(), relay_claimed_at = now() WHERE id = $1`, [callId]);
+      const o = await openRelay(d, twilioId, setup(callSid, callId));
+      expect(o.send).toEqual([]);
+      await startRunSpoken(d.runs, null, { workflowId: wfId, environment: 'production', kind: 'live', variables: {}, callId });   // the other connection's start lands
+      if (how === 'timer') {
+        expect(await standbyCheck(d, o.session!)).toEqual({ send: [{ type: 'text', token: 'Can you pay this week?', last: true }], again: false });
+      } else {
+        expect(await onRelayMessage(d, o.session!, prompt('yes') as never)).toEqual([{ type: 'text', token: 'Please say your secret word.', last: true }]);
+      }
+      expect((await env.pool.query('SELECT relay_owner FROM calls WHERE id = $1', [callId])).rows[0].relay_owner).toBe(o.session!.owner);
+    }
   });
 
   it('ends a run the caller hung up on, wiping what it held sensitive', async () => {

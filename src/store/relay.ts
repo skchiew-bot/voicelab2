@@ -15,7 +15,7 @@ import { DEFAULT_FALLBACK } from '../resilience/fallback.js';
 import { sayMessages, type RelayInbound, type RelayOutbound } from '../telephony/relay.js';
 import { recordEvent } from './events.js';
 import { addCallbackRequest, getFallbackPlan } from './resilience.js';
-import { abandonRow, abandonRun, replyRunSpoken, startRunSpoken, type RunDeps, type SpokenLine } from './runs.js';
+import { abandonRow, replyRunSpoken, startRunSpoken, type RunDeps, type SpokenLine } from './runs.js';
 
 export interface RelayDeps { runs: RunDeps; baseUrl: string; now?: () => Date }
 
@@ -69,10 +69,14 @@ const say = (d: RelayDeps, lines: SpokenLine[]) => sayMessages(lines, (id) => me
 /** What a finished run leaves to say: nothing more, then the end. A call passed to a person says so to whatever runs next. */
 const endMessage = (outcome: string | null): RelayOutbound => (outcome === 'handoff_human' ? { type: 'end', handoffData: JSON.stringify({ reason: 'handoff_human' }) } : { type: 'end' });
 
-/** A start that has produced no run in this long died with the server that was running it. */
-export const STARTING_GRACE_MS = 30_000;
-/** A reply claimed this long ago and still not applied died with the server that was applying it. */
-export const STUCK_REPLY_MS = 60_000;
+/**
+ * A start that has produced no run in this long died with the server that was running it, and a reply claimed this long
+ * ago and still not applied died with the server applying it. Set well above a slow but healthy start or turn (several
+ * integration calls of up to 10 s each); and should a slow one cross it anyway, the fallback wins: once a call has
+ * fallen back, no run can be written for it and a reply still being applied cannot land.
+ */
+export const STARTING_GRACE_MS = 60_000;
+export const STUCK_REPLY_MS = 90_000;
 
 type Opening =
   | { kind: 'refuse' } | { kind: 'over' } | { kind: 'end' } | { kind: 'standby' } | { kind: 'died' } | { kind: 'start'; workflowId: string }
@@ -142,7 +146,12 @@ export async function onRelayMessage(d: RelayDeps, session: RelaySession, m: Rel
   if (m.type === 'error') { await event(d, session, 'relay.error', { by: 'provider' }); return []; }
   if (m.type !== 'prompt' || m.last === false || m.voicePrompt.trim() === '') return [];
   // A connection that stood by while another started the call takes it over once the run exists.
-  if (!session.runId && !(await adopt(d, session))) return [];
+  if (!session.runId) {
+    const a = await adopt(d, session);
+    if (a === 'died') return (await failed(d, session)).send;
+    if (a === 'over') return finish(session, [{ type: 'end' }]).send;
+    if (a === 'waiting') return [];
+  }
   const asked = askedAt ?? session.version;
   try {
     const r = await replyRunSpoken(d.runs, session.runId!, m.voicePrompt, asked);
@@ -160,17 +169,40 @@ export async function onRelayMessage(d: RelayDeps, session: RelaySession, m: Rel
   }
 }
 
-/** Take over a call whose run another connection started. False if there is no run yet. */
-async function adopt(d: RelayDeps, session: RelaySession): Promise<boolean> {
-  const run = await asInternal(d, async (c) => {
-    await c.query('SELECT 1 FROM calls WHERE id = $1 FOR UPDATE', [session.callId]);
+/**
+ * Take over a call whose run another connection started. 'waiting' while that start is still within its time; 'died'
+ * once it is past it with no run (what it did is unknown, so it is not done again); 'over' if the call has fallen back.
+ */
+async function adopt(d: RelayDeps, session: RelaySession): Promise<'adopted' | 'waiting' | 'died' | 'over'> {
+  const found = await asInternal(d, async (c) => {
+    const call = (await c.query(`SELECT relay_failed, relay_claimed_at > now() - make_interval(secs => $2) AS claim_fresh FROM calls WHERE id = $1 FOR UPDATE`,
+      [session.callId, STARTING_GRACE_MS / 1000])).rows[0];
+    if (!call || call.relay_failed) return { kind: 'over' as const };
     const r = (await c.query(`SELECT id, state_version FROM workflow_runs WHERE call_id = $1 AND kind = 'live'`, [session.callId])).rows[0];
-    if (r) await c.query('UPDATE calls SET relay_owner = $2, relay_claimed_at = now() WHERE id = $1', [session.callId, session.owner]);
-    return r;
+    if (!r) return { kind: call.claim_fresh ? 'waiting' as const : 'died' as const };
+    await c.query('UPDATE calls SET relay_owner = $2, relay_claimed_at = now() WHERE id = $1', [session.callId, session.owner]);
+    return { kind: 'adopted' as const, run: r };
   });
-  if (!run) return false;
-  session.runId = run.id; session.version = run.state_version;
-  return true;
+  if (found.kind === 'adopted') { session.runId = found.run.id; session.version = found.run.state_version; }
+  return found.kind;
+}
+
+/**
+ * A connection standing by has heard nothing for a while. If the run now exists, it takes the call over and says the
+ * last line again (the connection that started the call has gone, so the caller may not have heard it); if the start
+ * died, the caller gets the fallback. `again` means look later.
+ */
+export async function standbyCheck(d: RelayDeps, session: RelaySession): Promise<{ send: RelayOutbound[]; again: boolean }> {
+  if (session.ended || session.runId) return { send: [], again: false };
+  const a = await adopt(d, session);
+  if (a === 'waiting') return { send: [], again: true };
+  if (a === 'died') return { send: (await failed(d, session)).send, again: false };
+  if (a === 'over') return { send: finish(session, [{ type: 'end' }]).send, again: false };
+  const last = await asInternal(d, async (c) => (await c.query(
+    `SELECT payload->>'text' AS text FROM workflow_run_steps WHERE run_id = $1 AND type = 'say' ORDER BY seq DESC LIMIT 1`, [session.runId])).rows[0]?.text as string | undefined);
+  const status = await asInternal(d, async (c) => (await c.query('SELECT status, outcome FROM workflow_runs WHERE id = $1', [session.runId])).rows[0]);
+  if (status?.status === 'ended') return { send: finish(session, [endMessage(status.outcome)]).send, again: false };
+  return { send: last ? [{ type: 'text', token: last, last: true }] : [], again: false };
 }
 
 /**
@@ -213,7 +245,12 @@ export async function failed(d: RelayDeps, session: RelaySession, already: Relay
     return (await getFallbackPlan(c, session.tenantId)) ?? DEFAULT_FALLBACK;
   }).catch(() => DEFAULT_FALLBACK);
   await event(d, session, 'relay.fallback', { steps: ['record_callback_request', 'holding_message'] }).catch(() => undefined);
-  if (session.runId) await abandonRun(d.runs, session.runId).catch(() => false);
+  // The run ends now, whatever it was doing, so nothing sensitive is held for a call that has given up. A reply still being
+  // applied cannot then land: its write needs the run to be as it left it.
+  await asInternal(d, async (c) => {
+    const run = (await c.query(`SELECT id, state FROM workflow_runs WHERE call_id = $1 AND kind = 'live' AND status IN ('running', 'awaiting_reply', 'processing') FOR UPDATE`, [session.callId])).rows[0];
+    if (run) await abandonRow(c, run);
+  }).catch(() => undefined);
   return finish(session, [...already, { type: 'text', token: plan.holdingMessage, last: true }, { type: 'end' }]);
 }
 

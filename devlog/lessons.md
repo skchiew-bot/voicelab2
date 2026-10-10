@@ -237,10 +237,11 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/cases.test.ts` › "measures lateness from the time a callback was locked to, however long it was held back"
 
 ### L-029: An event can arrive before the record that expects it
-- **Seen:** A provider's end-of-call report was processed before the dispatcher had recorded the call against its case, so the outcome was dropped and the retry chain stopped for good (Phase 7 independent review, 2026-10-10).
-- **Rule:** When a record is written after a call to an outside system, look at whether the outside system has already reported by the time it is written, and settle it then. Never rely on the order in which two requests commit.
+- **Seen:** 2 times. A provider's end-of-call report was processed before the dispatcher had recorded the call against its case, so the outcome was dropped and the retry chain stopped for good (Phase 7 independent review, 2026-10-10). A relay connection that arrived while another was still starting the call stood by and never looked again, so if the starter died the caller heard silence; and a start that finished after the call had already fallen back still wrote a run (live call voice link re-check, 2026-10-10).
+- **Rule:** When a record is written after a call to an outside system, look at whether the outside system has already reported by the time it is written, and settle it then. Never rely on the order in which two requests commit. Anything waiting for another request's record looks again on a timer, and a decision already given (a fallback) is checked again when the late record is written.
 - **Guards:**
   - `tests/cases.test.ts` › "does not lose the outcome of a call the provider reported over before it was recorded"
+  - `tests/relay.test.ts` › "does not leave a standing-by connection silent when the one starting the call dies, and a late start then writes nothing"
 
 ### L-030: A request that needs several locks takes them all first, in one fixed order
 - **Seen:** A move into a group diary held the old diary's lock and then waited for the group's members, while a group booking held a member and waited for the other: Postgres broke the deadlock with an error, and half the requests failed with a 500 (Phase 7 appointments independent review, 2026-10-10).

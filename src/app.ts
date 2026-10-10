@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fastifyStatic from '@fastify/static';
+import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import type pg from 'pg';
 import { z, ZodError } from 'zod';
@@ -16,7 +17,11 @@ import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, gateOutbound, normalizeE164, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
-import { addNumber, callKnown, callQueued, costCall, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { addNumber, callKnown, callQueued, costCall, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
+import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, type RelayDeps, type RelaySession } from './store/relay.js';
+import { recordingAudio } from './store/recordings.js';
+import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
+import { DEFAULT_FALLBACK } from './resilience/fallback.js';
 import { registerJourneyRoutes } from './routes/journey.js';
 import { registerAppointmentRoutes } from './routes/appointments.js';
 import { registerCaseRoutes } from './routes/cases.js';
@@ -532,11 +537,18 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const s = await internal(req);
     return withActor(pool, s.actor, listNumbers);
   });
+  // Which workflow answers calls to one of our numbers; null for none.
+  app.put('/internal/numbers/:numberId/workflow', async (req) => {
+    const s = await admin(req);
+    const { numberId } = z.object({ numberId: z.string().uuid() }).parse(req.params);
+    const body = z.object({ workflowId: z.string().uuid().nullable() }).strict().parse(req.body);
+    return withActor(pool, s.actor, (c) => setNumberWorkflow(c, s.userId, numberId, body.workflowId));
+  });
   app.post('/internal/calls/outbound', async (req, reply) => {
     const s = await internal(req);
     const body = z.object({
       tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), providerId: z.string().uuid().optional(),
-      from: z.string().optional(), to: z.string(), country,
+      from: z.string().optional(), to: z.string(), country, workflowId: z.string().uuid().optional(),
     }).parse(req.body);
     const result = await placeOutboundCall(callDeps, s.userId, body);
     // A dial held back for want of capacity is not an error to fix but a request to retry shortly.
@@ -607,10 +619,81 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     if (!voice) return reply.status(204).send();
     const known = ev ? await callKnown(callDeps, provider.id, ev.providerCallId) : false;
     const queued = known && ev ? await callQueued(callDeps, provider.id, ev.providerCallId) : false;
+    // A call with a workflow to run is handed to the speech relay; one without hears the test message.
+    const relayed = known && !queued && ev ? await relayTarget(callDeps, provider.id, ev.providerCallId) : null;
+    if (relayed) return reply.type('text/xml').send(twimlRelay(relayUrl(provider.id), relayed, relayCallToken(key, relayed), relaySettings(provider.params)));
     return reply.type('text/xml').send(known ? (queued ? twimlHold(`${callDeps.baseUrl}/webhooks/twilio/${provider.id}/voice${callId ? `?callId=${callId}` : ''}`) : twimlTestCall()) : twimlReject());
   };
   app.post('/webhooks/twilio/:providerId/status', twilioHook(false));
   app.post('/webhooks/twilio/:providerId/voice', twilioHook(true));
+
+  // ------------------------------------------------- live call voice link
+  // Twilio's speech relay connects here once a call with a workflow is answered. The connection is refused before it
+  // opens unless Twilio's signature on it checks out; then only the call it names, on this provider, is served.
+  const relayUrl = (providerId: string) => `${(callDeps.baseUrl ?? '').replace(/^http/, 'ws')}/relay/twilio/${providerId}`;
+  const relayDeps: RelayDeps = { runs: { pool, key, integrationHttp: deps.integrationHttp }, baseUrl: callDeps.baseUrl ?? '' };
+  app.register(fastifyWebsocket, { options: { maxPayload: 64 * 1024 } });
+  app.register(async (f) => {
+    f.get('/relay/twilio/:providerId', {
+      websocket: true,
+      preValidation: async (req) => {
+        const { providerId } = z.object({ providerId: z.string().uuid() }).parse(req.params);
+        const provider = await webhookProvider(providerId, 'twilio');
+        const creds = credentials<TwilioCreds>(provider, key);
+        if (!creds.authToken) throw new AppError(503, 'This Twilio provider has no Auth Token, so the live call link cannot be verified.');
+        // The address Twilio signs is the one it was given. Which scheme it signs it under is not yet checked against a live
+        // call, so the wss:// form and the https:// form are both accepted; either way only Twilio holds the key.
+        const header = req.headers['x-twilio-signature'] as string | undefined;
+        const base = callDeps.baseUrl ?? '';
+        const ok = [base.replace(/^http/, 'ws'), base].some((b) => verifyTwilioSignature(creds.authToken!, b + req.url, {}, header));
+        if (!ok) throw new AppError(403, 'Bad signature.');
+      },
+    }, (socket, req) => {
+      const providerId = (req.params as { providerId: string }).providerId;
+      let session: RelaySession | null = null;
+      let queue: Promise<void> = Promise.resolve();
+      const send = (out: RelayOutbound[]) => { for (const m of out) if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(m)); };
+      // The relay must say which call it is for straight away; a connection that does not is closed.
+      const setupTimer = setTimeout(() => { if (!session) socket.close(1008, 'No setup'); }, 10_000);
+      socket.on('message', (data: Buffer) => {
+        const m = parseRelay(data.toString('utf8'));
+        if (!m) return;
+        // The question the call was on when these words arrived (before setup has finished, worked out once it has).
+        const askedAt = session ? session.version : undefined;
+        // One message at a time, in order: a turn finishes before the next is looked at.
+        queue = queue.then(async () => {
+          if (m.type === 'setup') {
+            if (session) return;
+            clearTimeout(setupTimer);
+            const r = await openRelay(relayDeps, providerId, m);
+            session = r.session;
+            send(r.send);
+            if (!session) socket.close(1008, 'Unknown call');
+            return;
+          }
+          if (session) send(await onRelayMessage(relayDeps, session, m, askedAt));
+        // Something below failed outright (the database, say): the callback is still attempted and the caller still hears a
+        // holding line, never silence; then the line is closed.
+        }).catch(async () => {
+          const out = session ? await relayFailed(relayDeps, session).then((r) => r.send).catch(() => null) : null;
+          send(out ?? [{ type: 'text', token: DEFAULT_FALLBACK.holdingMessage, last: true }, { type: 'end' }]);
+          socket.close();
+        });
+      });
+      socket.on('close', () => {
+        clearTimeout(setupTimer);
+        queue = queue.then(() => (session ? closeRelay(relayDeps, session) : undefined)).catch(() => undefined);
+      });
+    });
+  });
+  // A recording, for the relay to play on a call. Only through a link we signed for that recording, and only while it is in date.
+  app.get('/media/recordings/:recordingId', async (req, reply) => {
+    const { recordingId } = z.object({ recordingId: z.string() }).parse(req.params);
+    const q = req.query as { exp?: string; sig?: string };
+    if (!mediaLinkValid(key, recordingId, q.exp, q.sig, new Date())) throw new AppError(403, 'This link is not valid.');
+    const r = await withActor(pool, { kind: 'internal' }, (c) => recordingAudio(c, recordingId));
+    return reply.type(r.content_type).header('cache-control', 'private, max-age=600').send(r.audio);
+  });
 
   app.post('/webhooks/telnyx/:providerId', async (req, reply) => {
     const { providerId } = z.object({ providerId: z.string().uuid() }).parse(req.params);

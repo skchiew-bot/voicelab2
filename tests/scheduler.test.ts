@@ -218,25 +218,27 @@ describe('review fixes', () => {
     expect(await drain(async () => ({}), 20, 10)).toEqual({ batches: 1 });
   });
 
-  it('closes a connection whose job lock could not be given back, instead of returning it to the pool still holding the lock', async () => {
-    await job('t-unlock', 60);
-    const closedWithError: string[] = [];
-    // A stand-in pool: the real one, except that giving back a job lock fails on a connection that is otherwise fine.
-    const pool = {
-      query: (sql: string, args?: unknown[]) => env.pool.query(sql, args),
-      connect: async () => {
-        const conn = await env.pool.connect();
-        return {
-          query: (sql: string, args?: unknown[]) => (sql.includes('pg_advisory_unlock') ? Promise.reject(new Error('lost')) : conn.query(sql, args)),
-          release: (err?: Error) => { if (err) closedWithError.push(err.message); conn.release(err); },
-        };
-      },
-    };
-    const s = createScheduler(pool as unknown as typeof env.pool, [{ name: 't-unlock', everySeconds: 60, run: async () => ({}) }], quiet);
+  it('holds no database connection while a job runs, so a job can use every connection there is', async () => {
+    await job('t-onepool', 60);
+    const pg = await import('pg');
+    const one = new pg.default.Pool({ connectionString: env.config.DATABASE_URL, max: 1 });
+    try {
+      // With one connection and a lock held on it for the run, this job would wait for ever for a connection.
+      const s = createScheduler(one, [{ name: 't-onepool', everySeconds: 60, run: async () => ({ rows: (await one.query('SELECT 1 AS x')).rowCount ?? 0 }) }], quiet);
+      const r = await Promise.race([s.tick(), sleep(4000).then(() => 'hung' as const)]);
+      expect(r).toEqual([{ job: 't-onepool', outcome: 'ok', summary: { rows: 1 } }]);
+    } finally { await one.end(); }
+  });
+
+  it('runs a job again once the lease of a server that died mid-run has run out, and not before', async () => {
+    await job('t-lease', 60);
+    // A server claimed it and died: started, never finished, lease still running.
+    await q("UPDATE scheduled_jobs SET last_started_at = now() - interval '2 minutes', lease_until = now() + interval '1 hour', next_run_at = now() - interval '1 minute' WHERE name = 't-lease'");
+    const s = createScheduler(env.pool, [{ name: 't-lease', everySeconds: 60, run: async () => ({}) }], quiet);
+    expect(await s.tick()).toEqual([]);
+    expect((await env.call(env.staffToken, 'GET', '/internal/scheduler')).json().find((j: { name: string }) => j.name === 't-lease')).toMatchObject({ unfinished: true });
+    await q("UPDATE scheduled_jobs SET lease_until = now() - interval '1 second' WHERE name = 't-lease'");
     expect((await s.tick()).map((r) => r.outcome)).toEqual(['ok']);
-    expect(closedWithError).toEqual(['lost']);
-    // The lock went with the closed connection: another server can take the job again.
-    await due('t-unlock');
-    expect((await createScheduler(env.pool, [{ name: 't-unlock', everySeconds: 60, run: async () => ({}) }], quiet).tick()).map((r) => r.job)).toEqual(['t-unlock']);
+    expect((await q("SELECT lease_until FROM scheduled_jobs WHERE name = 't-lease'"))[0].lease_until).toBeNull();
   });
 });

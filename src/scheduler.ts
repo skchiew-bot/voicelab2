@@ -6,10 +6,11 @@ import { audit } from './store/audit.js';
 /**
  * Runs the app's own scheduled jobs (owner decision, 2026-10-10: a scheduler on Postgres, no Redis).
  *
- * Each job is a row in `scheduled_jobs`. A server claims a due job by taking that job's advisory lock on a connection it
- * holds for the whole run, then moving the job's next run on. Two servers never run one job at once, and a run that
- * outlasts its interval is not started again while it is still going. A run that dies part-way (a crash, a restart)
- * leaves a start with no finish, which the Control Tower shows as unknown; the job runs again at its next time.
+ * Each job is a row in `scheduled_jobs`. A server claims a due job in one short statement that moves its next run on and
+ * takes a lease on it. Two servers never run one job at once, and a run that outlasts its interval is not started again
+ * while its lease holds. No connection is held while a job runs, since the job needs connections of its own (L-040).
+ * A run that dies part-way (a crash, a restart) leaves a start with no finish, shown as unknown, and the job runs again
+ * once its lease has run out.
  *
  * Every finished run is recorded with counts only. An error is reported as a category, never its text (lesson L-017),
  * and one client's failure never stops the job for the others (lesson L-006).
@@ -68,52 +69,49 @@ export function createScheduler(pool: pg.Pool, jobs: Job[], opts: { log?: (messa
   }
 
   async function runOne(job: Job): Promise<RunResult | null> {
-    const conn = await pool.connect();
-    let locked = false;
-    try {
-      locked = (await conn.query('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [`job:${job.name}`])).rows[0].ok as boolean;
-      if (!locked) return null; // another server is running it now
-      // Claim it only if it is still due: the clock is the database's, the same one every server reads.
-      const claim = await conn.query(
-        `WITH t AS (SELECT clock_timestamp() AS now)
-         UPDATE scheduled_jobs SET next_run_at = t.now + make_interval(secs => every_seconds), last_started_at = t.now
-           FROM t WHERE name = $1 AND enabled AND next_run_at <= t.now RETURNING last_started_at`, [job.name]);
-      if (claim.rowCount === 0) return null;
-      const startedAt: Date = claim.rows[0].last_started_at;
+    // Claim it in one statement, only if it is due and no run of it is under way: whichever server's update lands first
+    // wins, and the other's finds the row no longer matches. The clock is the database's, read once. The lease is long
+    // enough for any run (the longer of twice the interval and an hour), so a server that dies frees the job by then.
+    const claim = await pool.query(
+      `WITH t AS (SELECT clock_timestamp() AS now)
+       UPDATE scheduled_jobs SET next_run_at = t.now + make_interval(secs => every_seconds), last_started_at = t.now,
+              lease_until = t.now + greatest(make_interval(secs => every_seconds * 2), interval '1 hour')
+         FROM t WHERE name = $1 AND enabled AND next_run_at <= t.now AND (lease_until IS NULL OR lease_until < t.now)
+       RETURNING last_started_at, last_started_at::text AS started_exact`, [job.name]);
+    if (claim.rowCount === 0) return null;
+    const startedAt: Date = claim.rows[0].last_started_at;
+    // Compared as the database wrote it: a JavaScript date drops the microseconds, and would never match.
+    const startedExact: string = claim.rows[0].started_exact;
 
-      const summary: Record<string, number> = {};
-      let outcome: Outcome;
-      if (job.perTenant) {
-        const tenants = (await conn.query('SELECT id FROM tenants ORDER BY id')).rows.map((r) => r.id as string);
-        let failed = 0; let reached = 0;
-        for (const t of tenants) {
-          if (stopping) break; // the clients not reached are counted as not run, so the run is not called a success
-          reached++;
-          try { add(summary, countsOf(await job.run(t))); }
-          catch (e) { failed++; log(`Scheduled job ${job.name} failed for one client: ${(e as Error)?.name ?? 'Error'}`); }
-        }
-        summary.clients = tenants.length; summary.clientsFailed = failed; summary.clientsNotReached = tenants.length - reached;
-        outcome = failed === 0 && reached === tenants.length ? 'ok' : failed === tenants.length ? 'failed' : 'partly';
-      } else {
-        try { add(summary, countsOf(await job.run())); outcome = 'ok'; }
-        catch (e) { outcome = 'failed'; log(`Scheduled job ${job.name} failed: ${(e as Error)?.name ?? 'Error'}`); }
+    const summary: Record<string, number> = {};
+    let outcome: Outcome;
+    if (job.perTenant) {
+      const tenants = (await pool.query('SELECT id FROM tenants ORDER BY id')).rows.map((r) => r.id as string);
+      let failed = 0; let reached = 0;
+      for (const t of tenants) {
+        if (stopping) break; // the clients not reached are counted as not run, so the run is not called a success
+        reached++;
+        try { add(summary, countsOf(await job.run(t))); }
+        catch (e) { failed++; log(`Scheduled job ${job.name} failed for one client: ${(e as Error)?.name ?? 'Error'}`); }
       }
-
-      await withActor(pool, { kind: 'internal' }, async (c) => {
-        const { rows } = await c.query('SELECT clock_timestamp() AS now');
-        await c.query('INSERT INTO job_runs (job, started_at, finished_at, outcome, summary) VALUES ($1,$2,$3,$4,$5)', [job.name, startedAt, rows[0].now, outcome, summary]);
-        await c.query(
-          `UPDATE scheduled_jobs SET last_finished_at = $2, last_outcome = $3,
-                  consecutive_failures = CASE WHEN $3 = 'ok' THEN 0 ELSE consecutive_failures + 1 END
-            WHERE name = $1`, [job.name, rows[0].now, outcome]);
-      });
-      return { job: job.name, outcome, summary };
-    } finally {
-      // A connection whose lock could not be given back is closed, never returned to the pool still holding it.
-      let unlockFailed: Error | undefined;
-      if (locked) await conn.query('SELECT pg_advisory_unlock(hashtext($1))', [`job:${job.name}`]).catch((e) => { unlockFailed = e instanceof Error ? e : new Error('unlock failed'); });
-      conn.release(unlockFailed);
+      summary.clients = tenants.length; summary.clientsFailed = failed; summary.clientsNotReached = tenants.length - reached;
+      outcome = failed === 0 && reached === tenants.length ? 'ok' : failed === tenants.length ? 'failed' : 'partly';
+    } else {
+      try { add(summary, countsOf(await job.run())); outcome = 'ok'; }
+      catch (e) { outcome = 'failed'; log(`Scheduled job ${job.name} failed: ${(e as Error)?.name ?? 'Error'}`); }
     }
+
+    await withActor(pool, { kind: 'internal' }, async (c) => {
+      const { rows } = await c.query('SELECT clock_timestamp() AS now');
+      await c.query('INSERT INTO job_runs (job, started_at, finished_at, outcome, summary) VALUES ($1,$2,$3,$4,$5)', [job.name, startedAt, rows[0].now, outcome, summary]);
+      // The lease is given back only by the run that holds it (one that outlived its lease may have been followed by another).
+      await c.query(
+        `UPDATE scheduled_jobs SET last_finished_at = $2, last_outcome = $3,
+                consecutive_failures = CASE WHEN $3 = 'ok' THEN 0 ELSE consecutive_failures + 1 END,
+                lease_until = CASE WHEN last_started_at = $4::timestamptz THEN NULL ELSE lease_until END
+          WHERE name = $1`, [job.name, rows[0].now, outcome, startedExact]);
+    });
+    return { job: job.name, outcome, summary };
   }
 
   /** Run every due job once. Ticks never overlap on one server; a job that throws while being recorded is logged and skipped. */

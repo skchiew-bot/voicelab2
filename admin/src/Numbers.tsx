@@ -1,11 +1,13 @@
 import { useState } from 'react';
-import { api, type PoolNumber, type Provider, type Tenant } from './api';
+import { api, type PoolNumber, type Provider, type Tenant, type WorkflowSummary } from './api';
 import { Errors, Field, useAction, useLoad } from './ui';
 
 export function Numbers() {
   const numbers = useLoad(() => api<PoolNumber[]>('GET', '/internal/dids'));
   const providers = useLoad(() => api<Provider[]>('GET', '/internal/providers'));
   const tenants = useLoad(() => api<Tenant[]>('GET', '/internal/tenants'));
+  const workflows = useLoad(() => api<WorkflowSummary[]>('GET', '/internal/workflows'));
+  const answer = useAction();
   const [providerId, setProviderId] = useState('');
   const [e164, setE164] = useState('');
   const [tenantId, setTenantId] = useState('');
@@ -19,12 +21,18 @@ export function Numbers() {
   return (
     <>
       <h1>Numbers</h1>
-      <p className="muted">Numbers we own at a provider: the pool outbound calls are dialled from. An inbound call goes to the client that owns the number dialled. For an outbound call the pool picks the caller ID: never one that has failed for that contact before, then the cheapest provider's, then the one used least recently. Customers' numbers are never stored.</p>
-      <Errors error={numbers.error ?? providers.error ?? tenants.error} />
+      <p className="muted">Numbers we own at a provider: the pool outbound calls are dialled from. An inbound call goes to the client that owns the number dialled, and is answered by the workflow chosen for the number (a live conversation through Twilio's speech relay); with none chosen it hears a short test message. For an outbound call the pool picks the caller ID: never one that has failed for that contact before, then the cheapest provider's, then the one used least recently. Customers' numbers are never stored.</p>
+      <Errors error={numbers.error ?? providers.error ?? tenants.error ?? workflows.error ?? answer.error} />
       {numbers.data && (numbers.data.length === 0 ? <p className="muted">No numbers yet.</p> : (
         <table>
-          <thead><tr><th>Number</th><th>Provider</th><th>Client</th><th>Country</th><th>Label</th><th>Used</th><th>Last used</th><th>Failures</th><th>Contacts locked out</th></tr></thead>
-          <tbody>{numbers.data.map((n) => <tr key={n.id}><td>{n.e164}</td><td>{pname(n.provider_id)}</td><td>{tname(n.tenant_id)}</td><td>{n.country}</td><td>{n.label}</td><td>{n.use_count}</td><td>{n.last_used_at ? new Date(n.last_used_at).toLocaleString() : '—'}</td><td>{n.failures}</td><td>{n.contacts_locked}</td></tr>)}</tbody>
+          <thead><tr><th>Number</th><th>Provider</th><th>Client</th><th>Country</th><th>Label</th><th>Answers calls with</th><th>Used</th><th>Last used</th><th>Failures</th><th>Contacts locked out</th></tr></thead>
+          <tbody>{numbers.data.map((n) => <tr key={n.id}><td>{n.e164}</td><td>{pname(n.provider_id)}</td><td>{tname(n.tenant_id)}</td><td>{n.country}</td><td>{n.label}</td><td>
+            <select aria-label={`Workflow answering ${n.e164}`} value={n.inbound_workflow_id ?? ''} disabled={answer.pending}
+              onChange={async (e) => { if (await answer.run(() => api('PUT', `/internal/numbers/${n.id}/workflow`, { workflowId: e.target.value || null }))) numbers.reload(); }}>
+              <option value="">Test message only</option>
+              {workflows.data?.filter((w) => w.tenant_id === n.tenant_id && (w.production_version || w.id === n.inbound_workflow_id)).map((w) => <option key={w.id} value={w.id}>{w.name}{w.production_version ? '' : ' (not live)'}</option>)}
+            </select>
+          </td><td>{n.use_count}</td><td>{n.last_used_at ? new Date(n.last_used_at).toLocaleString() : '—'}</td><td>{n.failures}</td><td>{n.contacts_locked}</td></tr>)}</tbody>
         </table>
       ))}
       <form className="card" aria-label="Add number" onSubmit={async (e) => {

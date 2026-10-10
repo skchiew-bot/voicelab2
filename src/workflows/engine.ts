@@ -3,7 +3,7 @@ import { evalCondition, type Vars } from './conditions.js';
 import { own, RESERVED_NAMES, SLOT_RE, type ApiNode, type Json, type SpeakNode, type WorkflowDefinition, type WorkflowNode } from './definition.js';
 import { interpretDetail } from './interpret.js';
 import { analyseTurn, intentChanged, observeTurn, type JourneyConfig, type JourneyState } from '../journey/tracker.js';
-import { planSpeech, synthOnly, type RecordingIndex, type SpeechPlan } from './stitch.js';
+import { planSpeech, synthOnly, type RecordingIndex, type Segment, type SpeechPlan } from './stitch.js';
 import { MissingVariable, pickText, renderText, SensitiveVariable } from './render.js';
 
 /**
@@ -35,6 +35,8 @@ export interface StepRecord {
   type: string; workflow: string; node?: string; payload: Record<string, Json>;
   /** When it happened (ISO time), stamped as the record is made, so a replay can show how long each step took. */
   at?: string;
+  /** A said line's pieces with their words, in order, for whatever plays the call. Held in memory only, never stored. */
+  speech?: { lang: string; segments: Segment[] };
 }
 
 /** A list of records that stamps each one with the time it was made. */
@@ -355,7 +357,7 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
           ...(ai ? { ai } : {}),
           ...(promotedId !== undefined ? { promotion: promotedId } : {}),
           segments: plan.segments.map((s): Json => (s.kind === 'recorded' ? { kind: 'recorded', chars: s.characters, recordingId: s.recordingId } : { kind: 'synth', chars: s.characters })),
-        } });
+        }, speech: { lang: lang ?? 'en', segments: plan.segments } });
         if (node.listen) {
           state.status = 'awaiting_reply';
           state.awaiting = { node: id, captureAs: node.listen.captureAs, intents: node.listen.intents, sensitive: node.listen.sensitive };

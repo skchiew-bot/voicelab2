@@ -39,7 +39,9 @@ export const PHASES: PhaseProgress[] = [
     ],
     open: [
       'Live proof of Twilio and Telnyx call control (the providers\' docs were unreachable while building, so formats were written from memory)',
-      'No voicebot yet: every answered call plays a test message and hangs up',
+      'The live call voice link is built on Twilio\'s speech relay (ConversationRelay) and tested only against a fake relay: a call with a workflow (an outbound call that names one, or a call to a number set to answer with one) holds the conversation, playing recordings by signed link and speaking the rest; a call without one plays a test message. Its message format comes from Twilio\'s published packages and is unchecked against a live call; Telnyx has no voice link yet',
+      'A call the workflow passes to a person ends after the ticket is raised: there is no live transfer to an agent yet',
+      'Twilio\'s per-minute charge for the speech relay is not in the rate card until an operator adds it; the relay speaks in the one language set on the provider',
       'Telnyx automatic reconciliation (the reconciliation sweep now runs every hour as a scheduled job)',
       'Voice usage (characters, tokens) is not yet fed into cost records',
     ],
@@ -48,12 +50,12 @@ export const PHASES: PhaseProgress[] = [
     id: '2', name: 'Workflow Skeleton', status: 'in_progress', summary: "The minimum workflow engine that stitching and modules can hang off. The engine, versions, staging and production, simulation, integrations and the Malaysian debt-collection template are built and tested.",
     criteria: [
       { text: 'The debt-collection template runs end to end in staging and then in production.', state: 'partly', proof: 'tests',
-        note: "Runs from the first word to the outcome in staging (simulated) and in production (a scripted caller replying through the API), all tested. No real phone call runs through it: no speech recognition or voice provider is connected to calls, so a live call cannot yet hold this conversation. The wording is a draft for compliance and native-speaker review." },
+        note: "Runs from the first word to the outcome in staging (simulated) and in production (a scripted caller replying through the API), all tested. No real phone call has run through it yet: the live call voice link (Twilio's speech relay) now carries a call's conversation to the workflow, but it is tested only against a fake relay, and outbound case calls do not yet name a workflow. The wording is a draft for compliance and native-speaker review." },
       { text: 'Rolling back to the previous version works on a live workflow.', state: 'met', proof: 'tests', note: 'Tested with a call in flight: it finishes on the version it started on, and new calls get the version rolled back to.' },
       { text: "A workflow with a dangling path can't be published.", state: 'met', proof: 'tests', note: 'A missing target (including names every object inherits), an unreachable node, or a dependency that is not ready each block publishing; a new version that would break a live caller is refused too.' },
     ],
     open: [
-      'Live phone calls cannot hold this conversation yet: no speech recognition or voice provider is connected, and the engine takes the caller\'s words as text',
+      'Live phone calls hold this conversation through Twilio\'s speech relay, which turns the caller\'s words into text; tested only against a fake relay, with no live call yet',
       'The prompt-to-workflow builder (deferred in the plan)',
       'A visual canvas: the console shows an outline and a JSON editor',
       'Replies are understood by phrase rules only; nothing yet handles a reply the rules cannot match',
@@ -69,7 +71,7 @@ export const PHASES: PhaseProgress[] = [
       { text: 'The DID-lock rule has been verified against failure history.', state: 'partly', proof: 'tests',
         note: 'The rule is tested against seeded failure history: a failed DID is never used again for that contact, the next provider is used when the cheap one is locked out, and a dial is refused without contacting a provider when nothing is left. There is no real failure history yet, and failures are recorded by an operator or the API, not detected from carrier signals.' },
     ], open: [
-      'No audio is played on a call: no voice provider or speech pipeline is connected, so the seams between recordings and live speech are unheard',
+      'Recordings and live speech are sent to a call through Twilio\'s speech relay (recordings by a signed, short-lived link), but only to a fake relay so far, so the seams between them are still unheard',
       "A call's cost record does not yet receive the synthesised-character count (the count is in each run)",
       'DID failures are not detected automatically from provider or carrier events',
       'Outcomes are recorded through the API and not yet tied to a workflow run',

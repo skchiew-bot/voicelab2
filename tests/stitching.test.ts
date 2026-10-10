@@ -12,7 +12,7 @@ describe('planning a line: what is played and what is spoken live', () => {
   it('plays a fixed line from its recording at no synthesis', () => {
     const p = planSpeech('Good morning.', {}, [], 'en', indexOf([['en', 'Good morning.']]));
     expect(p).toMatchObject({ synthCharacters: 0, recordedCharacters: 13, seams: 0 });
-    expect(p.segments).toEqual([{ kind: 'recorded', characters: 13, recordingId: 'rec-1', durationMs: 1000 }]);
+    expect(p.segments).toEqual([{ kind: 'recorded', characters: 13, recordingId: 'rec-1', durationMs: 1000, text: 'Good morning.' }]);
   });
   it('speaks a fixed line live when nothing is recorded for exactly those words', () => {
     expect(planSpeech('Good morning.', {}, [], 'en', indexOf([['en', 'Good morning']]))).toMatchObject({ synthCharacters: 13, recordedCharacters: 0 });

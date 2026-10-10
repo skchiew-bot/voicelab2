@@ -1,0 +1,16 @@
+{
+  "source": "Shapes taken from Twilio's own published packages: the zod schemas in twilio-agent-connect 2.4.0 (dist/index.d.ts: SetupMessageSchema, PromptMessageSchema, InterruptMessageSchema, DtmfMessageSchema, TextTokenMessageSchema, PendingHandoffDataSchema), the message types in @twilio-forward/conversationrelay-bridge 0.2.0 (dist/session.d.ts: PlayMessage, ErrorMessage), and the ConversationRelay TwiML attributes in twilio 6.1.2 (lib/twiml/VoiceResponse.d.ts). The values are made up. Not yet checked against a live call (lesson L-016): replace this with a captured message from the first live call.",
+  "inbound": {
+    "setup": { "type": "setup", "sessionId": "VX00000000000000000000000000000000", "callSid": "CA_relay_1", "parentCallSid": "", "from": "+60100000000", "to": "+60300000000", "forwardedFrom": "", "callerName": "", "direction": "outbound-api", "callType": "PSTN", "callStatus": "IN-PROGRESS", "accountSid": "AC_fake_account", "customParameters": { "callId": "REPLACED_BY_TEST" } },
+    "prompt": { "type": "prompt", "voicePrompt": "yes I can pay", "lang": "en-US", "last": true },
+    "partialPrompt": { "type": "prompt", "voicePrompt": "yes I", "lang": "en-US", "last": false },
+    "interrupt": { "type": "interrupt", "utteranceUntilInterrupt": "Hello, this is", "durationUntilInterruptMs": 1200 },
+    "dtmf": { "type": "dtmf", "digit": "1" },
+    "error": { "type": "error", "description": "Invalid message received" }
+  },
+  "outbound": {
+    "text": { "type": "text", "token": "Hello.", "last": true },
+    "play": { "type": "play", "source": "https://example.test/audio.wav" },
+    "end": { "type": "end", "handoffData": "{\"reason\":\"handoff_human\"}" }
+  }
+}

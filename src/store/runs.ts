@@ -21,6 +21,7 @@ import { rank } from '../knowledge/search.js';
 import { activePromotions, logLearningTurns } from './learning.js';
 import { getJourneyConfig } from './journey.js';
 import { recordingIndex } from './recordings.js';
+import type { Segment } from '../workflows/stitch.js';
 import { ticketForEscalation } from './tickets.js';
 import { getWorkflow, liveVersionId, type Environment } from './workflows.js';
 
@@ -131,8 +132,19 @@ const view = (id: string, state: RunState, records: StepRecord[], version = 0) =
   awaiting: state.awaiting ? { captureAs: state.awaiting.captureAs } : null,
 });
 
+/** A line to say on a call: its pieces in order, with their words. For whatever plays the call; never stored or returned by the API. */
+export interface SpokenLine { lang: string; segments: Segment[] }
+const spokenIn = (records: StepRecord[]): SpokenLine[] => records.flatMap((r) => (r.type === 'say' && r.speech ? [r.speech] : []));
+type RunView = ReturnType<typeof view>;
+
 /** Start a call through a workflow. It runs until it needs the caller or finishes. */
-export async function startRun(d: RunDeps, actorId: string | null, e: { workflowId: string; environment: Environment; kind: RunKind; variables: Record<string, Json>; callId?: string }) {
+export async function startRun(d: RunDeps, actorId: string | null, e: StartInput): Promise<RunView> {
+  return (await startRunSpoken(d, actorId, e)).view;
+}
+type StartInput = { workflowId: string; environment: Environment; kind: RunKind; variables: Record<string, Json>; callId?: string };
+
+/** As startRun, and also the lines to say, for the live call voice link. */
+export async function startRunSpoken(d: RunDeps, actorId: string | null, e: StartInput): Promise<{ view: RunView; speech: SpokenLine[] }> {
   if (e.kind === 'simulation') throw new AppError(400, 'Use the simulation endpoint for simulations.');
   if (e.kind === 'live' && e.environment !== 'production') throw new AppError(400, 'Live calls run in production only.');
   const ctx = await asInternal(d, async (c) => {
@@ -165,7 +177,7 @@ export async function startRun(d: RunDeps, actorId: string | null, e: { workflow
     await logLearningTurns(c, { tenantId: ctx.wf.tenant_id, runId: id, callId: e.callId ?? null, kind: e.kind, records: out.records, vars: out.state.vars, sensitive: out.state.sensitive, context: contextOf(out.state) });
     if (out.state.escalation || out.state.outcome === 'handoff_human') await ticketForEscalation(c, actorId, id);
     await audit(c, actorId, 'workflow.run', 'workflow', ctx.wf.id, { run: id, kind: e.kind, environment: e.environment });
-    return view(id, out.state, out.records);
+    return { view: view(id, out.state, out.records), speech: spokenIn(out.records) };
   });
 }
 
@@ -174,7 +186,12 @@ export async function startRun(d: RunDeps, actorId: string | null, e: { workflow
  * meanwhile. The turn is claimed before anything runs, so two replies cannot both act on the same question (and so
  * cannot both fire the same write to an integration).
  */
-export async function replyRun(d: RunDeps, runId: string, text: string, expectedVersion?: number) {
+export async function replyRun(d: RunDeps, runId: string, text: string, expectedVersion?: number): Promise<RunView> {
+  return (await replyRunSpoken(d, runId, text, expectedVersion)).view;
+}
+
+/** As replyRun, and also the lines to say, for the live call voice link. */
+export async function replyRunSpoken(d: RunDeps, runId: string, text: string, expectedVersion?: number): Promise<{ view: RunView; speech: SpokenLine[] }> {
   const ctx = await asInternal(d, async (c) => {
     const run = (await c.query('SELECT * FROM workflow_runs WHERE id = $1', [runId])).rows[0];
     if (!run) throw new AppError(404, 'Run not found.');
@@ -211,7 +228,7 @@ export async function replyRun(d: RunDeps, runId: string, text: string, expected
     await recordStepDecisions(c, { tenantId: ctx.run.tenant_id, callId: ctx.run.call_id ?? null, runId, records: out.records });
     await logLearningTurns(c, { tenantId: ctx.run.tenant_id, runId, callId: ctx.run.call_id ?? null, kind: ctx.run.kind, records: out.records, vars: out.state.vars, sensitive: out.state.sensitive, context: contextOf(out.state) });
     if (out.state.escalation || out.state.outcome === 'handoff_human') await ticketForEscalation(c, null, runId);
-    return view(runId, out.state, out.records, ctx.run.state_version + 1);
+    return { view: view(runId, out.state, out.records, ctx.run.state_version + 1), speech: spokenIn(out.records) };
   });
 }
 
@@ -225,17 +242,33 @@ export async function abandonStaleRuns(d: RunDeps, actorId: string | null, e: { 
       `SELECT id, state FROM workflow_runs
         WHERE status IN ('running', 'awaiting_reply', 'processing') AND updated_at < now() - make_interval(mins => $1)
         ORDER BY updated_at LIMIT 500 FOR UPDATE SKIP LOCKED`, [e.olderThanMinutes])).rows;
-    for (const r of rows) {
-      const state = r.state as RunState;
-      const ended: RunState = { ...state, status: 'ended', outcome: 'abandoned', node: null, awaiting: undefined, vars: Object.fromEntries(Object.entries(state.vars).filter(([k]) => !state.sensitive.includes(k))) };
-      await c.query(
-        `UPDATE workflow_runs SET state = $2, sealed = NULL, status = 'ended', outcome = 'abandoned', claimed_at = NULL, ended_at = now(), updated_at = now(), state_version = state_version + 1 WHERE id = $1`,
-        [r.id, JSON.stringify(ended)]);
-      const last = (await c.query('SELECT coalesce(max(seq), 0) AS n FROM workflow_run_steps WHERE run_id = $1', [r.id])).rows[0].n as number;
-      await persistSteps(c, r.id, last + 1, [{ type: 'end', workflow: state.workflow, payload: { outcome: 'abandoned' } }]);
-    }
+    for (const r of rows) await abandonRow(c, r);
     if (rows.length) await audit(c, actorId, 'workflow.runs_abandoned', 'workflow_run', null, { count: rows.length });
     return { abandoned: rows.length };
+  });
+}
+
+/** End a run nobody will come back to, wiping what it held sensitive. The row must be locked by the caller. */
+export async function abandonRow(c: pg.PoolClient, r: { id: string; state: RunState }) {
+  const state = r.state;
+  const ended: RunState = { ...state, status: 'ended', outcome: 'abandoned', node: null, awaiting: undefined, vars: Object.fromEntries(Object.entries(state.vars).filter(([k]) => !state.sensitive.includes(k))) };
+  await c.query(
+    `UPDATE workflow_runs SET state = $2, sealed = NULL, status = 'ended', outcome = 'abandoned', claimed_at = NULL, ended_at = now(), updated_at = now(), state_version = state_version + 1 WHERE id = $1`,
+    [r.id, JSON.stringify(ended)]);
+  const last = (await c.query('SELECT coalesce(max(seq), 0) AS n FROM workflow_run_steps WHERE run_id = $1', [r.id])).rows[0].n as number;
+  await persistSteps(c, r.id, last + 1, [{ type: 'end', workflow: state.workflow, payload: { outcome: 'abandoned' } }]);
+}
+
+/**
+ * The caller has gone (the line closed) while the run was still waiting: end it now, so nothing sensitive is held for a
+ * call that is never coming back. A reply being applied at that moment is left to finish; the stale-run sweep ends it.
+ */
+export async function abandonRun(d: RunDeps, runId: string): Promise<boolean> {
+  return asInternal(d, async (c) => {
+    const r = (await c.query(`SELECT id, state FROM workflow_runs WHERE id = $1 AND status IN ('running', 'awaiting_reply') FOR UPDATE`, [runId])).rows[0];
+    if (!r) return false;
+    await abandonRow(c, r);
+    return true;
   });
 }
 

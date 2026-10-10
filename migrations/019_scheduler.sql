@@ -1,6 +1,7 @@
 -- Phase 0: the app runs its own scheduled jobs (owner decision, 2026-10-10: a scheduler on Postgres, no Redis).
--- Each job is one row; a server claims a due job under a per-job advisory lock, so two servers never run one job at
--- once and a long run is never started again while it is still going. Every finished run is recorded, append-only,
+-- Each job is one row. A server claims a due job in one short statement that also takes a lease on it, so two servers
+-- never run one job at once and a long run is never started again while it is still going; no connection is held while
+-- the job runs (lesson L-040). A server that dies mid-run leaves the lease to run out, and the job runs again. Every finished run is recorded, append-only,
 -- with counts only (never error text). Internal only: the client role has no grant on either table.
 
 CREATE TABLE scheduled_jobs (
@@ -9,6 +10,8 @@ CREATE TABLE scheduled_jobs (
   enabled              boolean NOT NULL DEFAULT true,
   next_run_at          timestamptz NOT NULL DEFAULT now(),
   last_started_at      timestamptz,
+  -- Set while a run is under way; a run never takes longer than this, or the job may be started again.
+  lease_until          timestamptz,
   last_finished_at     timestamptz,
   last_outcome         text CHECK (last_outcome IN ('ok', 'partly', 'failed')),
   consecutive_failures int NOT NULL DEFAULT 0

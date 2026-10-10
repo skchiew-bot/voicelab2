@@ -118,7 +118,7 @@ export interface TemplateInfo { key: string; title: string; description: string;
 export interface SimResult { batchId: string; total: number; passed: number; failed: number; clean: boolean; gateProblems?: string[]; results: { name: string; passed: boolean; outcome: string | null; failures: string[] }[] }
 export interface RunView { id: string; version: number; status: string; outcome: string | null; error: string | null; said: string[]; awaiting: { captureAs: string } | null }
 
-export interface PoolNumber extends PhoneNumber { status: string; use_count: number; last_used_at: string | null; failures: number; contacts_locked: number }
+export interface PoolNumber extends PhoneNumber { status: string; use_count: number; last_used_at: string | null; failures: number; contacts_locked: number; inbound_workflow_id: string | null }
 export interface Recording { id: string; language: string; text: string; version: number; label: string | null; content_type: string; duration_ms: number; created_at: string }
 export interface RecordingGaps { covered: number; missingCharacters: number; missing: { node: string; language: string; text: string; characters: number }[] }
 export interface StitchReport {

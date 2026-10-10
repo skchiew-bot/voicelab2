@@ -51,10 +51,31 @@ export async function addNumber(
 }
 
 export const listNumbers = async (c: pg.PoolClient) =>
-  (await c.query('SELECT id, provider_id, e164, tenant_id, project_id, country, label FROM phone_numbers ORDER BY e164')).rows;
+  (await c.query('SELECT id, provider_id, e164, tenant_id, project_id, country, label, inbound_workflow_id FROM phone_numbers ORDER BY e164')).rows;
+
+/** A workflow a call may run must be the same client's. */
+async function workflowOfTenant(c: pg.PoolClient, workflowId: string, tenantId: string) {
+  const w = (await c.query('SELECT tenant_id FROM workflows WHERE id = $1', [workflowId])).rows[0];
+  if (!w || w.tenant_id !== tenantId) throw new AppError(400, 'That workflow does not belong to this client.');
+}
+
+/** Which workflow answers calls to one of our numbers (null: none, so a call hears the test message). */
+export async function setNumberWorkflow(c: pg.PoolClient, actorId: string | null, numberId: string, workflowId: string | null) {
+  const n = (await c.query('SELECT id, tenant_id, provider_id FROM phone_numbers WHERE id = $1 FOR UPDATE', [numberId])).rows[0];
+  if (!n) throw new AppError(404, 'Number not found.');
+  if (workflowId) await workflowOfTenant(c, workflowId, n.tenant_id);
+  await c.query('UPDATE phone_numbers SET inbound_workflow_id = $2 WHERE id = $1', [numberId, workflowId]);
+  await audit(c, actorId, 'number.workflow', 'provider', n.provider_id, { number: numberId, workflow: workflowId });
+  return (await c.query('SELECT id, provider_id, e164, tenant_id, project_id, country, label, inbound_workflow_id FROM phone_numbers WHERE id = $1', [numberId])).rows[0];
+}
 
 // --------------------------------------------------------------- outbound
-export interface PlaceInput { tenantId: string; projectId?: string; providerId?: string; from?: string; to: string; country: string; /** The contact's own time zone, for quiet hours; else the client's. */ timeZone?: string; now?: Date }
+export interface PlaceInput {
+  tenantId: string; projectId?: string; providerId?: string; from?: string; to: string; country: string;
+  /** The contact's own time zone, for quiet hours; else the client's. */ timeZone?: string; now?: Date;
+  /** The workflow the call runs once answered (one of this client's). Without one, the answered call hears a test message. */
+  workflowId?: string;
+}
 
 /** How long a held-back dial is told to wait before trying again. */
 export const RETRY_AFTER_SECONDS = 10;
@@ -83,6 +104,7 @@ export async function placeOutboundCall(d: CallDeps, actorId: string | null, inp
     | { kind: 'go'; provider: ProviderRow; from: string; pooled: boolean };
 
   const setup: Setup = await asInternal(d, async (c): Promise<Setup> => {
+    if (input.workflowId) await workflowOfTenant(c, input.workflowId, input.tenantId);
     if (input.providerId) {
       const requested = await loadProvider(c, input.providerId);
       if (!requested) throw new AppError(404, 'Provider not found.');
@@ -101,10 +123,10 @@ export async function placeOutboundCall(d: CallDeps, actorId: string | null, inp
     const anyTelephony = async () => (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' ORDER BY created_at LIMIT 1`)).rows[0]?.id as string | undefined;
     const insertCall = (providerId: string, status: string, fromId: string | null, o: { reason?: string; burst?: boolean; creditMultiplier?: string | null } = {}) => c.query(
       // Started when it is decided (the clock now, not when the transaction began), so the dialling pace counts real minutes.
-      `INSERT INTO calls (id, tenant_id, project_id, provider_id, direction, status, country, cost_status, from_number_id, contact_hash, end_reason, ended_at, burst, credit_multiplier, started_at)
-       VALUES ($1,$2,$3,$4,'outbound',$5,$6,$7,$8,$9,$10, CASE WHEN $5 = 'dialing' THEN NULL ELSE now() END,$11,$12, clock_timestamp())`,
+      `INSERT INTO calls (id, tenant_id, project_id, provider_id, direction, status, country, cost_status, from_number_id, contact_hash, end_reason, ended_at, burst, credit_multiplier, started_at, workflow_id)
+       VALUES ($1,$2,$3,$4,'outbound',$5,$6,$7,$8,$9,$10, CASE WHEN $5 = 'dialing' THEN NULL ELSE now() END,$11,$12, clock_timestamp(), $13)`,
       // A call that never connects (blocked, no usable caller ID) has nothing to price.
-      [callId, input.tenantId, input.projectId ?? null, providerId, status, input.country, status === 'dialing' ? 'pending' : 'not_applicable', fromId, chash, o.reason ?? null, o.burst ?? false, o.creditMultiplier ?? null]);
+      [callId, input.tenantId, input.projectId ?? null, providerId, status, input.country, status === 'dialing' ? 'pending' : 'not_applicable', fromId, chash, o.reason ?? null, o.burst ?? false, o.creditMultiplier ?? null, input.workflowId ?? null]);
 
     if (!decision.allowed) {
       const providerId = own?.provider_id ?? input.providerId ?? await anyTelephony();
@@ -284,7 +306,7 @@ async function findCall(c: pg.PoolClient, providerId: string, ev: NormalizedEven
 
 async function createInbound(c: pg.PoolClient, providerId: string, ev: NormalizedEvent): Promise<CallRow | null> {
   const to = ev.transient?.to ? normalizeE164(ev.transient.to) : null;
-  const n = to ? (await c.query('SELECT tenant_id, project_id, country FROM phone_numbers WHERE provider_id = $1 AND e164 = $2', [providerId, to])).rows[0] : null;
+  const n = to ? (await c.query('SELECT tenant_id, project_id, country, inbound_workflow_id FROM phone_numbers WHERE provider_id = $1 AND e164 = $2', [providerId, to])).rows[0] : null;
   if (!n) {
     // No client owns this number. Nothing identifying is recorded.
     await audit(c, null, 'inbound.unrouted', 'provider', providerId, {});
@@ -298,10 +320,10 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
   const load = (await providerLoad(c, [providerId])).get(providerId)!;
   const burst = isFull(load);
   const call = (await c.query(
-    `INSERT INTO calls (id, tenant_id, project_id, provider_id, provider_call_id, direction, status, country, started_at, queued_at, burst, credit_multiplier)
-     VALUES ($1,$2,$3,$4,$5,'inbound',$6,$7,$8,$9,$10,$11) RETURNING *`,
+    `INSERT INTO calls (id, tenant_id, project_id, provider_id, provider_call_id, direction, status, country, started_at, queued_at, burst, credit_multiplier, workflow_id)
+     VALUES ($1,$2,$3,$4,$5,'inbound',$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
     [id, n.tenant_id, n.project_id, providerId, ev.providerCallId, adm.admit === 'queue' ? 'queued' : 'ringing', n.country, ev.occurredAt,
-      adm.admit === 'queue' ? ev.occurredAt : null, burst, adm.admit === 'premium' ? adm.creditMultiplier : null],
+      adm.admit === 'queue' ? ev.occurredAt : null, burst, adm.admit === 'premium' ? adm.creditMultiplier : null, n.inbound_workflow_id],
   )).rows[0];
   await recordEvent(c, { tenantId: n.tenant_id, projectId: n.project_id ?? undefined, callId: id, type: 'call.initiated', payload: { direction: 'inbound', country: n.country }, occurredAt: ev.occurredAt });
   if (adm.admit === 'queue') await recordEvent(c, { tenantId: n.tenant_id, projectId: n.project_id ?? undefined, callId: id, type: 'call.queued', payload: { active: adm.active, channels: adm.channels }, occurredAt: ev.occurredAt });
@@ -445,6 +467,12 @@ export const getCall = async (c: pg.PoolClient, callId: string) => {
 export const callQueued = (d: CallDeps, providerId: string, providerCallId: string) =>
   asInternal(d, async (c) =>
     (await c.query(`SELECT 1 FROM calls WHERE provider_id = $1 AND provider_call_id = $2 AND status = 'queued'`, [providerId, providerCallId])).rowCount === 1);
+
+/** The call to hand to the speech relay: one we know, still open, with a workflow to run. Null otherwise. */
+export const relayTarget = (d: CallDeps, providerId: string, providerCallId: string) =>
+  asInternal(d, async (c) =>
+    ((await c.query(`SELECT id FROM calls WHERE provider_id = $1 AND provider_call_id = $2 AND workflow_id IS NOT NULL AND status IN ('ringing', 'in_progress', 'dialing')`,
+      [providerId, providerCallId])).rows[0]?.id as string | undefined) ?? null);
 
 export const callKnown = (d: CallDeps, providerId: string, providerCallId: string) =>
   asInternal(d, async (c) =>

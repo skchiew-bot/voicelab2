@@ -456,7 +456,10 @@ The console now opens on the Control Tower (`#/tower`, `GET /internal/control-to
 - **Project progress:** every phase with its status, exit criteria (met, partly or not met, and how each was proven: tested, tested against fakes, or proven live), what is still open, and the open decisions. The data is `src/progress.ts`, maintained by hand, and a test ties it to this plan's phase names, exit-criteria text (including the Control Tower's and the one that applies to every phase) and decisions table so the two cannot drift. A criterion can only be marked proven live with a written "Live evidence:" note.
 - **Live calls, provider health, funding and cost and margin** (last 24 hours and 7 days, each call counted once).
 
-Not built yet: the change-log panel, alerts by email, WhatsApp or Slack, funding runway and burn rate (calls do not yet deduct from the recorded funding balance), and the stitching, deliverability, concurrency, journey and learning-loop panels, which wait for their phases.
+- **Panels** (`GET /internal/control-tower/panels`): days of funding left at the last 7 days' spend (from the recorded balance); concurrency against each provider's ceiling and each client's channels; stitching (share of speech played from recordings, per workflow); deliverability (the Outbound screen's own counts: finished dials, answer and contact rates, calls with no outcome yet; caller IDs in use and locked); journey and QA (score bands, escalations, unlooked-at drops, daily sentiment); the learning loop; and cases and appointments. Each panel is worked out on its own, so one that fails does not hide the rest.
+- **Change log** (`#/change-log`, `GET /internal/change-log`): every change made to the platform, newest first, with who made it and the reason given, read from the record the change made. Day-to-day activity (calls placed, workflows run) is kept apart.
+
+Not built yet: actions taken from the Control Tower itself (drain a provider, force failover, change the dialling pace), a reason asked for on settings changes that take none, alerts by email, WhatsApp or Slack, and calls taken off the recorded funding balance automatically.
 
 ### Control Tower Exit Criteria (Overall)
 

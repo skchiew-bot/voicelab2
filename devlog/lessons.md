@@ -38,14 +38,15 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/tracker.test.ts` › "lets a client name a topic like an inherited property without breaking the reading"
 
 ### L-004: Money never passes through a JavaScript number, including on screen
-- **Seen:** 2 times. The funding monitor compared balances as floats ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). The console still showed balances and credits with `Number(…).toLocaleString()` on three screens, found by the dev Control Tower check on 2026-10-09.
+- **Seen:** 3 times. The funding monitor compared balances as floats ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). The console still showed balances and credits with `Number(…).toLocaleString()` on three screens, found by the dev Control Tower check on 2026-10-09. The Control Tower's funding alerts still compared and printed balances with `Number()` (found while building the panels, 2026-10-10).
 - **Rule:** Amounts stay decimal strings or BigInt (`src/money.ts`). In the console, format them with `fmtDecimal` from `admin/src/ui.tsx`, never `Number()` or `parseFloat()`.
 - **Guards:**
   - `tests/billing.test.ts` › "has no floating point drift"
   - `tests/devlog.test.ts` › "keeps money out of floating point in the console"
+  - `tests/control-tower-panels.test.ts` › "names a funding balance in an alert to the last decimal place, never through a floating-point number"
 
 ### L-005: Something that never happened gets no status as if it had
-- **Seen:** 4 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10). A call never answered was recorded as a customer hang-up or a system drop; a QA run with nothing scored was stored as 0; a later normal end cleared a fault already flagged (Phase 5 independent review, 2026-10-10). A plain no-answer was counted as a missed call in the alert, and a callback the dispatcher was late for used up one of the person's retries though nobody was dialled (Phase 7 independent review, 2026-10-10). A delay flagged appointments it never reached as needing a new time, and told their customers they could not go ahead (Phase 7 appointments independent review, 2026-10-10).
+- **Seen:** 4 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10). A call never answered was recorded as a customer hang-up or a system drop; a QA run with nothing scored was stored as 0; a later normal end cleared a fault already flagged (Phase 5 independent review, 2026-10-10). A plain no-answer was counted as a missed call in the alert, and a callback the dispatcher was late for used up one of the person's retries though nobody was dialled (Phase 7 independent review, 2026-10-10). A delay flagged appointments it never reached as needing a new time, and told their customers they could not go ahead (Phase 7 appointments independent review, 2026-10-10). The Control Tower's funding runway said "no spend" when the spend was in another currency, and its contact rate read answered calls with no outcome as not contacted (Control Tower panels independent review, 2026-10-10).
 - **Rule:** Give "never started" or "unknown" its own state (such as `not_applicable`, or `null` rather than 0) and keep it out of failure counts, alerts, retries and anything that recommends an action.
 - **Guards:**
   - `tests/phase3.test.ts` › "will not lock a DID because of a call that never went out"
@@ -57,6 +58,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/qa.test.ts` › "stores no score at all when nothing could be scored, and scores the call once a model is connected"
   - `tests/cases.test.ts` › "counts only a real failure to reach someone as an alert, not a plain no-answer"
   - `tests/appointments.test.ts` › "does not push an appointment into the officer's time off, and does not flag one the delay never reaches"
+  - `tests/control-tower-panels.test.ts` › "give funding runway from the recorded balance and the last week's spend, exactly, counting a reconciled call once"
 
 ### L-006: One bad record must not take a whole feature down
 - **Seen:** 3 times. One unreadable secret returned a 500 for the whole Control Tower ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). One provider priced in a currency with no exchange rate made every pooled dial fail ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). A very large number gave a 500 instead of a 400 ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). One script's audio failure aborted the whole sweep, so drift screening stopped for everyone (Phase 6 independent review, 2026-10-10).
@@ -251,3 +253,10 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/knowledge-policy.test.ts` › "denies when the variable a deny rule depends on is missing or unreadable, and does not allow on a condition it cannot judge"
   - `tests/knowledge-policy.test.ts` › "catches a banned phrase written with a curly apostrophe or zero-width marks, and refuses a phrase with no words"
   - `tests/knowledge.test.ts` › "lets a wrong proposal be withdrawn, with a reason, so it never blocks every later change; and a refused number is free again"
+
+### L-033: One figure, one definition: reuse the code that already counts it
+- **Seen:** The Control Tower's deliverability panel counted contacts again instead of reusing the Outbound screen's count, so it counted every outcome row instead of each call's latest, mixed two time windows, and could show a different contact rate from the screen it linked to; its stitching total was summed from only the twenty busiest workflows (Control Tower panels independent review, 2026-10-10).
+- **Rule:** When a new view shows a figure another part of the system already works out, call that code. Do not write a second query. Work out totals over everything, not over the rows a list happens to show, and test that the two places agree.
+- **Guards:**
+  - `tests/control-tower-panels.test.ts` › "count dials and outcomes as the Outbound screen does: finished dials only, each call's latest outcome, and no outcome as unknown"
+  - `tests/control-tower-panels.test.ts` › "count every workflow in the stitching totals, not just the twenty it lists, and credit a child workflow's lines to it"

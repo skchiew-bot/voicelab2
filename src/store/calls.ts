@@ -15,7 +15,8 @@ import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.
 import { recordCallEnd } from './call-end.js';
 import { caseCallEnded, recogniseInbound, safely } from './cases.js';
 import { recordEvent } from './events.js';
-import { healthMap, logFailover, recordSample } from './resilience.js';
+import { logFailover, recordSample } from './resilience.js';
+import { dialPace, routingHealth } from './control-actions.js';
 
 export interface CallDeps { pool: pg.Pool; key: Buffer; dncKey: Buffer; http: Fetch; baseUrl?: string; tolerancePct?: number }
 
@@ -115,8 +116,17 @@ export async function placeOutboundCall(d: CallDeps, actorId: string | null, inp
 
     // One dial at a time decides capacity, so two dials cannot both take the last free channel.
     await c.query(`SELECT pg_advisory_xact_lock(hashtext('capacity'))`);
+    // The operator's dialling pace: no more than this many dials may start in any minute. Over it, the dial waits like
+    // one held back for capacity. A dial that never went out (blocked, no usable caller ID) does not count.
+    const pace = await dialPace(c);
+    if (pace !== null) {
+      const started = (await c.query(
+        `SELECT count(*)::int AS n FROM calls WHERE direction = 'outbound' AND started_at > now() - interval '1 minute' AND status <> 'blocked'
+            AND coalesce(end_reason, '') NOT IN ('did_locked', 'all_locked_for_contact', 'no_numbers', 'providers_unhealthy')`)).rows[0].n as number;
+      if (started >= pace) return await defer(c, 'pace');
+    }
     const telephony = (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' AND status = 'active' AND ($1::uuid IS NULL OR id = $1)`, [input.providerId ?? null])).rows.map((r) => r.id as string);
-    const health = await healthMap(c, telephony);
+    const health = await routingHealth(c, telephony);
     const unhealthy = new Set(telephony.filter((id) => (health.get(id) ?? 'healthy') !== 'healthy'));
     const load = await providerLoad(c, telephony);
     const full = new Set(telephony.filter((id) => isFull(load.get(id)!)));
@@ -210,7 +220,7 @@ export async function placeOutboundCall(d: CallDeps, actorId: string | null, inp
         if (!(err instanceof ProviderRefused) || !setup.pooled || attempt >= MAX_DIAL_TRIES) return null;
         await c.query(`SELECT pg_advisory_xact_lock(hashtext('capacity'))`);
         const ids = (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' AND status = 'active'`)).rows.map((r) => r.id as string);
-        const health = await healthMap(c, ids);
+        const health = await routingHealth(c, ids);
         const unhealthy = new Set(ids.filter((id) => (health.get(id) ?? 'healthy') !== 'healthy' || tried.has(id)));
         const load = await providerLoad(c, ids);
         const full = new Set(ids.filter((id) => isFull(load.get(id)!)));

@@ -10,6 +10,7 @@ import { fromScaled, toScaled } from '../money.js';
 import { appointmentSummary } from './appointments.js';
 import { caseSummary } from './cases.js';
 import { providerLoad } from './concurrency.js';
+import { dialPace } from './control-actions.js';
 import { learningSummary } from './learning.js';
 import { outboundAnalytics } from './outbound.js';
 
@@ -74,7 +75,10 @@ async function concurrency(c: pg.PoolClient) {
   const providers = (await c.query(`SELECT id, name FROM providers WHERE kind = 'telephony' AND status = 'active' ORDER BY name`)).rows;
   const load = await providerLoad(c, providers.map((p) => p.id));
   const burst = (await c.query(`SELECT provider_id, count(*)::int AS n FROM calls WHERE burst AND started_at > now() - interval '24 hours' GROUP BY provider_id`)).rows;
-  const deferred = (await c.query(`SELECT count(*)::int AS n FROM failover_events WHERE scope = 'telephony' AND trigger = 'capacity' AND at > now() - interval '24 hours'`)).rows[0].n as number;
+  const held = (await c.query(
+    `SELECT count(*) FILTER (WHERE coalesce(detail->>'reason', '') <> 'pace')::int AS full, count(*) FILTER (WHERE detail->>'reason' = 'pace')::int AS paced
+       FROM failover_events WHERE scope = 'telephony' AND trigger = 'capacity' AND at > now() - interval '24 hours'`)).rows[0];
+  const deferred = held.full as number;
   const tenants = (await c.query(
     `SELECT t.id, t.name, e.inbound_channels + e.extra_channels AS channels,
             (SELECT count(*)::int FROM calls k WHERE k.tenant_id = t.id AND k.direction = 'inbound' AND k.status IN ('ringing', 'in_progress')) AS active,
@@ -85,7 +89,7 @@ async function concurrency(c: pg.PoolClient) {
       const l = load.get(p.id)!;
       return { providerId: p.id as string, provider: p.name as string, active: l.active, ceiling: l.ceiling, usedPercent: l.ceiling === null ? null : percent(l.active, l.ceiling), burst24h: burst.find((b) => b.provider_id === p.id)?.n ?? 0 };
     }),
-    deferred24h: deferred,
+    deferred24h: deferred, paced24h: held.paced as number, pacePerMinute: await dialPace(c),
     tenants: tenants.map((t) => ({ tenantId: t.id as string, tenant: t.name as string, channels: t.channels as number, active: t.active as number, queued: t.queued as number })),
   };
 }

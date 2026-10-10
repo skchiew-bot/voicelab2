@@ -53,7 +53,7 @@ export function TowerPanels({ p }: { p: Panels }) {
                 <tbody>{p.concurrency.tenants.map((x) => <tr key={x.tenantId}><td>{x.tenant}</td><td>{x.active}</td><td>{x.channels}</td><td>{x.queued}</td></tr>)}</tbody>
               </table>
             )}
-            <p className="muted">{p.concurrency.deferred24h} time{p.concurrency.deferred24h === 1 ? '' : 's'} in the last 24 hours an outbound dial was held back because the providers it could use were full (a dial held back twice counts twice). <a href="#/resilience">Ceilings and entitlements</a></p>
+            <p className="muted">{p.concurrency.deferred24h} time{p.concurrency.deferred24h === 1 ? '' : 's'} in the last 24 hours an outbound dial was held back because the providers it could use were full (a dial held back twice counts twice). Dialling pace: {p.concurrency.pacePerMinute === null ? 'no limit' : `${p.concurrency.pacePerMinute} dials a minute`}{p.concurrency.paced24h > 0 && `, which held dials back ${p.concurrency.paced24h} time${p.concurrency.paced24h === 1 ? '' : 's'} in the last 24 hours`}. <a href="#/resilience">Ceilings and entitlements</a></p>
           </>
         )}
       </section>

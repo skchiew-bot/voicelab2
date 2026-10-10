@@ -459,7 +459,9 @@ The console now opens on the Control Tower (`#/tower`, `GET /internal/control-to
 - **Panels** (`GET /internal/control-tower/panels`): days of funding left at the last 7 days' spend (from the recorded balance); concurrency against each provider's ceiling and each client's channels; stitching (share of speech played from recordings, per workflow); deliverability (the Outbound screen's own counts: finished dials, answer and contact rates, calls with no outcome yet; caller IDs in use and locked); journey and QA (score bands, escalations, unlooked-at drops, daily sentiment); the learning loop; and cases and appointments. Each panel is worked out on its own, so one that fails does not hide the rest.
 - **Change log** (`#/change-log`, `GET /internal/change-log`): every change made to the platform, newest first, with who made it and the reason given, read from the record the change made. Day-to-day activity (calls placed, workflows run) is kept apart.
 
-Not built yet: actions taken from the Control Tower itself (drain a provider, force failover, change the dialling pace), a reason asked for on settings changes that take none, alerts by email, WhatsApp or Slack, and calls taken off the recorded funding balance automatically.
+- **Actions** (`POST /internal/control-tower/actions`, the "Take action" card): drain and restore a provider (no new outbound calls or voice routing; calls under way finish), force a failover (it recovers through the normal hysteresis), prefer a telephony provider in the caller-ID pool, set the dialling pace (dials a minute, held back like a full provider), and retire or bring back a caller ID. Each requires a reason and appears in the change log; a drained provider is an alert until it is restored.
+
+Not built yet: changing a concurrency ceiling from the Control Tower (needs approval), a reason asked for on settings changes that take none, alerts by email, WhatsApp or Slack, and calls taken off the recorded funding balance automatically.
 
 ### Control Tower Exit Criteria (Overall)
 

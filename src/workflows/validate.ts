@@ -30,6 +30,13 @@ function checkCondition(c: unknown, nodeId: string, add: (code: string, msg: str
   return true;
 }
 
+/** What is wrong with a condition, if anything, by the same rules a workflow's conditions are held to. */
+export function conditionProblems(c: unknown): string[] {
+  const problems: string[] = [];
+  checkCondition(c, '', (_code, msg) => problems.push(msg));
+  return problems;
+}
+
 function stringsIn(v: unknown, out: string[] = []): string[] {
   if (typeof v === 'string') out.push(v);
   else if (Array.isArray(v)) v.forEach((x) => stringsIn(x, out));

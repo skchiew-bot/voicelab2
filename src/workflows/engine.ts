@@ -46,6 +46,15 @@ function stampedRecords(deps: { now?: () => Date }): StepRecord[] {
 }
 
 /** What a model that writes a line can report about it, for the audit trail. A plain string is also accepted. */
+export interface KnowledgeSnippet { slug: string; title: string; text: string }
+export interface PolicyGuard {
+  version: string;
+  /** The first banned phrase a line says, or null. */
+  violation(line: string): { ruleId: string; phrase: string; message: string | null } | null;
+  /** What the model is told it must never say, and which actions it may not take. */
+  mustNotSay: string[]; denied: string[];
+}
+export interface SpeakContext { knowledge: KnowledgeSnippet[]; policy: { version: string; mustNotSay: string[]; denied: string[] } | null }
 export interface SpeakerResult {
   text: string; model?: string; reasoning?: string; policy?: string; inputTokens?: number; outputTokens?: number; confidence?: number;
 }
@@ -58,7 +67,11 @@ export interface Deps {
   /** Pre-recorded audio to play where the words match. Without one every line is spoken live (the unstitched baseline). */
   recordings?: RecordingIndex;
   /** Writes a dynamic node's line. Without one, a dynamic node speaks its fallback text. */
-  speaker?: { generate(node: SpeakNode, vars: Vars, lang: string | undefined): Promise<string | SpeakerResult> };
+  speaker?: { generate(node: SpeakNode, vars: Vars, lang: string | undefined, context?: SpeakContext): Promise<string | SpeakerResult> };
+  /** What the client's bot may know, ranked against a question for a voice call. Given to the model that writes a line. */
+  knowledge?: (query: string, language: string | undefined) => KnowledgeSnippet[];
+  /** The client's policy in force: words the bot may never say, checked on every line a model writes or a promoted script speaks. */
+  policy?: PolicyGuard;
   /** Steps allowed in one request (one start or one reply). */
   maxSteps?: number;
   /** Steps allowed over the whole call. */
@@ -284,24 +297,38 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         let plan: SpeechPlan | undefined;
         let ai: Record<string, Json> | undefined;
         let promotedId: string | undefined;
+        let scriptBlocked: string | undefined;
         try {
           const lastTurn = state.journey?.turns.at(-1);
           const promo = node.speech === 'dynamic' ? deps.promoted?.(wf, node, id, lang ?? 'en', { kind: lastTurn?.kind ?? 'start', topic: lastTurn?.topic ?? '' }) : undefined;
           if (promo) {
             // Same stitching as any frame: the fixed words play from their recordings, slots are spoken live. A slot with no value falls back to the model.
-            try { line = renderText(promo.script, state.vars, state.sensitive); plan = planSpeech(promo.script, state.vars, state.sensitive, lang ?? 'en', deps.recordings); promotedId = promo.id; }
+            try {
+              const spoken = renderText(promo.script, state.vars, state.sensitive);
+              const forbidden = deps.policy?.violation(spoken);
+              if (forbidden) { scriptBlocked = `The promoted script was not spoken: it breaks the policy (rule "${forbidden.ruleId}").`; throw new MissingVariable('policy'); }    // a script the policy now forbids is not spoken: the model (also held to the policy) writes the line
+              line = spoken; plan = planSpeech(promo.script, state.vars, state.sensitive, lang ?? 'en', deps.recordings); promotedId = promo.id;
+            }
             catch (e) { if (!(e instanceof MissingVariable || e instanceof SensitiveVariable)) throw e; line = undefined; plan = undefined; }
           }
           if (promotedId !== undefined) { /* spoken from the promoted script */ }
           else if (node.speech === 'dynamic') {
             const fallback = node.text !== undefined ? pickText(node.text, lang) : undefined;
             if (deps.speaker) {
-              const g = await deps.speaker.generate(node, withoutSensitive(state), lang);
+              const context: SpeakContext = {
+                knowledge: deps.knowledge?.(node.prompt ?? '', lang) ?? [],
+                policy: deps.policy ? { version: deps.policy.version, mustNotSay: deps.policy.mustNotSay, denied: deps.policy.denied } : null,
+              };
+              const g = await deps.speaker.generate(node, withoutSensitive(state), lang, context);
               if (typeof g !== 'string') ai = aiInfo(g);
               // A line a model wrote is checked before anyone hears it: used as it is, tidied, or turned down for the fallback.
-              const checked = checkModelLine(typeof g === 'string' ? g : g.text);
+              let checked = checkModelLine(typeof g === 'string' ? g : g.text);
+              // The client's policy has the last word on what the bot may say.
+              const banned = checked.line !== undefined ? deps.policy?.violation(checked.line) : null;
+              if (banned) checked = { decision: 'rejected', reason: `The line broke the policy (rule "${banned.ruleId}"): it said “${banned.phrase}”.${banned.message ? ` ${banned.message}` : ''}` };
               if (checked.decision !== 'proceeded') ai = { ...(ai ?? {}), decision: checked.decision, decisionReason: checked.reason };
               else ai = { ...(ai ?? {}), decision: 'proceeded', decisionReason: 'The line passed the checks and was used.' };
+              if (scriptBlocked) ai = { ...(ai ?? {}), scriptBlocked };
               if (checked.line !== undefined) line = checked.line;
               else if (fallback !== undefined) line = renderText(fallback, state.vars, state.sensitive);
               else { fail(state, out, `The line written for "${id}" was turned down (${checked.reason}), and there is no fallback text.`, id); return; }

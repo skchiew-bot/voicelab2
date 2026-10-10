@@ -422,7 +422,7 @@ describe.skipIf(!run)('admin UI', () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
     await signIn(page, env.staffToken);
     await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
-    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience', 'tickets', 'qa', 'changes', 'learning', 'cases', 'appointments']) {
+    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience', 'tickets', 'qa', 'changes', 'learning', 'cases', 'appointments', 'knowledge']) {
       await page.goto(`${base}#/${route}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
@@ -851,6 +851,66 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(outbox.getByRole('row')).toHaveCount(before - 1);
     await page.close();
   }, 60_000);
+
+  it('writes knowledge and a policy, shows what a call would hear, and holds a policy to its approvals, from the console', async () => {
+    const { createUser } = await import('../src/store/tenants.js'); const { withActor } = await import('../src/db.js');
+    const mkToken = async (email: string) => (await withActor(env.pool, { kind: 'internal' }, (c) => createUser(c, null, { tenantId: null, email, role: 'internal_admin' }))).token;
+    const [t2, t3, t4] = [await mkToken('ui-kb-2@daythree.test'), await mkToken('ui-kb-3@daythree.test'), await mkToken('ui-kb-4@daythree.test')];
+    const call = (token: string, m: 'GET' | 'POST' | 'PUT', u: string, b?: unknown) => env.call(token, m, u, b);
+    const tenant = (await call(env.staffToken, 'POST', '/internal/tenants', { name: 'Knowledge UI Co' })).json().id as string;
+    const page = await browser.newPage({ viewport: { width: 1100, height: 1000 } });
+    await signIn(page, env.staffToken);
+    await page.goto(`${base}#/knowledge`);
+    await page.getByLabel('Client').selectOption({ label: 'Knowledge UI Co' });
+    const articles = page.getByLabel('Articles');
+    await articles.getByLabel(/^Article name/).fill('late-fees');
+    await articles.getByLabel(/^Title/).fill('Late payment fees');
+    await articles.getByLabel(/^Text/).fill('A late fee of five ringgit applies after seven days. You can ask for it to be waived once a year.');
+    await articles.getByRole('button', { name: 'Write article' }).click();
+    await expect(articles).toContainText('late-fees (en)');
+    await articles.getByLabel('Ask the knowledge base').fill('late fee');
+    await articles.getByRole('button', { name: 'Search as a call would hear it' }).click();
+    await expect(articles.getByLabel('Search results')).toContainText('Nothing published matches');           // a draft informs nobody
+    const art = (await call(env.staffToken, 'GET', `/internal/tenants/${tenant}/knowledge`)).json()[0];
+    const v1 = (await call(env.staffToken, 'GET', `/internal/knowledge/${art.id}`)).json().versions[0].id;
+    expect((await call(env.staffToken, 'POST', `/internal/knowledge-versions/${v1}/publish`, {})).statusCode).toBe(403);   // its author cannot publish it
+    await call(t2, 'POST', `/internal/knowledge-versions/${v1}/publish`, {});
+    await articles.getByRole('button', { name: 'Search as a call would hear it' }).click();
+    await expect(articles.getByLabel('Search results')).toContainText('A late fee of five ringgit applies after seven days.');
+
+    const policy = page.getByLabel('Policy', { exact: true });
+    await expect(policy).toContainText('No policy is in force');
+    await policy.getByLabel(/^Approval levels/).fill('Owner');
+    await policy.getByRole('button', { name: 'Save levels' }).click();
+    await expect(page.getByRole('alert').first()).toBeVisible();                                                 // one level is refused
+    await policy.getByLabel(/^Approval levels/).fill('Policy owner, Compliance');
+    await policy.getByRole('button', { name: 'Save levels' }).click();
+    await expect(policy).toContainText('Policy owner → Compliance');
+    await policy.getByLabel(/^Why/).fill('The first policy.');
+    await policy.getByRole('button', { name: 'Propose this policy' }).click();
+    const card = policy.getByLabel('Policy 1.0');
+    await expect(card).toContainText('pending');
+    await expect(card).toContainText('Added rule "no_waiver"');
+    await card.getByRole('button', { name: 'Approve this level' }).click();
+    await expect(card).toContainText('You proposed this change');                                              // not your own
+    const pending = (await call(env.staffToken, 'GET', `/internal/tenants/${tenant}/policy`)).json().pending.id;
+    await call(t2, 'POST', `/internal/policy-versions/${pending}/decision`, { decision: 'approved' });
+    await call(t3, 'POST', `/internal/policy-versions/${pending}/decision`, { decision: 'approved' });
+    await page.reload();
+    await page.getByLabel('Client').selectOption({ label: 'Knowledge UI Co' });
+    await expect(page.getByLabel('Policy 1.0')).toContainText('approved');
+    await page.getByLabel('Policy 1.0').getByRole('button', { name: 'Put live' }).click();
+    await expect(page.getByLabel('Policy 1.0')).toContainText('You proposed this change');                     // someone else must put it live
+    await call(t4, 'POST', `/internal/policy-versions/${pending}/activate`);
+    await page.reload();
+    await page.getByLabel('Client').selectOption({ label: 'Knowledge UI Co' });
+    await expect(page.getByLabel('Policy 1.0')).toContainText('live');
+    const ask = page.getByLabel('Policy', { exact: true });
+    await ask.getByLabel(/^Ask the policy/).fill('waive_fee');
+    await ask.getByRole('button', { name: 'Check' }).click();
+    await expect(ask.getByRole('status')).toContainText('Not allowed: Only a person may waive a fee.');
+    await page.close();
+  }, 90_000);
 
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();

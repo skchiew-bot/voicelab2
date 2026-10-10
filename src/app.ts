@@ -20,6 +20,7 @@ import { addNumber, callKnown, callQueued, costCall, getCall, listCalls, listNum
 import { registerJourneyRoutes } from './routes/journey.js';
 import { registerAppointmentRoutes } from './routes/appointments.js';
 import { registerCaseRoutes } from './routes/cases.js';
+import { registerKnowledgeRoutes } from './routes/knowledge.js';
 import { registerLearningRoutes } from './routes/learning.js';
 import { registerResilienceRoutes } from './routes/resilience.js';
 import { registerStitchingRoutes } from './routes/stitching.js';
@@ -368,6 +369,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
 
   registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
   registerAppointmentRoutes(app, { pool, internal });
+  registerKnowledgeRoutes(app, { pool, internal });
   registerCaseRoutes(app, { internal, cases: { calls: callDeps, ...deps.cases } });
   registerLearningRoutes(app, { internal, learn: { pool, ...deps.learning } });
   registerJourneyRoutes(app, { pool, internal, judges: deps.judges, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });

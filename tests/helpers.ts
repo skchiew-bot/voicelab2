@@ -48,6 +48,7 @@ export async function setupDb(opts: { integrationHttp?: import('../src/workflows
     PORT: 0,
     PUBLIC_BASE_URL: 'https://voicelab.test',
     RECONCILE_TOLERANCE_PCT: 2,
+    SCHEDULER: 'off', // tests drive the scheduler with tick()
   };
   const provider = fakeProviderApi();
   const app = buildApp(pool, config, { fetch: provider.fetch, integrationHttp: opts.integrationHttp, judges: opts.judges, learning: opts.learning, cases: opts.cases, mailer: opts.mailer });

@@ -8,6 +8,10 @@ const schema = z.object({
   PUBLIC_BASE_URL: z.string().url().optional(),
   // How far our estimated cost may differ from the provider's own figures and still count as reconciled.
   RECONCILE_TOLERANCE_PCT: z.coerce.number().min(0).max(100).default(2),
+  // Whether this server runs the scheduled jobs (alert emails, case dispatch, reconciliation and the rest). Safe on every
+  // server at once: each job runs on one server at a time. Turn it off only on a server that should leave the jobs to the
+  // others; if no server runs them, the Control Tower raises them as overdue.
+  SCHEDULER: z.enum(['on', 'off']).default('on'),
 });
 
 export type Config = z.infer<typeof schema>;

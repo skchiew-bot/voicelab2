@@ -8,7 +8,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { redactNumbers } from '../telephony/types.js';
 
-export const CATEGORIES = ['workflows', 'money', 'providers', 'compliance', 'policy', 'learning', 'journey', 'modules', 'people', 'activity'] as const;
+export const CATEGORIES = ['workflows', 'money', 'providers', 'compliance', 'policy', 'learning', 'journey', 'modules', 'people', 'platform', 'activity'] as const;
 export type Category = (typeof CATEGORIES)[number];
 
 // Things that happen in the normal course of calls and customers, or that a scheduled job does on its own. They are
@@ -27,6 +27,7 @@ const PREFIX: [string, Category][] = [
   ['qa.', 'journey'], ['ticket.', 'journey'], ['fault.', 'journey'], ['journey.', 'journey'],
   ['case.', 'modules'], ['cases.', 'modules'], ['appointment.', 'modules'], ['appointments.', 'modules'], ['diary.', 'modules'], ['location.', 'modules'],
   ['tenant.', 'people'], ['user.', 'people'], ['project.', 'people'],
+  ['scheduler.', 'platform'],
 ];
 
 /** A change's kind. Anything not known to be a change (activity, or an action this list has not heard of) is activity. */

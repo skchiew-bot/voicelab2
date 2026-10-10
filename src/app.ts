@@ -17,8 +17,8 @@ import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, gateOutbound, normalizeE164, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
-import { addNumber, callKnown, callQueued, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
-import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, type RelayDeps, type RelaySession } from './store/relay.js';
+import { addNumber, callKnown, callQueued, costCall, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
+import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, type RelayDeps, type RelaySession } from './store/relay.js';
 import { recordingAudio } from './store/recordings.js';
 import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
 import { DEFAULT_FALLBACK } from './resilience/fallback.js';
@@ -38,6 +38,13 @@ import { listDeliveries, listSubscriptions, sendTest, subscribe, subscriptionSch
 import { actionSchema, controlState, runAction } from './store/control-actions.js';
 import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
 import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
+import { countsOf, createScheduler, drain, listJobs, runJobNow, updateJob, type Job } from './scheduler.js';
+import { sweepFaults } from './store/call-end.js';
+import { expireQueued } from './store/concurrency.js';
+import { abandonStaleRuns } from './store/runs.js';
+import { checkPayments, cleanNote, dispatchDue, sweepAgeing } from './store/cases.js';
+import { sweepAudio, sweepDrift } from './store/learning.js';
+import { sweepReminders } from './store/appointments.js';
 import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
 import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
 import { parseTwilio, twimlHold, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
@@ -433,7 +440,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   // ------------------------------------------------- control tower
   app.get('/internal/control-tower', async (req) => {
     const s = await internal(req);
-    return withActor(pool, s.actor, (c) => controlTower(c, key, { publicBaseUrlSet: Boolean(callDeps.baseUrl), mailConnected: Boolean(deps.mailer) }));
+    return withActor(pool, s.actor, (c) => controlTower(c, key, { publicBaseUrlSet: Boolean(callDeps.baseUrl), mailConnected: Boolean(deps.mailer), jobs: scheduler.names }));
   });
   app.get('/internal/control-tower/panels', async (req) => {
     const s = await internal(req);
@@ -441,6 +448,50 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   });
   // ------------------------------------------------- alerts by email
   const alertDeps = { pool, key, publicBaseUrl: callDeps.baseUrl || undefined, mailer: deps.mailer };
+
+  // ------------------------------------------------- scheduled jobs
+  // The same work the sweep endpoints do, with their default settings, run by the app itself (src/scheduler.ts).
+  const runDeps = { pool, key, integrationHttp: deps.integrationHttp };
+  const caseDeps = { calls: callDeps, ...deps.cases };
+  const learnDeps = { pool, ...deps.learning };
+  const sys = <T>(fn: (c: pg.PoolClient) => Promise<T>) => withActor(pool, { kind: 'internal' }, fn);
+  const jobs: Job[] = [
+    { name: 'alerts-email', everySeconds: 60, run: () => sweepAlerts(alertDeps) },
+    // A backlog (many callbacks locked to one time) is worked through in batches within the run, so callbacks are not
+    // missed only because one batch is small. Bounded, and a batch smaller than its limit means nothing more is due.
+    { name: 'cases-dispatch', everySeconds: 60, run: () => drain(() => dispatchDue(caseDeps, () => new Date(), 20), 20, 10) },
+    { name: 'queue-expire', everySeconds: 60, run: async () => {
+      const out = await sys((c) => expireQueued(c, null, 300));
+      return { expired: out.expired, hungUp: await hangUpCalls(callDeps, out.hangups) };
+    } },
+    { name: 'faults-sweep', everySeconds: 300, run: () => sys((c) => sweepFaults(c)) },
+    { name: 'workflow-runs-sweep', everySeconds: 900, run: () => abandonStaleRuns(runDeps, null, { olderThanMinutes: 60 }) },
+    { name: 'reconcile', everySeconds: 3600, run: () => reconcileSweep(callDeps, null, { olderThanMinutes: 60, limit: 50 }) },
+    { name: 'learning-sweep', everySeconds: 3600, run: async () => ({ ...countsOf(await sweepAudio(learnDeps, null)), ...countsOf(await sweepDrift(learnDeps, null)) }) },
+    { name: 'payment-checks', everySeconds: 3600, perTenant: true, run: (t) => checkPayments(caseDeps, t!) },
+    { name: 'case-ageing', everySeconds: 86400, perTenant: true, run: (t) => sys((c) => sweepAgeing(c, t!)) },
+    { name: 'appointment-reminders', everySeconds: 900, perTenant: true, run: (t) => sys((c) => sweepReminders(c, t!)) },
+    // Extra channel charges are not run automatically: they bill a month at today's entitlement, which has no history,
+    // so a client added or upgraded mid-month would be charged for the whole month. An operator runs them by hand.
+  ];
+  const scheduler = createScheduler(pool, jobs, { log: (m) => app.log.error(m) });
+  app.decorate('scheduler', scheduler);
+  app.addHook('onClose', async () => { await scheduler.stop(); });
+  const reason = z.string().trim().min(3, 'Say why.').max(500).transform((t) => cleanNote(t, 'reason')!);
+  app.get('/internal/scheduler', async (req) => { const s = await internal(req); return withActor(pool, s.actor, listJobs); });
+  app.put('/internal/scheduler/:name', async (req) => {
+    const s = await admin(req);
+    const { name } = z.object({ name: z.string().max(60) }).parse(req.params);
+    const b = z.object({ enabled: z.boolean().optional(), everySeconds: z.number().int().min(60).max(2_678_400).optional(), reason })
+      .refine((x) => x.enabled !== undefined || x.everySeconds !== undefined, 'Change something: turn it on or off, or set how often it runs.').parse(req.body);
+    return withActor(pool, s.actor, (c) => updateJob(c, s.userId, name, b));
+  });
+  app.post('/internal/scheduler/:name/run', async (req) => {
+    const s = await admin(req);
+    const { name } = z.object({ name: z.string().max(60) }).parse(req.params);
+    const b = z.object({ reason }).parse(req.body);
+    return withActor(pool, s.actor, (c) => runJobNow(c, s.userId, name, b.reason));
+  });
   app.post('/internal/alerts/sweep', async (req) => { await internal(req); return sweepAlerts(alertDeps); });
   app.get('/internal/alerts/subscriptions', async (req) => { const s = await internal(req); return withActor(pool, s.actor, (c) => listSubscriptions(c)); });
   app.put('/internal/alerts/subscriptions', async (req) => { const s = await admin(req); const b = subscriptionSchema.parse(req.body); return withActor(pool, s.actor, (c) => subscribe(c, s.userId, b)); });
@@ -600,15 +651,38 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     }, (socket, req) => {
       const providerId = (req.params as { providerId: string }).providerId;
       let session: RelaySession | null = null;
+      let closed = false;
       let queue: Promise<void> = Promise.resolve();
       const send = (out: RelayOutbound[]) => { for (const m of out) if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(m)); };
       // The relay must say which call it is for straight away; a connection that does not is closed.
       const setupTimer = setTimeout(() => { if (!session) socket.close(1008, 'No setup'); }, 10_000);
+      // Something below failed outright (the database, say): the callback is still attempted and the caller still hears a
+      // holding line, never silence; then the line is closed.
+      const fallBack = async () => {
+        const out = session ? await relayFailed(relayDeps, session).then((r) => r.send).catch(() => null) : null;
+        send(out ?? [{ type: 'text', token: DEFAULT_FALLBACK.holdingMessage, last: true }, { type: 'end' }]);
+        socket.close();
+      };
+      // A connection standing by while another starts the call, or carrying on a call whose reply is still being applied,
+      // looks again every few seconds, so it is never left silent for long. A closed connection stops looking, and never
+      // takes the call over.
+      let standbyTimer: NodeJS.Timeout | undefined;
+      const armStandby = () => {
+        if (closed) return;
+        standbyTimer = setTimeout(() => {
+          queue = queue.then(async () => {
+            if (!session || closed) return;
+            const r = await standbyCheck(relayDeps, session);
+            send(r.send);
+            if (r.again) armStandby();
+          }).catch(fallBack);
+        }, STANDBY_POLL_MS);
+      };
       socket.on('message', (data: Buffer) => {
         const m = parseRelay(data.toString('utf8'));
         if (!m) return;
-        // The question the call was on when these words arrived (before setup has finished, worked out once it has).
-        const askedAt = session ? session.version : undefined;
+        // The question the call was on when these words arrived; null if this connection was not yet serving the call.
+        const askedAt = session?.runId ? session.version : null;
         // One message at a time, in order: a turn finishes before the next is looked at.
         queue = queue.then(async () => {
           if (m.type === 'setup') {
@@ -616,21 +690,20 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
             clearTimeout(setupTimer);
             const r = await openRelay(relayDeps, providerId, m);
             session = r.session;
+            if (session && closed) session.closed = true;
             send(r.send);
             if (!session) socket.close(1008, 'Unknown call');
+            // Standing by, or carried on from a call another connection was serving: look again until there is something to say.
+            else if (!session.ended && r.send.length === 0) armStandby();
             return;
           }
           if (session) send(await onRelayMessage(relayDeps, session, m, askedAt));
-        // Something below failed outright (the database, say): the callback is still attempted and the caller still hears a
-        // holding line, never silence; then the line is closed.
-        }).catch(async () => {
-          const out = session ? await relayFailed(relayDeps, session).then((r) => r.send).catch(() => null) : null;
-          send(out ?? [{ type: 'text', token: DEFAULT_FALLBACK.holdingMessage, last: true }, { type: 'end' }]);
-          socket.close();
-        });
+        }).catch(fallBack);
       });
       socket.on('close', () => {
-        clearTimeout(setupTimer);
+        closed = true;
+        if (session) session.closed = true;
+        clearTimeout(setupTimer); clearTimeout(standbyTimer);
         queue = queue.then(() => (session ? closeRelay(relayDeps, session) : undefined)).catch(() => undefined);
       });
     });
@@ -681,4 +754,8 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   }
 
   return app;
+}
+
+declare module 'fastify' {
+  interface FastifyInstance { scheduler: ReturnType<typeof createScheduler> }
 }

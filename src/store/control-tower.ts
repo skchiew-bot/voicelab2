@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { jobProblems } from '../scheduler.js';
 import { fromScaled, toScaled } from '../money.js';
 import { decryptSecrets } from '../secrets.js';
 import { appointmentSummary } from './appointments.js';
@@ -21,7 +22,7 @@ interface ProviderRow {
 }
 
 /** Everything the Control Tower shows, in one read. Alerts are derived from this state, not stored. */
-export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicBaseUrlSet: boolean; mailConnected?: boolean }) {
+export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicBaseUrlSet: boolean; mailConnected?: boolean; jobs?: readonly string[] }) {
   const providers: ProviderRow[] = (await c.query(
     `SELECT p.id, p.name, p.adapter_key, p.kind, p.status, p.params, p.secret_params, p.credentials_checked_at,
             v.id AS version_id, (cc.charging_version_id IS NOT NULL) AS confirmed,
@@ -88,6 +89,15 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   if (stuck > 0) add('high', 'calls_stuck', `${stuck} call${stuck === 1 ? '' : 's'} ${stuck === 1 ? 'has' : 'have'} not moved for a long time. Provider events are probably not arriving: check the public address and the webhook settings.`, '#/calls');
   if (unpriced > 0) add('medium', 'cost_pending', `${unpriced} finished call${unpriced === 1 ? ' has' : 's have'} not been priced.`, '#/calls');
   if (problems.failed > 0) add('high', 'cost_failed', `${problems.failed} call${problems.failed === 1 ? '' : 's'} could not be priced.`, '#/calls');
+  // Scheduled jobs: one overdue means no server is running jobs (or every one is stuck), so nothing sweeps.
+  // Each job is its own alert (scoped by name), so a second job going wrong is a new alert and a new email.
+  for (const j of await jobProblems(c, ctx.jobs ?? [])) {
+    // Turned off by an admin, with a reason in the change log: shown, but not raised as a problem worth an email.
+    if (!j.enabled) add('low', 'job_off', `The scheduled job "${j.name}" is turned off, so nothing does its work.`, '#/jobs', j.name);
+    else if (j.overdue) add('high', 'job_overdue', `The scheduled job "${j.name}" is overdue: no server has run it. Check that the scheduler is on (SCHEDULER).`, '#/jobs', j.name);
+    else if (j.last_outcome === 'partly') add('medium', 'job_partly', `The scheduled job "${j.name}" has failed for some clients ${j.consecutive_failures} runs in a row.`, '#/jobs', j.name);
+    else add('high', 'job_failing', `The scheduled job "${j.name}" has failed ${j.consecutive_failures} times in a row.`, '#/jobs', j.name);
+  }
   if (problems.variance > 0) add('medium', 'cost_variance', `${problems.variance} call${problems.variance === 1 ? '' : 's'} differ${problems.variance === 1 ? 's' : ''} from the provider's own figures.`, '#/calls');
 
   const health = await healthMap(c);

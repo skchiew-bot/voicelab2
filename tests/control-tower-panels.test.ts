@@ -85,6 +85,26 @@ describe('the change log', () => {
     expect((await log('?category=compliance')).entries[0]!.why).toBe('asked by [number] to stop');
   });
 
+  it('keeps automatic and per-customer activity out of the changes, and anything it does not know as activity too', async () => {
+    for (const action of ['call_cost.reconcile', 'ticket.open', 'did.lock', 'appointment.book', 'something.new']) {
+      await env.pool.query(`INSERT INTO audit_log (actor_id, action, entity, entity_id, detail) VALUES (NULL, $1, 'x', NULL, '{}')`, [action]);
+    }
+    const changes = (await log('?limit=200')).entries.map((e) => e.action);
+    for (const a of ['call_cost.reconcile', 'ticket.open', 'did.lock', 'appointment.book', 'something.new']) expect(changes).not.toContain(a);
+    const activity = (await log('?category=activity&limit=200')).entries.map((e) => e.action);
+    expect(activity.slice(0, 5)).toEqual(['something.new', 'appointment.book', 'did.lock', 'ticket.open', 'call_cost.reconcile']);
+    expect((await log('?category=money&limit=200')).entries.map((e) => e.action)).not.toContain('call_cost.reconcile');
+  });
+
+  it('shows the reason a person gave for deciding a case', async () => {
+    const cs = (await must(env.call(st(), 'POST', `/internal/tenants/${tenantId}/cases`, { caseRef: 'CL-1', phone: '+60123456789', country: 'MY', currency: 'MYR', openingBalance: '100', timeZone: 'Asia/Kuala_Lumpur' }))).json();
+    await env.pool.query(`UPDATE cases SET status = 'decision_required' WHERE id = $1`, [cs.id]);
+    await must(env.call(st(), 'POST', `/internal/cases/${cs.id}/decision`, { decision: 'continue', note: 'Client asked us to keep trying.' }));
+    const entry = (await log('?category=modules')).entries.find((e) => e.action === 'case.decide');
+    expect(entry).toMatchObject({ who: 'staff@daythree.test', why: 'Client asked us to keep trying.', link: '#/cases' });
+    expect((await log('?category=modules')).entries.map((e) => e.action)).not.toContain('case.open');      // opening a case is day-to-day work
+  });
+
   it('pages back through older changes without repeating or skipping any', async () => {
     const whole = (await log('?limit=200')).entries.map((e) => e.id);
     const seen: number[] = []; let before: number | null = null;
@@ -104,7 +124,7 @@ describe('the change log', () => {
 describe('the panels', () => {
   it('give funding runway from the recorded balance and the last week\'s spend, exactly, counting a reconciled call once', async () => {
     await must(env.call(st(), 'POST', `/internal/providers/${providerId}/funding`, { kind: 'topup', amount: '10', currency: 'USD' }));
-    expect((await panels()).funding).toEqual([expect.objectContaining({ provider: 'tw-panel', currency: 'USD', balance: '10.00000000', spent7d: '0', runwayDays: null })]);
+    expect((await panels()).funding.providers).toEqual([expect.objectContaining({ provider: 'tw-panel', currency: 'USD', balance: '10.00000000', spent7d: '0.00000000', runwayDays: null, runway: 'no_spend' })]);
     const call = randomUUID();
     await env.pool.query(
       `INSERT INTO calls (id, tenant_id, provider_id, provider_call_id, direction, status, started_at, ended_at, duration_seconds, cost_status)
@@ -112,7 +132,11 @@ describe('the panels', () => {
     await must(env.call(st(), 'POST', `/internal/calls/${call}/cost`, { tenantId, direction: 'outbound', occurredAt: new Date(Date.now() - 300_000).toISOString(), usage: [{ providerId, usage: { seconds: 61 } }] }));
     await must(env.call(st(), 'POST', `/internal/calls/${call}/reconcile`, { source: 'manual', reportedCost: '0.028' }));
     // 61 seconds billed as two minutes at 0.014 = 0.028; 0.028 over 7 days is 0.004 a day; 10 ÷ 0.004 = 2500 days.
-    expect((await panels()).funding[0]).toMatchObject({ spent7d: '0.02800000', perDay: '0.00400000', runwayDays: '2500.0' });
+    expect((await panels()).funding.providers[0]).toMatchObject({ spent7d: '0.02800000', perDay: '0.00400000', runwayDays: '2500.0', runway: 'measured' });
+    // A balance kept in MYR cannot be set against spend in USD: unknown, and it says why, never "no spend".
+    await must(env.call(st(), 'POST', `/internal/providers/${providerId}/funding`, { kind: 'topup', amount: '50', currency: 'MYR' }));
+    expect((await panels()).funding.providers.find((f: { currency: string }) => f.currency === 'MYR')).toMatchObject({
+      runway: 'spend_in_other_currency', runwayDays: null, spent7d: '0.00000000', spentInOtherCurrencies: [{ currency: 'USD', spent: '0.02800000' }] });
   });
 
   it('show how much speech came from recordings, from real and test calls only', async () => {
@@ -132,13 +156,40 @@ describe('the panels', () => {
     expect(p.journeyQa.qa).toMatchObject({ scored: 0, average: null });                // nothing scored is not a score of 0
   });
 
-  it('count only dials that really went out, and show each provider against its ceiling', async () => {
-    const ins = (status: string, extra = '') => env.pool.query(`INSERT INTO calls (id, tenant_id, provider_id, direction, status${extra ? ', answered_at' : ''}) VALUES ($1,$2,$3,'outbound',$4${extra ? ', now()' : ''})`, [randomUUID(), tenantId, providerId, status]);
-    await ins('blocked'); await ins('completed', 'answered'); await ins('unanswered'); await ins('in_progress', 'answered');
+  it('count every workflow in the stitching totals, not just the twenty it lists, and credit a child workflow\'s lines to it', async () => {
+    const before = (await panels()).stitching;
+    const wf = (await env.pool.query(`SELECT id, (SELECT id FROM workflow_versions v WHERE v.workflow_id = w.id LIMIT 1) AS version FROM workflows w WHERE name = 'panel_flow'`)).rows[0];
+    const run = randomUUID();
+    await env.pool.query(`INSERT INTO workflow_runs (id, tenant_id, workflow_id, version_id, environment, kind, pins, state, status) VALUES ($1,$2,$3,$4,'staging','live','{}','{}','ended')`, [run, tenantId, wf.id, wf.version]);
+    for (let i = 0; i < 25; i++) await env.pool.query(`INSERT INTO workflow_run_steps (run_id, seq, type, workflow, node, payload) VALUES ($1,$2,'say',$3,'a',$4)`, [run, i + 1, `child_${String(i).padStart(2, '0')}`, { synthChars: 10, recordedChars: 0 }]);
+    const after = (await panels()).stitching;
+    expect(after.synthChars - before.synthChars).toBe(250);                                // all 25, though only 20 are listed
+    expect(after.workflows).toHaveLength(20);
+    expect(after.workflows.map((w: { workflow: string }) => w.workflow)).toContain('child_00');   // credited to the child that spoke, not the parent run
+  });
+
+  it('count dials and outcomes as the Outbound screen does: finished dials only, each call\'s latest outcome, and no outcome as unknown', async () => {
+    const ins = async (status: string, answered = false, endReason: string | null = null) => {
+      const id = randomUUID();
+      await env.pool.query(`INSERT INTO calls (id, tenant_id, provider_id, direction, status, answered_at, end_reason) VALUES ($1,$2,$3,'outbound',$4,$5,$6)`, [id, tenantId, providerId, status, answered ? new Date() : null, endReason]);
+      return id;
+    };
+    await ins('blocked'); await ins('failed', false, 'did_locked'); await ins('in_progress', true); await ins('unanswered');
+    const corrected = await ins('completed', true); const twice = await ins('completed', true);
+    const outcome = (call: string, o: string) => env.pool.query(`INSERT INTO outbound_outcomes (tenant_id, call_id, outcome) VALUES ($1,$2,$3)`, [tenantId, call, o]);
+    await outcome(corrected, 'contacted'); await outcome(corrected, 'wrong_number');      // corrected: the latest one counts
+    await outcome(twice, 'contacted'); await outcome(twice, 'contacted');                  // recorded twice: one call, one contact
+    const d = (await panels()).deliverability;
+    // Finished dials: the earlier priced call, the two above and the unanswered one. Not the blocked one, the one with no
+    // usable caller ID, or the one still under way.
+    expect(d).toMatchObject({ attempts: 4, inFlight: 1, notDialled: { blocked: 1, noCallerId: 1 } });
+    expect(d.outcomes).toMatchObject({ contacted: 1, wrongNumber: 1, unclassified: 1, noAnswer: 1 });   // the priced call has no outcome: unknown, not "not contacted"
+    expect(d.rates).toEqual({ contactPercent: 25, answerPercent: 75 });
+    const outbound = (await must(env.call(st(), 'GET', `/internal/analytics/outbound?from=${new Date(Date.now() - 7 * 86_400_000).toISOString()}&to=${new Date(Date.now() + 1000).toISOString()}`))).json();
+    expect(outbound.rates).toEqual(d.rates);                                               // the two screens agree
     const p = await panels();
-    expect(p.deliverability).toMatchObject({ dialled: 4, answered: 2, answerPercent: '50.00', contactPercent: '0.00' });   // the earlier priced call is one of the four; the blocked one is not
     expect(p.concurrency.providers).toEqual([expect.objectContaining({ provider: 'tw-panel', active: 1 })]);
-    expect(p.modules.cases).toMatchObject({ open: 0, brokenPromises7d: 0 });
+    expect(p.modules.cases).toMatchObject({ open: 1, decisionRequired: 0, brokenPromises7d: 0 });   // the case decided above, back in play
     expect(p.unavailable).toEqual([]);
   });
 
@@ -154,7 +205,7 @@ describe('the panels', () => {
     try {
       const p = await panels();
       expect(p.unavailable).toEqual(['deliverability']); expect(p.deliverability).toBeNull();
-      expect(p.funding.find((f: { provider: string }) => f.provider === 'tw-panel')).toMatchObject({ runwayDays: '2500.0' }); expect(p.stitching.recordedPercent).toBe('60.00');
+      expect(p.funding.providers.find((f: { provider: string; currency: string }) => f.provider === 'tw-panel' && f.currency === 'USD')).toMatchObject({ runwayDays: '2500.0' }); expect(p.stitching.recordedPercent).toBe('40.00');      // 300 recorded of 750, once the 25 child workflows have spoken
     } finally { await env.pool.query('ALTER TABLE outbound_outcomes_away RENAME TO outbound_outcomes'); }
   });
 });

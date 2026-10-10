@@ -385,7 +385,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   });
   app.get('/internal/control-tower/panels', async (req) => {
     const s = await internal(req);
-    return withActor(pool, s.actor, (c) => controlTowerPanels(c));
+    return withActor(pool, s.actor, (c) => controlTowerPanels(c, (panel, err) => req.log.warn({ panel, err: err instanceof Error ? err.name : 'error' }, 'a Control Tower panel could not be worked out')));
   });
   app.get('/internal/change-log', async (req) => {
     const s = await internal(req);

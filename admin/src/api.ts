@@ -92,13 +92,15 @@ export interface ChangeEntry { id: number; at: string; action: string; category:
 export interface ChangeLogPage { entries: ChangeEntry[]; next: number | null }
 export interface Panels {
   generatedAt: string; unavailable: string[];
-  stitching: { synthChars: number; recordedChars: number; recordedPercent: string | null; workflows: { workflowId: string; workflow: string; tenant: string; synthChars: number; recordedChars: number; recordedPercent: string | null }[] } | null;
-  deliverability: { pool: { active: number; retired: number }; failures: { reason: string; n: number; numbers: number }[]; dialled: number; answered: number; answerPercent: string | null; outcomes: { outcome: string; n: number }[]; contactPercent: string | null } | null;
+  stitching: { synthChars: number; recordedChars: number; recordedPercent: string | null; workflows: { workflowId: string | null; workflow: string; tenant: string; synthChars: number; recordedChars: number; recordedPercent: string | null }[] } | null;
+  deliverability: { pool: { active: number; retired: number }; failures: { reason: string; n: number; numbers: number }[]; attempts: number; inFlight: number; notDialled: { blocked: number; noCallerId: number };
+    outcomes: { contacted: number; rejected: number; wrongNumber: number; thirdParty: number; unclassified: number; noAnswer: number; unreachable: number }; rates: { contactPercent: number | null; answerPercent: number | null } } | null;
   concurrency: { providers: { providerId: string; provider: string; active: number; ceiling: number | null; usedPercent: string | null; burst24h: number }[]; deferred24h: number; tenants: { tenantId: string; tenant: string; channels: number; active: number; queued: number }[] } | null;
-  journeyQa: { qa: { scored: number; average: string | null; distribution: { band: string; n: number }[] }; escalations: { trigger: string; n: number }[]; unacknowledgedFaults: number; sentiment: { day: string; turns: number; average: string; severe: number }[] } | null;
+  journeyQa: { qa: { scored: number; scores: number; average: string | null; distribution: { band: string; n: number }[] }; escalations: { trigger: string; n: number }[]; unacknowledgedFaults: number; sentiment: { day: string; turns: number; average: string | null; severe: number }[] } | null;
   learning: { inReview: number; approved: number; promoted: number; demoted: number; rejected: number; driftDemotions7d: number; forcedDemotions7d: number } | null;
   modules: { cases: { open: number; decisionRequired: number; needsHuman: number; missedOrUnknown: number; brokenPromises7d: number }; appointments: { needsReschedule: number; upcoming: number; unsentOverAnHour: number; movedByDelays7d: number } } | null;
-  funding: { providerId: string; provider: string; status: string; currency: string; balance: string; recordedAt: string; spent7d: string; perDay: string; runwayDays: string | null }[] | null;
+  funding: { providers: { providerId: string; provider: string; status: string; currency: string; balance: string; recordedAt: string; spent7d: string; perDay: string; runwayDays: string | null;
+    runway: 'measured' | 'no_spend' | 'spend_in_other_currency'; spentInOtherCurrencies: { currency: string; spent: string }[] }[]; spendWithoutBalance: { providerId: string; provider: string; currency: string; spent7d: string }[] } | null;
 }
 export interface PhaseProgress {
   id: string; name: string; status: 'done' | 'in_progress' | 'not_started'; summary: string; open: string[];

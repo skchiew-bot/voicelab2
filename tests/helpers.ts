@@ -60,7 +60,7 @@ export async function setupDb(opts: { integrationHttp?: import('../src/workflows
     await pool.end();
     const a = new pg.Client({ connectionString: ADMIN_URL });
     await a.connect();
-    await a.query(`DROP DATABASE ${name} WITH (FORCE)`);
+    await dropDatabase(a, name);
     await a.end();
   }
 
@@ -69,4 +69,19 @@ export async function setupDb(opts: { integrationHttp?: import('../src/workflows
     app.inject({ method, url, payload: payload as object, headers: { authorization: `Bearer ${token}` } });
 
   return { pool, app, config, provider, staffToken: staff.token, call, teardown };
+}
+
+/**
+ * Drop a test database. FORCE ends its other sessions, but the test role may not end one the server itself runs there
+ * (an autovacuum worker): "permission denied to terminate process". Such a worker finishes in moments, so try again;
+ * any other error is real and thrown at once.
+ */
+export async function dropDatabase(a: { query(sql: string): Promise<unknown> }, name: string, waitMs = 250, attempts = 40) {
+  for (let attempt = 1; ; attempt++) {
+    try { await a.query(`DROP DATABASE ${name} WITH (FORCE)`); return attempt; }
+    catch (err) {
+      if (attempt >= attempts || !/permission denied to terminate process/.test((err as Error).message)) throw err;
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
 }

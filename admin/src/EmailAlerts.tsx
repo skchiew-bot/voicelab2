@@ -5,6 +5,10 @@ import { Errors, Field, fmtDate, useAction, useLoad } from './ui';
 interface Sub { userId: string; email: string; minSeverity: 'high' | 'medium' | 'low'; codes: string[] | null }
 interface Delivery { id: number; email: string; kind: string; status: string; detail: string | null; alertKey: string; createdAt: string }
 interface User { id: string; email: string; role: string; disabled_at: string | null; pending_approval: boolean }
+const TEST_RESULT: Record<string, string> = {
+  sent: 'The test email was accepted by the mail service.', failed: 'The mail service refused the test email.',
+  unknown: 'The mail service gave no clear answer; the test email may not have arrived.', no_mail_service: 'Not sent: no mail service is connected yet.',
+};
 const STATUS: Record<string, [string, string]> = {
   sent: ['sent', 'badge ok'], failed: ['refused', 'badge bad'], unknown: ['outcome unknown', 'badge warn'],
   no_mail_service: ['not sent: no mail service', 'badge warn'], sending: ['sending', 'badge'],
@@ -19,6 +23,7 @@ export function EmailAlerts() {
   const [userId, setUserId] = useState('');
   const [minSeverity, setMin] = useState<'high' | 'medium' | 'low'>('high');
   const [note, setNote] = useState<string | null>(null);
+  const isAdmin = (users.data ?? []).length > 0;          // the user list answers admins only
   const staff = (users.data ?? []).filter((u) => (u.role === 'internal_admin' || u.role === 'internal_viewer') && !u.disabled_at && !u.pending_approval);
   const reload = () => { subs.reload(); sent.reload(); };
   const run = async (fn: () => Promise<unknown>, done: string) => { setNote(null); if (await act.run(fn)) { setNote(done); reload(); } };
@@ -34,10 +39,14 @@ export function EmailAlerts() {
             <tr key={s.userId}>
               <td>{s.email}</td>
               <td>{s.minSeverity === 'low' ? 'all' : s.minSeverity === 'medium' ? 'medium and high' : 'high only'}{s.codes ? ` (${s.codes.join(', ')})` : ''}</td>
-              <td>
-                <button className="link" disabled={act.pending} onClick={() => run(async () => { const r = await api<{ status: string }>('POST', `/internal/alerts/subscriptions/${s.userId}/test`); return r; }, `Test email to ${s.email} requested.`)}>Send a test</button>{' '}
+              <td>{isAdmin && <>
+                <button className="link" disabled={act.pending} onClick={async () => {
+                  setNote(null);
+                  const r = await act.run(() => api<{ status: string }>('POST', `/internal/alerts/subscriptions/${s.userId}/test`));
+                  if (r) { setNote(TEST_RESULT[r.status] ?? r.status); reload(); }
+                }}>Send a test</button>{' '}
                 <button className="link" disabled={act.pending} onClick={() => run(() => api('POST', `/internal/alerts/subscriptions/${s.userId}/end`), `${s.email} no longer gets alerts.`)}>Stop</button>
-              </td>
+              </>}</td>
             </tr>
           ))}</tbody>
         </table>
@@ -53,7 +62,7 @@ export function EmailAlerts() {
           <button disabled={act.pending || !userId} onClick={() => run(() => api('PUT', '/internal/alerts/subscriptions', { userId, minSeverity }), 'Saved.')}>Get alerts by email</button>
         </>
       )}
-      <Errors error={act.error ?? subs.error} />
+      <Errors error={act.error ?? subs.error ?? sent.error} />
       {note && <div className="notice ok" role="status">{note}</div>}
       {sent.data && sent.data.length > 0 && (
         <details>

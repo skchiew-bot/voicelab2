@@ -463,7 +463,7 @@ The console now opens on the Control Tower (`#/tower`, `GET /internal/control-to
 
 - **Actions** (`POST /internal/control-tower/actions`, the "Take action" card): drain and restore a provider (no new outbound calls or voice routing; calls under way finish), force a failover (it recovers through the normal hysteresis), prefer a telephony provider in the caller-ID pool, set the dialling pace (dials a minute, held back like a full provider), and retire or bring back a caller ID. Each requires a reason and appears in the change log; a drained provider is an alert until it is restored.
 
-- **Alerts by email** (the owner's chosen channel): staff subscribe by severity; a scheduled sweep (`POST /internal/alerts/sweep`) emails each person once when an alert first appears or comes back after clearing, never repeats an email whose outcome is unknown, and records every email. No mail service is connected yet, so none are sent, and the Control Tower says so.
+- **Alerts by email** (the owner's chosen channel): staff subscribe by severity; a scheduled sweep (`POST /internal/alerts/sweep`) emails each person once about every open alert they want (including ones open before they subscribed or before a mail service was connected), counts an alert as cleared only after 30 minutes gone, never repeats an email whose outcome is unknown, records every email, and raises an alert when one was refused or may not have arrived. No mail service is connected yet, so none are sent, and the Control Tower says so.
 
 Not built yet: changing a concurrency ceiling from the Control Tower (needs approval), a reason asked for on settings changes that take none, alerts by WhatsApp or Slack, a real mail service, and calls taken off the recorded funding balance automatically.
 

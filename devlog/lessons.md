@@ -292,3 +292,9 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** Build every time-based expectation from a clock the test controls, or from windows worked out relative to the current time (as the test does for the "quiet now" case). Never assume the suite runs during office hours or in one time zone.
 - **Guards:**
   - `tests/cases.test.ts` › "applies quiet hours and limits to the gate API too, in the contact's zone"
+
+### L-038: Catch an intermittent failure's own error text before guessing at its cause
+- **Seen:** For a whole day a test file was sometimes marked failed with every test in it passing (about 1 run in 6). Guesses (hook timeouts, unhandled errors) went nowhere because the run's output was never kept; looping the suite with the output saved caught it: dropping the test database with `WITH (FORCE)` could not end an autovacuum worker the server was running there, "permission denied to terminate process" (Control Tower email alerts work, 2026-10-10).
+- **Rule:** When a failure will not reproduce on demand, keep the full output of every run until it happens again, and read the error before changing anything. Test teardown that drops a database retries when the server's own background work is in the way.
+- **Guards:**
+  - `tests/helpers.test.ts` › "drops a test database even when the server's own worker is still in it, and stops on any other error"

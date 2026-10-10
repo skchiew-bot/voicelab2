@@ -7,7 +7,8 @@ import { fundingStatus } from './funding-monitor.js';
 import { healthMap } from './resilience.js';
 
 export type Severity = 'high' | 'medium' | 'low';
-export interface Alert { severity: Severity; code: string; message: string; link?: string }
+/** `scope` separates alerts of one kind about one thing (a provider's funding in each currency, its failover state). */
+export interface Alert { severity: Severity; code: string; message: string; link?: string; scope?: string }
 
 const SEVERITY_ORDER: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
 const FAILING_MIN_CALLS = 5;     // too few calls say nothing about a provider
@@ -77,7 +78,7 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
 
   // ---- derived alerts
   const alerts: Alert[] = [];
-  const add = (severity: Severity, code: string, message: string, link?: string) => alerts.push({ severity, code, message, link });
+  const add = (severity: Severity, code: string, message: string, link?: string, scope?: string) => alerts.push(scope === undefined ? { severity, code, message, link } : { severity, code, message, link, scope });
   const telephony = providers.filter((p) => p.kind === 'telephony' && p.status === 'active');
 
   if (!hasMyr) add('high', 'no_fx_myr', 'No MYR exchange rate is in force, so calls cannot be costed.', '#/rates');
@@ -120,7 +121,7 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   for (const f of funding) {
     // Funding is recorded by hand today (calls do not deduct from it), so this flags a recorded balance that has run out.
     // A disabled provider is no longer in use, so an empty balance there is not news.
-    if (f.status === 'active' && toScaled(String(f.balance)) <= 0n) add('high', 'funding_empty', `${f.provider}: the recorded funding balance is ${fromScaled(toScaled(String(f.balance)))} ${f.currency}.`, `#/providers/${f.provider_id}`);
+    if (f.status === 'active' && toScaled(String(f.balance)) <= 0n) add('high', 'funding_empty', `${f.provider}: the recorded funding balance is ${fromScaled(toScaled(String(f.balance)))} ${f.currency}.`, `#/providers/${f.provider_id}`, String(f.currency).trim());
   }
 
   // Failover and capacity: what the system is doing to keep calls alive, so a person hears about it too.
@@ -131,13 +132,13 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
     const state = health.get(p.id) ?? 'healthy';
     if (p.status === 'active' && state !== 'healthy') {
       const why = (await c.query('SELECT reason FROM provider_health WHERE provider_id = $1', [p.id])).rows[0]?.reason ?? '';
-      add('high', 'provider_unhealthy', `${p.name} is ${state === 'unfunded' ? 'out of funding' : 'failed over'}: calls are going to other providers. ${why}`.trim(), `#/providers/${p.id}`);
+      add('high', 'provider_unhealthy', `${p.name} is ${state === 'unfunded' ? 'out of funding' : 'failed over'}: calls are going to other providers. ${why}`.trim(), `#/providers/${p.id}`, state);
     }
   }
   for (const f of await fundingStatus(c)) {
     if (f.providerStatus !== 'active') continue;
-    if (f.level === 'critical') add('high', 'funding_critical', `${f.provider}: the funding balance (${fromScaled(toScaled(String(f.balance)))} ${f.currency}) is below its critical level.`, `#/providers/${f.providerId}`);
-    else if (f.level === 'warn') add('medium', 'funding_low', `${f.provider}: the funding balance (${fromScaled(toScaled(String(f.balance)))} ${f.currency}) is below its warning level.`, `#/providers/${f.providerId}`);
+    if (f.level === 'critical') add('high', 'funding_critical', `${f.provider}: the funding balance (${fromScaled(toScaled(String(f.balance)))} ${f.currency}) is below its critical level.`, `#/providers/${f.providerId}`, f.currency);
+    else if (f.level === 'warn') add('medium', 'funding_low', `${f.provider}: the funding balance (${fromScaled(toScaled(String(f.balance)))} ${f.currency}) is below its warning level.`, `#/providers/${f.providerId}`, f.currency);
   }
   // A call the system dropped is loud: it is an alert the moment it is flagged, until someone has acknowledged it.
   const faults = (await c.query(`SELECT count(*)::int AS n FROM calls c WHERE c.fault AND NOT EXISTS (SELECT 1 FROM fault_acks a WHERE a.call_id = c.id)`)).rows[0].n as number;
@@ -161,9 +162,14 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
 
   // People expect alerts by email; with no mail service connected none reach them. Say so where they will look.
   if (ctx.mailConnected === false) {
-    const subs = (await c.query('SELECT count(*)::int AS n FROM alert_subscriptions WHERE ended_at IS NULL')).rows[0].n as number;
+    const subs = (await c.query(`SELECT count(*)::int AS n FROM alert_subscriptions s JOIN users u ON u.id = s.user_id
+                                  WHERE s.ended_at IS NULL AND u.role IN ('internal_admin', 'internal_viewer') AND u.disabled_at IS NULL`)).rows[0].n as number;
     if (subs > 0) add('medium', 'email_not_connected', `${subs} ${subs === 1 ? 'person is' : 'people are'} subscribed to alerts by email, but no mail service is connected, so no email is being sent.`, '#/tower');
   }
+  // An alert email that was refused, or whose outcome is unknown, means someone may not have heard about something.
+  const badMail = (await c.query(
+    `SELECT count(*)::int AS n FROM alert_deliveries WHERE kind = 'alert' AND status IN ('failed', 'unknown') AND created_at > now() - interval '24 hours'`)).rows[0].n as number;
+  if (badMail > 0) add('medium', 'alert_email_problem', `${badMail} alert email${badMail === 1 ? ' was' : 's were'} refused or may not have arrived in the last 24 hours; check that the people concerned saw the alert.`, '#/tower');
   alerts.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
   return {
     generatedAt: new Date().toISOString(), alerts, activeCalls, activeTotal, blocked24h, providers: providerViews, funding,

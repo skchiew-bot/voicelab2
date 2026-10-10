@@ -9,8 +9,9 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p admin",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p admin && tsc --noEmit -p portal",
     "build:admin": "vite build admin",
+    "build:portal": "vite build portal",
     "dev:admin": "vite admin",
     "test": "vitest run",
     "migrate": "tsx src/cli.ts migrate",

@@ -41,6 +41,10 @@ Register the numbers you own with `POST /internal/numbers`; an inbound call is r
 
 Staff sign in with an API token. The console opens on the **Control Tower** (what needs attention, project progress, live calls, provider health, funding, cost and margin). Other screens: Workflows, Providers, Clients, Rates (FX and the client rate card), Numbers, Do not call, and Calls (cost by campaign, each call's timeline and cost lines, reconciliation and re-pricing). Providers: add one from a form built from the adapter's declared settings, set capabilities, add charging versions, confirm rates, record funding. Clients: add a client, grant credits, add projects, create users (their token is shown once). The **Working on** menu picks one client for every screen that works on one client. Users: add staff (admin, or read only: every screen, no changes) and disable any user; a disabled token stops working at once. Jobs: the sweeps the app runs by itself (set `SCHEDULER=off` on a server that should not run them), when each last ran, and controls to turn one off, change its interval or run it now.
 
+## Client portal
+
+Clients sign in at `/portal/` with the API token their organisation was given (a separate sign-in from the staff console). Everyone sees the balance, the last 30 days per project and their calls with the credits each drew; client admins also add and disable their own organisation's users. Nothing about providers, provider cost or margin is shown.
+
 ## API (Phase 0)
 
 All requests send `Authorization: Bearer <token>`. `/internal/*` is Daythree staff only (read-only staff may only `GET`); `/client/*` is a tenant's own data.
@@ -61,6 +65,8 @@ All requests send `Authorization: Bearer <token>`. `/internal/*` is Daythree sta
 | `POST /internal/providers/:id/funding` | Provider funding ledger (internal only) |
 | `POST /internal/tenants/:id/credits` | Client credit ledger |
 | `GET /client/credits` | A client's own balance and recent entries |
+| `GET /client/me`, `GET /client/summary`, `GET /client/calls` | Who is signed in; balance and the last 30 days per project; the client's own calls, newest first (`limit`, `before`, `projectId`) |
+| `GET /client/users`, `POST /client/users`, `POST /client/users/:id/disable` | A client admin's own organisation's users (token shown once) |
 | `POST /internal/fx`, `GET /internal/fx` | FX rates (units of a currency per 1 USD); MYR is required to cost calls |
 | `POST /internal/rate-card`, `GET /internal/rate-card` | Client credits per billed minute and the value of a credit; credits are zero until one exists |
 | `POST /internal/calls/:callId/cost` | Price a call from the rates in force when it happened |

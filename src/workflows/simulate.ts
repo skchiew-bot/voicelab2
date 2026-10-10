@@ -47,7 +47,10 @@ export function evaluateScenario(s: Scenario, result: { state: RunState; records
   if (s.expect?.handoff !== undefined && !records.some((r) => r.type === 'handoff' && r.payload.to === s.expect!.handoff)) {
     failures.push(`Expected a handoff to "${s.expect.handoff}", and there was none.`);
   }
-  const contact = records.find((r) => r.type === 'end')?.payload.contact ?? 'none';
-  if (s.expect?.contact !== undefined && contact !== s.expect.contact) failures.push(`Expected the call to end as "${s.expect.contact}" but it ended as "${String(contact)}".`);
+  const end = records.find((r) => r.type === 'end');
+  const contact = end?.payload.contact ?? 'none';
+  if (s.expect?.contact !== undefined && (!end || contact !== s.expect.contact)) {
+    failures.push(end ? `Expected the call to end as "${s.expect.contact}" but it ended as "${String(contact)}".` : `Expected the call to end as "${s.expect.contact}" but it had not ended.`);
+  }
   return { name: s.name, passed: failures.length === 0, outcome: state.outcome ?? null, failures };
 }

@@ -25,6 +25,7 @@ export async function recordOutcome(
   if (call.status !== 'completed') throw new AppError(409, 'Only an answered call (one that completed) has an outcome. Unanswered and failed calls are counted from their status.');
   if (e.callback && !validTimeZone(e.callback.timeZone)) throw new AppError(400, 'That is not a time zone name, e.g. Asia/Kuala_Lumpur.');
   if (e.callback && e.outcome === 'wrong_number') throw new AppError(400, 'A wrong number has no callback time.');
+  await lockOutcomes(c, callId);
   const row = (await c.query(
     `INSERT INTO outbound_outcomes (tenant_id, project_id, call_id, outcome, callback_day, callback_hour, callback_tz, recorded_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, call_id, outcome, callback_day, callback_hour, callback_tz, created_at`,
@@ -34,14 +35,25 @@ export async function recordOutcome(
 }
 
 /**
+ * Statements about one call's outcome are made one at a time, so a workflow's can see whether a person has spoken. A lock
+ * of its own: the workflow's statement is made while its run's row is held, and the call's row is taken before the run's
+ * everywhere else, so taking the call's row here could deadlock.
+ */
+const lockOutcomes = (c: pg.PoolClient, callId: string) => c.query(`SELECT pg_advisory_xact_lock(hashtext('outbound_outcome:' || $1))`, [callId]);
+
+/**
  * A live call's workflow ended at a node that says how the call turned out: that is recorded as the call's outcome, in
- * the same step that ends the run, with no person named. Only an outbound call has one. A person can still correct it:
- * the latest statement is the current one. The call may not have completed yet (its end is reported after the
+ * the same step that ends the run, with no person named. Only an outbound call has one. A person can still correct it,
+ * and the latest statement is the current one; once a person has spoken, the workflow records nothing. The call may not have completed yet (its end is reported after the
  * workflow's); the analytics count an outcome only once the call has.
  */
 export async function recordWorkflowOutcome(c: pg.PoolClient, e: { callId: string; runId: string; contact: Outcome }) {
   const call = (await c.query('SELECT tenant_id, project_id, direction FROM calls WHERE id = $1', [e.callId])).rows[0];
   if (!call || call.direction !== 'outbound') return null;
+  // A person's statement is never replaced by the workflow's, even one that lands after it (a reply still being applied
+  // when the call ended and someone classified it).
+  await lockOutcomes(c, e.callId);
+  if ((await c.query('SELECT 1 FROM outbound_outcomes WHERE call_id = $1 AND recorded_by IS NOT NULL LIMIT 1', [e.callId])).rowCount) return null;
   const row = (await c.query(
     `INSERT INTO outbound_outcomes (tenant_id, project_id, call_id, outcome) VALUES ($1,$2,$3,$4) RETURNING id`,
     [call.tenant_id, call.project_id, e.callId, e.contact])).rows[0];

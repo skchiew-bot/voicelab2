@@ -38,6 +38,12 @@ describe('an end that says how the call turned out', () => {
     expect(direct.records.find((x) => x.type === 'end')?.payload).toEqual({ outcome: 'checked', contact: 'wrong_number' });
   });
 
+  it('carries only a known call outcome, even from a version saved before outcomes were checked', async () => {
+    const old = { start: 'x', variables: [], nodes: { x: { type: 'end', outcome: 'done', contact: 'reached <b>' } } } as unknown as WorkflowDefinition;
+    const r = await start('old', {}, { load: () => old });
+    expect(r.records.filter((x) => x.type === 'reached_end' || x.type === 'end').map((x) => x.payload)).toEqual([{ outcome: 'done' }, { outcome: 'done' }]);
+  });
+
   it('can be expected by a rehearsal, as an outcome or as none', async () => {
     const deps: Deps = { load: () => flow };
     const ran = async (reply: string) => {
@@ -50,6 +56,10 @@ describe('an end that says how the call turned out', () => {
     expect(evaluateScenario({ name: 'mumble', variables: {}, expect: { contact: 'none' } }, await ran('hmm')).passed).toBe(true);
     const wrong = evaluateScenario({ name: 'no', variables: {}, expect: { contact: 'contacted' } }, await ran('no'));
     expect(wrong.failures).toEqual(['Expected the call to end as "contacted" but it ended as "rejected".']);
+    // a call still waiting for the caller has not ended at all, so it ends as nothing, not as "none"
+    const waiting = await start('flow', {}, deps);
+    const still = evaluateScenario({ name: 'silent', variables: {}, expect: { contact: 'none' } }, { state: waiting.state, records: waiting.records, unusedReplies: 0 });
+    expect(still.failures).toEqual(['The call was still waiting for the caller after the last scripted reply.', 'Expected the call to end as "none" but it had not ended.']);
   });
 });
 
@@ -159,6 +169,22 @@ describe('a live outbound call whose workflow ends at an end that says how it tu
     const corrected = await stats();
     expect([corrected.contacted, corrected.thirdParty]).toEqual([after.contacted - 1, after.thirdParty + 1]);
     expect((await outcomesOf(call.id)).map((o) => o.outcome)).toEqual(['contacted', 'third_party']);
+  });
+
+  it('never replaces what a person said, even when the workflow\'s outcome lands after it', async () => {
+    const call = await liveCall();
+    const r = await live(call.id);
+    // The caller hung up while the answer was being worked out; the call completed and a supervisor classified it.
+    await env.pool.query(`UPDATE calls SET status = 'completed', ended_at = now() WHERE id = $1`, [call.id]);
+    await must(post(`/internal/calls/${call.id}/outcome`, { outcome: 'third_party' }));
+    await replyRunSpoken(runs(), r.view.id, 'yes', r.view.version);                  // the workflow's "contacted" lands late
+    expect((await env.pool.query('SELECT status, outcome FROM workflow_runs WHERE id = $1', [r.view.id])).rows[0]).toEqual({ status: 'ended', outcome: 'talked' });
+    expect((await outcomesOf(call.id)).map((o) => [o.outcome, o.recorded_by === null])).toEqual([['third_party', false]]);
+  });
+
+  it('refuses a rehearsal expecting an outcome that does not exist', async () => {
+    const r = await post(`/internal/workflows/${wfId}/simulate`, { scenarios: [{ name: 'x', variables: {}, replies: ['yes'], expect: { outcome: 'talked', contact: 'reached' } }] });
+    expect(r.statusCode).toBe(400);
   });
 
   it('is recorded when the call runs through the live voice link', async () => {

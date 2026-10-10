@@ -349,7 +349,21 @@ function main() {
       // lessons did not load; the user-level fallback (devlog-fallback.mjs) is logging it instead.
       line.via = 'fallback';
       context += `Dev Control Tower: this session was opened outside the repository, so the repository's hooks, CLAUDE.md and lessons did not load. `
-        + `The user-level fallback hook is logging it to ${root} instead. Read ${path.join(root, 'CLAUDE.md')} and ${path.join(root, 'devlog', 'lessons.md')} before working.\n`;
+        + `The user-level fallback hook is logging it to ${root} instead. Read ${path.join(root, 'CLAUDE.md')} and ${path.join(root, 'devlog', 'lessons.md')} before working, `
+        + `and run the devlog commands below from ${root}.\n`;
+    } else if (process.env.CLAUDE_CODE_REMOTE === 'true') {
+      // Lesson L-020: a monitor reports its own gaps. In a cloud session, check that the fallback
+      // that logs a session opened outside the repository is in place. No installer on this
+      // branch, or a failed check, is unknown: recorded as nothing and never warned about.
+      const installer = path.join(root, 'scripts', 'install-devlog-fallback.mjs');
+      let state = '';
+      try { state = execFileSync(process.execPath, [installer, '--check'], { cwd: root, encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* unknown */ }
+      if (['installed', 'missing', 'outdated', 'unreadable'].includes(state)) line.fallback = state;
+      if (line.fallback && line.fallback !== 'installed') {
+        const what = { missing: 'is not installed', outdated: 'is out of date', unreadable: 'cannot be checked, because the user settings file is not valid JSON' }[line.fallback];
+        context += `WARNING (dev Control Tower, lesson L-020): the user-level fallback hook ${what}, so a session Claude Code opens outside the repository may not be logged. `
+          + `Tell the owner the cloud environment's setup script should run \`node ${installer} || true\`. To cover this container now, run \`node scripts/install-devlog-fallback.mjs\`.\n`;
+      }
     }
     context += 'Dev Control Tower: this session is logged to devlog/.spool/. Before each commit run '
       + '`node scripts/devlog-flush.mjs` and commit devlog/activity/ with the work. '

@@ -123,7 +123,10 @@ export const PHASES: PhaseProgress[] = [
       'The sweep (`POST /internal/learning/sweep`) that finishes approved scripts and screens promoted nodes for drift must be run on a schedule by the deployment',
       'The frequency, similarity, confidence and drift thresholds are conservative defaults and have not been tuned',
       'Drift compares how callers reacted before and after promotion; a change in the caller population over the same period would look like drift',
-      'A promoted script is a layer over the workflow, not a part of its version: demoting or promoting changes what an in-flight call says at its next line',
+      'A promoted script is a layer over the workflow, not a part of its version: promoting or demoting changes what an in-flight call says at its next line',
+      'Turns from staging test calls count as evidence and a promoted script is spoken in every environment of the client; evidence is not yet kept apart by environment',
+      'Simulations do not use promoted scripts, so the production gate does not exercise what live calls will say; the cluster report is recomputed on each view and will need caching on a busy client',
+      'A person can approve a script that someone else asked about, and it need not be a different person from the one who drew it up',
     ],
   },
   {

@@ -17,6 +17,13 @@ describe('putting the values of known variables back as slots', () => {
   });
 });
 
+describe('values that happen to appear in a line', () => {
+  it('does not turn a short coincidence into a slot', () => {
+    const r = slotify('You have 14 days to settle, Aisha.', { amount: 14, name: 'Aisha' }, []);
+    expect(r.text).toBe('You have 14 days to settle, {{name}}.');
+  });
+});
+
 describe('grouping lines that say the same thing', () => {
   it('scores word overlap, with slots as words named for the slot', () => {
     expect(similarity('Can you pay this week?', 'Can you pay this week')).toBe(1);

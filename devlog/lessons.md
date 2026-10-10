@@ -9,7 +9,7 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:** one or more lines `` `path` › "exact text" ``. The text must appear in that file, usually a test title. The test fails if a guard's file or text is removed, so a lesson cannot quietly lose its protection.
 
 ### L-001: Check-then-act needs a lock or an atomic claim
-- **Seen:** 6 times. Racing final callbacks ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)); two reconciliation checks at once ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)); two replies both firing an integration write ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)); the dial retry bypassing the capacity lock, and inbound capacity decided without it ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)); concurrent rate changes (Phase 0). Two approved changes to one flow could both go live, the older silently undoing the newer; the drop watchdog could flag a call twice (Phase 5 independent review, 2026-10-10).
+- **Seen:** 6 times. Racing final callbacks ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)); two reconciliation checks at once ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)); two replies both firing an integration write ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)); the dial retry bypassing the capacity lock, and inbound capacity decided without it ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)); concurrent rate changes (Phase 0). Two approved changes to one flow could both go live, the older silently undoing the newer; the drop watchdog could flag a call twice (Phase 5 independent review, 2026-10-10). Two audio finishes at once recorded every phrase twice and spent the voice provider twice (Phase 6 independent review, 2026-10-10).
 - **Rule:** Any "read state, decide, write" path that two requests can reach at once takes a lock (`pg_advisory_xact_lock`, `SELECT … FOR UPDATE`) or claims the work atomically, and re-checks inside the lock. Write the simultaneous-requests test first.
 - **Guards:**
   - `tests/telephony.test.ts` › "survives the same final callback arriving three times at once"
@@ -18,6 +18,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/concurrency.test.ts` › "never exceeds the ceiling when dials arrive at the same moment"
   - `tests/concurrency.test.ts` › "counts a caller on hold against the provider"
   - `tests/changes.test.ts` › "is refused, so approving one change never silently undoes another"
+  - `tests/learning.test.ts` › "records the audio once when two finishes arrive together"
 
 ### L-002: Never repeat an action whose outcome is unknown
 - **Seen:** The dial retry re-dialled after a timeout, risking two calls to one person ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)).
@@ -54,13 +55,14 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/qa.test.ts` › "stores no score at all when nothing could be scored, and scores the call once a model is connected"
 
 ### L-006: One bad record must not take a whole feature down
-- **Seen:** 3 times. One unreadable secret returned a 500 for the whole Control Tower ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). One provider priced in a currency with no exchange rate made every pooled dial fail ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). A very large number gave a 500 instead of a 400 ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)).
+- **Seen:** 3 times. One unreadable secret returned a 500 for the whole Control Tower ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). One provider priced in a currency with no exchange rate made every pooled dial fail ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). A very large number gave a 500 instead of a 400 ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). One script's audio failure aborted the whole sweep, so drift screening stopped for everyone (Phase 6 independent review, 2026-10-10).
 - **Rule:** Handle the bad item where it is: report it as an alert, rank it last, or refuse that input with a 4xx. Keep everything else working.
 - **Guards:**
   - `tests/control-tower.test.ts` › "is reported as an alert and does not take the whole Control Tower down"
   - `tests/phase3.test.ts` › "ranks a provider priced in a currency with no exchange rate last instead of failing every dial"
   - `tests/reconcile.test.ts` › "are refused with a clear error, not a server error"
   - `tests/qa.test.ts` › "keeps scoring the rest of a batch when the model fails on one call, and tries the failed one again next time"
+  - `tests/learning.test.ts` › "does not stop the sweep when one script's audio fails, and names what it could not judge"
 
 ### L-007: Bill only for what was served
 - **Seen:** A caller who hung up in the queue was charged credits, and a served caller was billed for their time on hold. A promoted caller lost their agreed premium ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)).
@@ -153,10 +155,11 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "writes to the spool, which git ignores, so the working tree stays clean"
 
 ### L-020: Check that monitoring is running, not just installed
-- **Seen:** After a restart, Claude Code reopened a session with `/home/user` as its project folder, outside the repository, so the repository's hooks never loaded and nothing was logged for half an hour, silently (session on 2026-10-10).
+- **Seen:** After a restart, Claude Code reopened a session with `/home/user` as its project folder, outside the repository, so the repository's hooks never loaded and nothing was logged for half an hour, silently (session on 2026-10-10). The drift screen swallowed errors and said nothing about nodes it could not judge (Phase 6 independent review, 2026-10-10).
 - **Rule:** A monitor must report its own gaps. The dev Control Tower flags any session that commits while not being logged; when you see that warning, say so and record what ran by hand instead of leaving the gap. Usage can be recorded by running the hook with a Stop event for the session's transcript; it gathers every transcript of the session and counts each message once.
 - **Guards:**
   - `tests/devlog.test.ts` › "folds the board, splits a session's cost between its tasks exactly, links incidents to guarded lessons, and finds logging gaps"
+  - `tests/learning.test.ts` › "does not stop the sweep when one script's audio fails, and names what it could not judge"
 
 ### L-021: A guardrail that fires on normal work is worse than none
 - **Seen:** The first stop-loss rules told Claude to stop after three unrelated commands that shared a description, a `grep` that mentioned `vitest`, a large file read in chunks, and test runs broken on purpose to prove a test can fail (independent review, 2026-10-10). The Phase 5 turn reader treated a plain "no" and "no, thank you" as upset, so two declined questions handed a call to a person; the drop watchdog treated a reply still being worked on as dropped (Phase 5 independent review, 2026-10-10).
@@ -187,3 +190,23 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:**
   - `tests/devlog.test.ts` › "classes every branch as the trunk, part of the plan, task-only or a fork"
   - `CLAUDE.md` › "never create or link a task just to clear a warning"
+
+### L-025: Derived state is valid only for the thing it was derived from
+- **Seen:** A promoted script was looked up by workflow, node and language only, so after a deploy changed the node callers kept hearing the old script until a scheduled screen ran; a script learned in one journey context was spoken in every context; and the screen that looked for a changed node could be tripped by simulating an undeployed draft (Phase 6 independent review, 2026-10-10).
+- **Rule:** Anything learned or derived from a definition (a script, a cache, a score) carries what it was derived from (here the node's hash and the journey context) and is used only when that still matches, checked at the point of use, not by a job that may not be running. A rehearsal of something undeployed never counts as evidence about what is live.
+- **Guards:**
+  - `tests/learning.test.ts` › "is not demoted by simulating a draft, but stops being spoken the moment a deploy changes its node"
+  - `tests/learning.test.ts` › "speaks a script only in the journey context it was learned in"
+
+### L-026: Record what a model cost, even when its answer is thrown away
+- **Seen:** The script distiller was asked before the check for an existing script, so a scan paid for model calls whose tokens were never written down; council tokens were lost when a person decided first (Phase 6 independent review, 2026-10-10).
+- **Rule:** Check whether the answer is needed before asking a model, and record the model, tier and tokens of every call that is made, in its own step, whether or not the answer is used.
+- **Guards:**
+  - `tests/learning.test.ts` › "does not ask a model to write a script for a node that already has one in review, and refuses to approve a script that fails the rules"
+
+### L-027: A human override must pass the same rule checks as the automatic path
+- **Seen:** A person could approve a script that the rule checks had already failed, and the approval was reported as an error after it had committed (Phase 6 independent review, 2026-10-10).
+- **Rule:** Re-run the deterministic checks inside any manual approval, and report a failure after a committed step as a warning on the committed result, not as a failed request.
+- **Guards:**
+  - `tests/learning.test.ts` › "does not ask a model to write a script for a node that already has one in review, and refuses to approve a script that fails the rules"
+  - `tests/learning.test.ts` › "leaves a low-confidence pass for a person, who can approve it; it stays approved, still live, until its audio exists"

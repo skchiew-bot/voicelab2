@@ -349,6 +349,7 @@ Not built or not proven:
 - Clustering is by word overlap, not embeddings, and every threshold is an untuned default.
 - The sweep that finishes approved scripts and screens for drift must be scheduled by the deployment.
 - Drift cannot tell a worse script from a change in who is calling.
+- Evidence is not yet kept apart by environment (staging test calls count), simulations do not use promoted scripts, and a script change reaches a call already under way at its next line.
 
 **Exit criteria**
 - At least one node is promoted automatically, with an audit trail.

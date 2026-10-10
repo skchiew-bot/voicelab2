@@ -1,11 +1,11 @@
-import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
 import { withActor } from '../db.js';
 import { AppError } from '../errors.js';
-import { checkScript, clusterTurns, fixedChars, slotify, slotsIn, type Cluster } from '../learning/cluster.js';
+import { checkScript, clusterTurns, fixedChars, nodeHash as hashNode, slotify, slotsIn, type Cluster } from '../learning/cluster.js';
 import { SLOT_RE, type WorkflowDefinition } from '../workflows/definition.js';
 import { normalizeSpoken } from '../workflows/stitch.js';
+import { redactNumbers } from '../telephony/types.js';
 import { audit } from './audit.js';
 import { recordDecision, modelFor, type Tier } from './ai-decisions.js';
 import { addRecording, recordingIndex, type ContentType } from './recordings.js';
@@ -124,22 +124,34 @@ export async function getPromotion(c: pg.PoolClient, id: string) {
 }
 
 async function lock(c: pg.PoolClient, key: string) { await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key]); }
+/** Run something that spends money or calls a model at most once at a time per key; a second caller is told it is busy. */
+async function exclusive<T>(pool: pg.Pool, key: string, fn: () => Promise<T>): Promise<{ busy: true } | { busy: false; value: T }> {
+  const held = await pool.connect();
+  try {
+    if (!(await held.query('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [key])).rows[0].ok) return { busy: true };
+    try { return { busy: false, value: await fn() }; } finally { await held.query('SELECT pg_advisory_unlock(hashtext($1))', [key]); }
+  } finally { held.release(); }
+}
 async function event(c: pg.PoolClient, actorId: string | null, promotionId: string, kind: string, reason: string, detail: Record<string, unknown> = {}) {
   await c.query('INSERT INTO promotion_events (promotion_id, kind, actor_id, reason, detail) VALUES ($1,$2,$3,$4,$5)', [promotionId, kind, actorId, reason, JSON.stringify(detail)]);
 }
 
-/** The scripts speaking right now: what a call looks up before it asks a model. */
+/**
+ * The scripts speaking right now: what a call looks up before it asks a model. A script is spoken only for the context
+ * it was learned in, and only while the node still says what it said when the script was written.
+ */
 export async function activePromotions(c: pg.PoolClient, tenantId: string) {
-  const rows = (await c.query(`SELECT ${PROMO_COLS} FROM promotions p WHERE p.tenant_id = $1`, [tenantId])).rows.map(shape).filter((r) => r.status === 'promoted');
-  const byKey = new Map(rows.map((r) => [`${r.workflow}\n${r.node}\n${r.language}`, { id: r.id as string, script: r.script as string }]));
-  return (workflow: string, node: string, language: string) => byKey.get(`${workflow}\n${node}\n${language}`);
+  const rows = (await c.query(`SELECT ${PROMO_COLS}, p.node_hash FROM promotions p WHERE p.tenant_id = $1`, [tenantId])).rows.map((r) => ({ ...shape(r), node_hash: r.node_hash as string })).filter((r) => r.status === 'promoted');
+  const byKey = new Map(rows.map((r) => [`${r.workflow}\n${r.node}\n${r.language}\n${r.context_kind}\n${r.context_topic}`, { id: r.id, script: r.script, hash: r.node_hash }]));
+  return (workflow: string, node: { prompt?: string; text?: unknown }, id: string, language: string, context: { kind: string; topic: string }) => {
+    const hit = byKey.get(`${workflow}\n${id}\n${language}\n${context.kind}\n${context.topic}`);
+    return hit && hit.hash === hashNode(node) ? { id: hit.id, script: hit.script } : undefined;
+  };
 }
 
 // ------------------------------------------------------------------------------------------------ clusters
-const nodeHash = (def: WorkflowDefinition | undefined, node: string): string => {
-  const n = def && Object.hasOwn(def.nodes, node) ? def.nodes[node] as { prompt?: string; text?: unknown } : undefined;
-  return createHash('sha256').update(JSON.stringify({ prompt: n?.prompt ?? null, text: n?.text ?? null })).digest('hex');
-};
+const nodeHash = (def: WorkflowDefinition | undefined, node: string): string =>
+  hashNode(def && Object.hasOwn(def.nodes, node) ? def.nodes[node] as { prompt?: string; text?: unknown } : undefined);
 
 async function definitionFor(c: pg.PoolClient, runId: string, workflow: string): Promise<WorkflowDefinition | undefined> {
   const pins = (await c.query('SELECT pins FROM workflow_runs WHERE id = $1', [runId])).rows[0]?.pins as Record<string, string> | undefined;
@@ -202,10 +214,13 @@ export async function distil(d: LearnDeps, actorId: string | null, e: { tenantId
     const ctx = await withActor(d.pool, { kind: 'internal' }, async (c) => {
       const last = (await c.query('SELECT run_id FROM learning_turns WHERE tenant_id = $1 AND workflow = $2 AND node = $3 ORDER BY id DESC LIMIT 1', [e.tenantId, g.workflow, g.node])).rows[0];
       const def = last ? await definitionFor(c, last.run_id, g.workflow) : undefined;
-      const rejected = (await c.query(
-        `SELECT p.script FROM promotions p WHERE p.tenant_id = $1 AND p.workflow = $2 AND p.node = $3 AND p.language = $4`, [e.tenantId, g.workflow, g.node, g.language])).rows.map((r) => r.script as string);
-      return { def, avoid: rejected };
+      const earlier = (await c.query(
+        `SELECT ${PROMO_COLS} FROM promotions p WHERE p.tenant_id = $1 AND p.workflow = $2 AND p.node = $3 AND p.language = $4 AND p.context_kind = $5 AND p.context_topic = $6`,
+        [e.tenantId, g.workflow, g.node, g.language, g.contextKind, g.contextTopic])).rows.map(shape);
+      return { def, avoid: earlier.map((p) => p.script), open: earlier.some((p) => LIVE.includes(p.status)) };
     });
+    // A node that already has a script in review, approved or promoted is not asked about again: that would only spend a model call.
+    if (ctx.open) continue;
     const node = ctx.def && Object.hasOwn(ctx.def.nodes, g.node) ? ctx.def.nodes[g.node] as { prompt?: string } : undefined;
     const nodePrompt = node?.prompt ?? '';
     let script = top.canonical; let by = 'rules'; let confidence = 1;
@@ -222,18 +237,27 @@ export async function distil(d: LearnDeps, actorId: string | null, e: { tenantId
       }
       if (normalizeSpoken(out.script) !== '') { script = normalizeSpoken(out.script); by = model.model; confidence = out.confidence; }
     }
-    if (ctx.avoid.includes(script)) { skipped.push({ workflow: g.workflow, node: g.node, reason: 'This script was already proposed for this node and is not new evidence.' }); continue; }
+    // Whatever a model was asked is recorded, whether or not its answer is used.
+    const spill = async () => {
+      if (!usage.length) return;
+      await withActor(d.pool, { kind: 'internal' }, async (c) => {
+        for (const u of usage) await recordDecision(c, { tenantId: e.tenantId, task: 'distill_script', subjectType: 'learning_node', subjectId: `${g.workflow}:${g.node}`, decision: 'rejected',
+          reason: `A script for ${g.node} was written but not used.`, model: u.model, tier: u.tier, inputTokens: u.inputTokens, outputTokens: u.outputTokens, confidence: u.confidence, escalatedFrom: u.escalatedFrom });
+      });
+    };
+    if (ctx.avoid.includes(script)) { await spill(); skipped.push({ workflow: g.workflow, node: g.node, reason: 'This script was already proposed for this node and is not new evidence.' }); continue; }
     const check = checkScript(script, { variables: ctx.def?.variables ?? [], sensitive: ctx.def?.sensitiveVariables ?? [] });
     // A model's script that fails the rules gives way to the cluster's own wording, which is what callers actually heard.
     if (!check.ok && by !== 'rules') {
       const fallback = checkScript(top.canonical, { variables: ctx.def?.variables ?? [], sensitive: ctx.def?.sensitiveVariables ?? [] });
       if (fallback.ok && !ctx.avoid.includes(top.canonical)) { script = top.canonical; by = 'rules'; confidence = 1; check.ok = true; check.problems = []; }
     }
-    if (!check.ok) { skipped.push({ workflow: g.workflow, node: g.node, reason: check.problems.join(' ') }); continue; }
+    if (!check.ok) { await spill(); skipped.push({ workflow: g.workflow, node: g.node, reason: check.problems.join(' ') }); continue; }
 
     const id = await withActor(d.pool, { kind: 'internal' }, async (c) => {
-      await lock(c, `promo:${e.tenantId}:${g.workflow}:${g.node}:${g.language}`);
-      const open = (await c.query(`SELECT ${PROMO_COLS} FROM promotions p WHERE p.tenant_id = $1 AND p.workflow = $2 AND p.node = $3 AND p.language = $4`, [e.tenantId, g.workflow, g.node, g.language])).rows.map(shape);
+      await lock(c, `promo:${e.tenantId}:${g.workflow}:${g.node}:${g.language}:${g.contextKind}:${g.contextTopic}`);
+      const open = (await c.query(`SELECT ${PROMO_COLS} FROM promotions p WHERE p.tenant_id = $1 AND p.workflow = $2 AND p.node = $3 AND p.language = $4 AND p.context_kind = $5 AND p.context_topic = $6`,
+        [e.tenantId, g.workflow, g.node, g.language, g.contextKind, g.contextTopic])).rows.map(shape);
       if (open.some((p) => LIVE.includes(p.status))) return null;
       const prev = open.filter((p) => p.status === 'demoted').sort((a, b) => +b.created_at.getTime() - a.created_at.getTime())[0];
       const row = (await c.query(
@@ -249,13 +273,21 @@ export async function distil(d: LearnDeps, actorId: string | null, e: { tenantId
       await audit(c, actorId, 'learning.distil', 'promotion', row, { workflow: g.workflow, node: g.node, support: top.support });
       return row;
     });
-    if (id) created.push(id);
+    if (id) created.push(id); else await spill();
   }
   return { created, skipped };
 }
 
 // ------------------------------------------------------------------------------------------------ councils
 const COUNCILS = [['quality', 'council_quality'], ['cx', 'council_cx']] as const;
+
+/** The rule checks a script must pass, against the node as it is defined now. */
+async function scriptChecks(c: pg.PoolClient, p: PromotionRow) {
+  const last = (await c.query('SELECT run_id FROM learning_turns WHERE tenant_id = $1 AND workflow = $2 AND node = $3 ORDER BY id DESC LIMIT 1', [p.tenant_id, p.workflow, p.node])).rows[0];
+  const def = last ? await definitionFor(c, last.run_id, p.workflow) : undefined;
+  const node = def && Object.hasOwn(def.nodes, p.node) ? def.nodes[p.node] as { prompt?: string } : undefined;
+  return { checks: checkScript(p.script, { variables: def?.variables ?? [], sensitive: def?.sensitiveVariables ?? [] }), nodePrompt: node?.prompt ?? '' };
+}
 
 /**
  * The Quality Council and the Customer Experience Council each review a script. Only when both are present and both
@@ -269,13 +301,10 @@ export async function reviewPromotion(d: LearnDeps, actorId: string | null, prom
     const cfg = await getLearningConfig(c, p.tenant_id as string);
     const examples = (await c.query(
       `SELECT text FROM learning_turns WHERE tenant_id = $1 AND workflow = $2 AND node = $3 AND language = $4 GROUP BY text ORDER BY count(*) DESC LIMIT 5`, [p.tenant_id, p.workflow, p.node, p.language])).rows.map((r) => r.text as string);
-    const last = (await c.query('SELECT run_id FROM learning_turns WHERE tenant_id = $1 AND workflow = $2 AND node = $3 ORDER BY id DESC LIMIT 1', [p.tenant_id, p.workflow, p.node])).rows[0];
-    const def = last ? await definitionFor(c, last.run_id, p.workflow as string) : undefined;
-    const node = def && Object.hasOwn(def.nodes, p.node as string) ? def.nodes[p.node as string] as { prompt?: string } : undefined;
-    const checks = checkScript(p.script as string, { variables: def?.variables ?? [], sensitive: def?.sensitiveVariables ?? [] });
+    const { checks, nodePrompt } = await scriptChecks(c, p);
     const picks = [];
     for (const [name, task] of COUNCILS) picks.push({ name, task, cfg: await modelFor(c, task) });
-    return { p, cfg, examples, nodePrompt: node?.prompt ?? '', checks, picks };
+    return { p, cfg, examples, nodePrompt, checks, picks };
   });
   const opinions: { council: string; available: boolean; pass?: boolean; confidence?: number; concerns?: string[]; model?: string; tier?: Tier; inputTokens?: number; outputTokens?: number }[] = [];
   for (const pick of ctx.picks) {
@@ -286,16 +315,20 @@ export async function reviewPromotion(d: LearnDeps, actorId: string | null, prom
   }
   const clearFail = opinions.find((o) => o.available && o.pass === false && (o.confidence ?? 0) >= ctx.cfg.minConfidence);
   const allPass = opinions.every((o) => o.available && o.pass === true && (o.confidence ?? 0) >= ctx.cfg.minConfidence) && ctx.checks.ok;
+  // The councils were asked and their tokens spent: that is recorded even if someone else got to the script first.
+  await withActor(d.pool, { kind: 'internal' }, async (c) => {
+    for (const o of opinions) {
+      if (!o.available) continue;
+      await recordDecision(c, { tenantId: ctx.p.tenant_id, task: `council_${o.council}`, subjectType: 'promotion', subjectId: promotionId, decision: o.pass ? 'proceeded' : 'rejected',
+        reason: o.concerns?.join(' ') || (o.pass ? 'No concerns.' : 'Not approved.'), model: o.model, tier: o.tier, inputTokens: o.inputTokens, outputTokens: o.outputTokens, confidence: o.confidence });
+    }
+  });
   await withActor(d.pool, { kind: 'internal' }, async (c) => {
     await lock(c, `promo:${promotionId}`);
     const now = await getPromotion(c, promotionId);
     if (now.status !== 'in_review') throw new AppError(409, `This script is ${now.status}; it is not waiting for review.`);
     for (const o of opinions) {
       await event(c, actorId, promotionId, 'reviewed', o.available ? `${o.council} council: ${o.pass ? 'pass' : 'does not pass'} (${o.confidence}).${o.concerns?.length ? ` ${o.concerns.join(' ')}` : ''}` : `${o.council} council: none is set up, so this needs a person.`, { ...o });
-      if (o.available) {
-        await recordDecision(c, { tenantId: ctx.p.tenant_id as string, task: `council_${o.council}`, subjectType: 'promotion', subjectId: promotionId, decision: o.pass ? 'proceeded' : 'rejected',
-          reason: o.concerns?.join(' ') || (o.pass ? 'No concerns.' : 'Not approved.'), model: o.model, tier: o.tier, inputTokens: o.inputTokens, outputTokens: o.outputTokens, confidence: o.confidence });
-      }
     }
     if (clearFail) {
       await event(c, actorId, promotionId, 'rejected', `The ${clearFail.council} council turned it down: ${clearFail.concerns?.join(' ') || 'no reason given'}.`, { automatic: true });
@@ -305,8 +338,10 @@ export async function reviewPromotion(d: LearnDeps, actorId: string | null, prom
     await audit(c, actorId, 'learning.review', 'promotion', promotionId, { automatic: Boolean(clearFail || allPass) });
   });
   const status = (await withActor(d.pool, { kind: 'internal' }, (c) => getPromotion(c, promotionId))).status;
-  if (status === 'approved') await finishPromotion(d, actorId, promotionId);
-  return withActor(d.pool, { kind: 'internal' }, (c) => getPromotion(c, promotionId));
+  let audioError: string | undefined;
+  if (status === 'approved') { try { await finishPromotion(d, actorId, promotionId); } catch (err) { audioError = redactNumbers((err as Error).message).slice(0, 300); } }
+  const promotion = await withActor(d.pool, { kind: 'internal' }, (c) => getPromotion(c, promotionId));
+  return audioError ? { ...promotion, audioError } : promotion;
 }
 
 /** A person approves or turns down a script that was waiting for them. */
@@ -316,11 +351,18 @@ export async function decidePromotion(d: LearnDeps, actorId: string, promotionId
     await lock(c, `promo:${promotionId}`);
     const p = await getPromotion(c, promotionId);
     if (p.status !== 'in_review') throw new AppError(409, `This script is ${p.status}; it is not waiting for a decision.`);
+    if (e.decision === 'approved') {
+      const { checks } = await scriptChecks(c, p);
+      if (!checks.ok) throw new AppError(409, `This script fails the rule checks, so it cannot be approved: ${checks.problems.join(' ')}`);
+    }
     await event(c, actorId, promotionId, e.decision === 'approved' ? 'approved' : 'rejected', e.note?.trim() || (e.decision === 'approved' ? 'Approved by a person.' : 'Turned down.'), { automatic: false });
     await audit(c, actorId, `learning.${e.decision}`, 'promotion', promotionId, {});
   });
-  if (e.decision === 'approved') await finishPromotion(d, actorId, promotionId);
-  return withActor(d.pool, { kind: 'internal' }, (c) => getPromotion(c, promotionId));
+  // The approval stands even if the audio cannot be made now; the sweep tries again.
+  let audioError: string | undefined;
+  if (e.decision === 'approved') { try { await finishPromotion(d, actorId, promotionId); } catch (err) { audioError = redactNumbers((err as Error).message).slice(0, 300); } }
+  const promotion = await withActor(d.pool, { kind: 'internal' }, (c) => getPromotion(c, promotionId));
+  return audioError ? { ...promotion, audioError } : promotion;
 }
 
 // ------------------------------------------------------------------------------------------------ audio, then promotion
@@ -332,6 +374,12 @@ const fixedParts = (script: string) => script.split(new RegExp(SLOT_RE.source, '
  * are added by hand. Safe to run again.
  */
 export async function finishPromotion(d: LearnDeps, actorId: string | null, promotionId: string) {
+  // Recording spends money, so only one finish per script runs at a time; a second caller just sees where it stands.
+  const r = await exclusive(d.pool, `finish:${promotionId}`, () => finishInner(d, actorId, promotionId));
+  return r.busy ? withActor(d.pool, { kind: 'internal' }, (c) => getPromotion(c, promotionId)) : r.value;
+}
+
+async function finishInner(d: LearnDeps, actorId: string | null, promotionId: string) {
   const state = await withActor(d.pool, { kind: 'internal' }, async (c) => {
     const p = await getPromotion(c, promotionId);
     if (p.status !== 'approved') return null;
@@ -355,7 +403,7 @@ export async function finishPromotion(d: LearnDeps, actorId: string | null, prom
     const stillMissing = fixedParts(p.script as string).filter((t) => !index.find(p.language as string, t));
     if (made > 0) await event(c, actorId, promotionId, 'recorded', `${made} phrase${made === 1 ? '' : 's'} recorded (${madeChars} characters, spoken once).`, { phrases: made, characters: madeChars });
     if (stillMissing.length) return p;               // waiting for audio
-    const financial = await assess(c, p, 'promote').catch(() => null);
+    const financial = await safeAssess(c, p, 'promote');
     await event(c, actorId, promotionId, 'promoted', 'Every fixed phrase has a recording, so this node now plays its script instead of asking a model.', { financial });
     await audit(c, actorId, 'learning.promote', 'promotion', promotionId, { node: p.node });
     return getPromotion(c, promotionId);
@@ -365,31 +413,37 @@ export async function finishPromotion(d: LearnDeps, actorId: string | null, prom
 /** Promote anything approved whose audio has arrived since. Run on a schedule. */
 export async function sweepAudio(d: LearnDeps, actorId: string | null) {
   const ids = await withActor(d.pool, { kind: 'internal' }, async (c) => (await c.query('SELECT id FROM promotions')).rows.map((r) => r.id as string));
-  const promoted: string[] = [];
+  const promoted: string[] = []; const failed: string[] = [];
   for (const id of ids) {
     const before = await withActor(d.pool, { kind: 'internal' }, (c) => getPromotion(c, id));
     if (before.status !== 'approved') continue;
-    const after = await finishPromotion(d, actorId, id);
-    if (after?.status === 'promoted') promoted.push(id);
+    try { const after = await finishPromotion(d, actorId, id); if (after?.status === 'promoted') promoted.push(id); }
+    catch { failed.push(id); }       // one script's audio trouble must not stop the rest
   }
-  return { promoted };
+  return { promoted, audioFailed: failed };
 }
 
 // ------------------------------------------------------------------------------------------------ drift
 interface Reaction { n: number; sentiment: number | null; unheardRate: number | null; escalationRate: number | null; runs: number }
 
-async function reactions(c: pg.PoolClient, p: { tenant_id: string; workflow: string; node: string }, o: { from: Date | null; to: Date | null; promoted: boolean }): Promise<Reaction> {
+async function reactions(
+  c: pg.PoolClient, p: { tenant_id: string; workflow: string; node: string; language: string },
+  o: { from: Date | null; to: Date | null; promotionId: string | null; latest: number },
+): Promise<Reaction> {
   const q = (await c.query(
     `SELECT count(*)::int AS n, avg(x.sent) AS sentiment, avg(CASE WHEN x.unheard THEN 1 ELSE 0 END) AS unheard,
             count(DISTINCT x.run_id)::int AS runs, count(DISTINCT x.run_id) FILTER (WHERE x.escalated)::int AS escalated
        FROM (SELECT s.run_id, (h.payload->'analysis'->>'sentiment')::numeric AS sent, ((h.payload->'analysis'->>'understood') = 'false') AS unheard,
                     (r.state->'escalation'->>'node' = s.node) AS escalated
                FROM workflow_run_steps s JOIN workflow_runs r ON r.id = s.run_id
-               JOIN LATERAL (SELECT payload FROM workflow_run_steps h WHERE h.run_id = s.run_id AND h.seq > s.seq AND h.type = 'heard' AND h.node = s.node ORDER BY h.seq LIMIT 1) h ON true
+               JOIN LATERAL (SELECT payload FROM workflow_run_steps h WHERE h.run_id = s.run_id AND h.seq > s.seq AND h.type = 'heard' AND h.node = s.node AND h.workflow = s.workflow ORDER BY h.seq LIMIT 1) h ON true
               WHERE r.tenant_id = $1 AND r.kind IN ('live', 'test') AND s.type = 'say' AND s.workflow = $2 AND s.node = $3
-                AND (s.payload ? 'promotion') = $4 AND h.payload ? 'analysis'
-                AND ($5::timestamptz IS NULL OR s.created_at > $5) AND ($6::timestamptz IS NULL OR s.created_at <= $6)) x`,
-    [p.tenant_id, p.workflow, p.node, o.promoted, o.from, o.to])).rows[0];
+                AND coalesce(s.payload->>'lang', 'en') = $4
+                AND (CASE WHEN $5::text IS NULL THEN NOT (s.payload ? 'promotion') ELSE s.payload->>'promotion' = $5 END)
+                AND h.payload ? 'analysis'
+                AND ($6::timestamptz IS NULL OR s.created_at > $6) AND ($7::timestamptz IS NULL OR s.created_at <= $7)
+              ORDER BY s.created_at DESC, s.id DESC LIMIT $8) x`,
+    [p.tenant_id, p.workflow, p.node, p.language, o.promotionId, o.from, o.to, o.latest])).rows[0];
   return {
     n: q.n, runs: q.runs, sentiment: q.sentiment === null ? null : Number(q.sentiment), unheardRate: q.n ? Number(q.unheard) : null, escalationRate: q.runs ? q.escalated / q.runs : null,
   };
@@ -406,12 +460,13 @@ export async function driftVerdict(c: pg.PoolClient, promotionId: string): Promi
   const p = await getPromotion(c, promotionId);
   const cfg = await getLearningConfig(c, p.tenant_id as string);
   const at = new Date((p.events as { kind: string; created_at: Date }[]).filter((e) => e.kind === 'promoted').pop()!.created_at);
-  const baseline = await reactions(c, p as never, { from: null, to: at, promoted: false });
-  const promoted = await reactions(c, p as never, { from: at, to: null, promoted: true });
+  // The latest reactions are what counts: a script that served well for a long time and then went bad must not be averaged out.
+  const baseline = await reactions(c, p, { from: null, to: at, promotionId: null, latest: 1000 });
+  const promoted = await reactions(c, p, { from: at, to: null, promotionId, latest: Math.max(cfg.driftMinSamples * 5, 100) });
   const reasons: string[] = [];
   const latest = (await c.query(
     `SELECT s.run_id FROM workflow_run_steps s JOIN workflow_runs r ON r.id = s.run_id
-      WHERE r.tenant_id = $1 AND s.workflow = $2 AND s.node = $3 AND s.type = 'say' AND s.created_at > $4 ORDER BY s.id DESC LIMIT 1`, [p.tenant_id, p.workflow, p.node, at])).rows[0];
+      WHERE r.tenant_id = $1 AND r.kind IN ('live', 'test') AND s.workflow = $2 AND s.node = $3 AND s.type = 'say' AND s.created_at > $4 ORDER BY r.started_at DESC, s.id DESC LIMIT 1`, [p.tenant_id, p.workflow, p.node, at])).rows[0];
   if (latest) {
     const def = await definitionFor(c, latest.run_id, p.workflow as string);
     const stored = (await c.query('SELECT node_hash FROM promotions WHERE id = $1', [promotionId])).rows[0].node_hash as string;
@@ -450,11 +505,11 @@ export async function demote(c: pg.PoolClient, actorId: string | null, promotion
   if (!e.reason.trim()) throw new AppError(400, 'Say why this is being demoted.');
   const at = new Date((p.events as { kind: string; created_at: Date }[]).filter((x) => x.kind === 'promoted').pop()!.created_at);
   const replays = await replaysFor(c, p as never, at);
-  const financial = await assess(c, p, 'demote').catch(() => null);
+  const financial = await safeAssess(c, p, 'demote');
   if (e.drift) await event(c, actorId, promotionId, 'drift_detected', e.drift.reasons.join(' '), { baseline: e.drift.baseline, promoted: e.drift.promoted });
   await event(c, actorId, promotionId, 'demoted', e.reason, { forced: !e.drift, replays, financial });
   // The script is regenerated from fresh live turns: only turns since this demotion count, and a script already tried is not offered again.
-  await event(c, actorId, promotionId, 'regenerated', 'The node speaks live again. A new script is drawn up from the live turns that follow, once they reach the threshold.', { awaiting: 'fresh live turns' });
+  await event(c, actorId, promotionId, 'regenerated', 'The node speaks live again. A new script is drawn up from the live turns that follow, once they reach the threshold and give a wording not tried before.', { awaiting: 'fresh live turns' });
   await audit(c, actorId, e.drift ? 'learning.demote_drift' : 'learning.demote', 'promotion', promotionId, { node: p.node });
   return getPromotion(c, promotionId);
 }
@@ -474,14 +529,16 @@ export async function checkDrift(d: LearnDeps, actorId: string | null, promotion
 /** Screen every promoted node. Run on a schedule; cheap rules, no model. */
 export async function sweepDrift(d: LearnDeps, actorId: string | null) {
   const ids = await withActor(d.pool, { kind: 'internal' }, async (c) => (await c.query('SELECT id FROM promotions')).rows.map((r) => r.id as string));
-  const demoted: string[] = []; let checked = 0;
+  const demoted: string[] = []; const failed: string[] = []; const unjudged: string[] = []; let checked = 0;
   for (const id of ids) {
     const st = (await withActor(d.pool, { kind: 'internal' }, (c) => getPromotion(c, id))).status;
     if (st !== 'promoted') continue;
     checked++;
-    try { const r = await checkDrift(d, actorId, id); if (r.verdict.drifted) demoted.push(id); } catch { /* one node's trouble must not stop the screen of the rest */ }
+    try { const r = await checkDrift(d, actorId, id); if (r.verdict.drifted) demoted.push(id); else if (!r.verdict.judged) unjudged.push(id); }
+    catch { failed.push(id); }   // one node's trouble must not stop the screen of the rest, but it is reported
   }
-  return { checked, demoted };
+  // A node that could not be judged (too few reactions, or no listening step) is named: a silent monitor is worse than none.
+  return { checked, demoted, unjudged, driftFailed: failed };
 }
 
 // ------------------------------------------------------------------------------------------------ the cost change
@@ -514,6 +571,13 @@ export async function assess(c: pg.PoolClient, p: PromotionRow, direction: 'prom
       ? 'Prices speech synthesis only, per use of this node, from the average of the live turns it replaces. Model tokens saved are not priced.'
       : 'Going back to live speech costs the per-use saving again from now on; the realised saving is what the script saved while it ran.',
   };
+}
+
+/** The assessment is useful, not essential: if it cannot be worked out (no rate yet) the promotion still goes ahead. A savepoint keeps a failure from aborting the transaction. */
+async function safeAssess(c: pg.PoolClient, p: PromotionRow, direction: 'promote' | 'demote') {
+  await c.query('SAVEPOINT assess');
+  try { const r = await assess(c, p, direction); await c.query('RELEASE SAVEPOINT assess'); return r; }
+  catch { await c.query('ROLLBACK TO SAVEPOINT assess'); return null; }
 }
 
 export async function promotionFinancial(c: pg.PoolClient, promotionId: string) {

@@ -70,7 +70,7 @@ export interface Deps {
   /** Read each caller turn; re-route on a change of intent and escalate to a person on failed recoveries or severe sentiment. */
   journey?: JourneyConfig;
   /** A dynamic node whose line has been promoted to a reviewed, pre-recorded script: its script is spoken instead of asking a model. */
-  promoted?: (workflow: string, node: string, language: string) => { id: string; script: string } | undefined;
+  promoted?: (workflow: string, node: SpeakNode, id: string, language: string, context: { kind: string; topic: string }) => { id: string; script: string } | undefined;
 }
 
 export const DEFAULT_MAX_STEPS = 200;
@@ -285,7 +285,8 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         let ai: Record<string, Json> | undefined;
         let promotedId: string | undefined;
         try {
-          const promo = node.speech === 'dynamic' ? deps.promoted?.(wf, id, lang ?? 'en') : undefined;
+          const lastTurn = state.journey?.turns.at(-1);
+          const promo = node.speech === 'dynamic' ? deps.promoted?.(wf, node, id, lang ?? 'en', { kind: lastTurn?.kind ?? 'start', topic: lastTurn?.topic ?? '' }) : undefined;
           if (promo) {
             // Same stitching as any frame: the fixed words play from their recordings, slots are spoken live. A slot with no value falls back to the model.
             try { line = renderText(promo.script, state.vars, state.sensitive); plan = planSpeech(promo.script, state.vars, state.sensitive, lang ?? 'en', deps.recordings); promotedId = promo.id; }

@@ -40,7 +40,7 @@ export function registerLearningRoutes(app: FastifyInstance, ctx: Ctx): void {
     const s = await ctx.internal(req);
     const out = await distil(ctx.learn, s.userId, { tenantId, workflow: b.workflow, node: b.node });
     const reviewed = [];
-    if (b.review) for (const pid of out.created) reviewed.push(await reviewPromotion(ctx.learn, s.userId, pid));
+    if (b.review) for (const pid of out.created) { try { reviewed.push(await reviewPromotion(ctx.learn, s.userId, pid)); } catch { /* the rest still go to the councils */ } }
     return { ...out, reviewed: reviewed.map((p) => ({ id: p.id, status: p.status })) };
   });
   // The scheduled job: finish approved scripts whose audio has arrived, then screen every promoted node for drift.

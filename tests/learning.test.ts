@@ -34,6 +34,7 @@ const speaker: RunDeps['speaker'] = {
   generate: async (node, vars): Promise<string | SpeakerResult> => {
     modelCalls++;
     if (node.prompt === 'Ask for payment this week') return `Good day ${vars.name}, your balance is ${vars.amount}. Kindly settle it this week.`;
+    if (node.prompt === 'Ask for money this week') return `Dear ${vars.name}, kindly note ${vars.amount} is outstanding on your account.`;
     return `Hello ${vars.name}, you owe ${vars.amount}. Can you pay this week?`;
   },
 };
@@ -226,7 +227,8 @@ describe('when the councils do not simply pass it', () => {
     const realRecord = recorder.record; (recorder as { record: Recorder['record'] }).record = async () => { throw new Error('no voice provider'); };
     const failed = await post(`/internal/promotions/${id}/decision`, { decision: 'approved', note: 'Sounds right.' });
     (recorder as { record: Recorder['record'] }).record = realRecord;
-    expect(failed.statusCode).toBeGreaterThanOrEqual(400);
+    expect(failed.statusCode).toBe(200);                                                          // the approval stands...
+    expect(failed.json()).toMatchObject({ status: 'approved', audioError: expect.stringContaining('no voice provider') });   // ...and the audio failure is reported
     expect((await get(`/internal/promotions/${id}`)).json().status).toBe('approved');           // approved, not promoted
     const done = (await must(post('/internal/learning/sweep'))).json();
     expect(done.promoted).toContain(id);                                                            // the sweep made the missing audio and promoted it
@@ -267,8 +269,87 @@ describe('a model that writes the script', () => {
     expect(asked).toEqual(['sonnet', 'opus']);
     expect(out.created).toHaveLength(1);
     const p = (await get(`/internal/promotions/${out.created[0]}`)).json();
-    expect(p).toMatchObject({ script: 'Hello {{name}}, you owe {{amount}}. Can you pay this week?', distilled_by: 'rules' });
+    expect(p).toMatchObject({ script: 'Dear {{name}}, kindly note {{amount}} is outstanding on your account.', distilled_by: 'rules' });
     const decisions = (await get(`/internal/ai-decisions?subjectType=promotion&subjectId=${out.created[0]}`)).json();
     expect(decisions.map((d: { tier: string; escalated_from: string | null; input_tokens: number }) => [d.tier, d.escalated_from, d.input_tokens]).sort()).toEqual([['opus', 'sonnet', 500], ['sonnet', null, 500]]);
   });
 });
+
+describe('what keeps a script from being spoken where it should not be', () => {
+  it('does not ask a model to write a script for a node that already has one in review, and refuses to approve a script that fails the rules', async () => {
+    const asked: string[] = [];
+    const spy = { tier: 'sonnet' as const, model: 'sonnet-model', distill: async () => { asked.push('x'); return { script: 'never used', confidence: 1, inputTokens: 1, outputTokens: 1 }; } };
+    const { distil } = await import('../src/store/learning.js');
+    const out = await distil({ pool: env.pool, distillers: { sonnet: spy } }, null, { tenantId, workflow: 'learn_four' });   // learn_four's script is in review
+    expect(out.created).toEqual([]);
+    expect(asked).toEqual([]);
+    const bad = (await env.pool.query(
+      `INSERT INTO promotions (tenant_id, workflow, node, language, context_kind, script, slots, support, variants, avg_synth_chars, avg_slot_chars, node_hash, distilled_by)
+       VALUES ($1,'learn_flow','ask','en','complaint','Hello {{who}}, please pay this week without delay.','{who}',9,1,40,5,'h','rules') RETURNING id`, [tenantId])).rows[0].id as string;
+    await env.pool.query(`INSERT INTO promotion_events (promotion_id, kind, reason) VALUES ($1,'distilled','test')`, [bad]);
+    const r = await post(`/internal/promotions/${bad}/decision`, { decision: 'approved' });
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toContain('{{who}} is not a variable');
+  });
+
+  it('records the audio once when two finishes arrive together', async () => {
+    const id = (await env.pool.query(`SELECT id FROM promotions WHERE workflow = 'learn_four'`)).rows[0]?.id as string;
+    expect(id).toBeTruthy();
+    made.length = 0;
+    const real = recorder.record;
+    // approved while the voice provider is down: approved, no audio yet
+    (recorder as { record: Recorder['record'] }).record = async () => { throw new Error('no voice provider'); };
+    expect((await post(`/internal/promotions/${id}/decision`, { decision: 'approved' })).json()).toMatchObject({ status: 'approved', audioError: expect.any(String) });
+    // then two finishes arrive together, with a slow voice provider
+    (recorder as { record: Recorder['record'] }).record = async (l, t) => { await new Promise((r) => setTimeout(r, 150)); return real(l, t); };
+    try {
+      const [a, b] = await Promise.all([post(`/internal/promotions/${id}/audio`), post(`/internal/promotions/${id}/audio`)]);
+      expect(a.statusCode).toBe(200); expect(b.statusCode).toBe(200);
+    } finally { (recorder as { record: Recorder['record'] }).record = real; }
+    expect([...made].sort()).toEqual([', kindly note', 'Dear', 'is outstanding on your account.']);   // each phrase recorded once, not twice
+    expect((await get(`/internal/promotions/${id}`)).json().status).toBe('promoted');
+  });
+
+  it('is not demoted by simulating a draft, but stops being spoken the moment a deploy changes its node', async () => {
+    const wf = (await env.pool.query(`SELECT id FROM workflows WHERE name = 'learn_four'`)).rows[0].id as string;
+    const pid = (await env.pool.query(`SELECT id FROM promotions WHERE workflow = 'learn_four'`)).rows[0].id as string;
+    expect((await get(`/internal/promotions/${pid}`)).json().status).toBe('promoted');
+    const edited = { ...flow, nodes: { ...flow.nodes, ask: { ...flow.nodes.ask!, prompt: 'Confirm the address instead', text: 'Hello {{name}}, is your address still correct?' } } };
+    const draft = (await must(post(`/internal/workflows/${wf}/versions`, { definition: edited }))).json();
+    await must(post(`/internal/workflows/${wf}/simulate`, { versionId: draft.id, scenarios: [{ name: 's', variables: { name: 'Aisha', amount: '350' }, replies: ['yes'], expect: { outcome: 'ok' } }] }));
+    expect((await must(post(`/internal/promotions/${pid}/drift-check`))).json().promotion.status).toBe('promoted');   // a rehearsal of a draft proves nothing about the live node
+    const before = modelCalls;
+    await must(post(`/internal/workflows/${wf}/deploy`, { versionId: draft.id, environment: 'staging' }));
+    const r = await startRun(runDeps, null, { workflowId: wf, environment: 'staging', kind: 'test', variables: { name: 'Aisha', amount: '350' } });
+    const say = (await steps(r.id)).find((x) => x.type === 'say' && x.node === 'ask')!.payload;
+    expect(say.promotion).toBeUndefined();                                                        // not the old script, even before any screen has run
+    expect(modelCalls).toBe(before + 1);
+  });
+
+  it('speaks a script only in the journey context it was learned in', async () => {
+    const [p] = (await promotions('promoted'));
+    expect(p).toBeTruthy();
+    const { activePromotions } = await import('../src/store/learning.js');
+    const lookup = await withActor(env.pool, { kind: 'internal' }, (c) => activePromotions(c, tenantId));
+    const node = flow.nodes.ask as { prompt?: string; text?: unknown };
+    const row = (await env.pool.query('SELECT workflow, node, language, context_kind, context_topic FROM promotions WHERE id = $1', [p!.id])).rows[0];
+    void node;
+    const real = lookup(row.workflow, await nodeOf(row.workflow, row.node), row.node, row.language, { kind: row.context_kind, topic: row.context_topic });
+    expect(real?.id).toBe(p!.id);
+    expect(lookup(row.workflow, await nodeOf(row.workflow, row.node), row.node, row.language, { kind: 'complaint', topic: '' })).toBeUndefined();
+  });
+
+  it('does not stop the sweep when one script\'s audio fails, and names what it could not judge', async () => {
+    const { sweepAudio, sweepDrift } = await import('../src/store/learning.js');
+    const broken: Recorder = { record: async () => { throw new Error('no voice provider'); } };
+    await expect(sweepAudio({ pool: env.pool, recorder: broken }, null)).resolves.toMatchObject({ promoted: expect.any(Array), audioFailed: expect.any(Array) });
+    const drift = await sweepDrift({ pool: env.pool }, null);
+    expect(drift).toMatchObject({ unjudged: expect.any(Array), driftFailed: expect.any(Array) });
+  });
+});
+
+async function nodeOf(workflow: string, node: string) {
+  const def = (await env.pool.query(
+    `SELECT v.definition FROM workflow_versions v JOIN workflows w ON w.id = v.workflow_id WHERE w.name = $1 AND w.tenant_id = $2 ORDER BY v.created_at ASC LIMIT 1`, [workflow, tenantId])).rows[0].definition as WorkflowDefinition;
+  return def.nodes[node] as { prompt?: string; text?: unknown };
+}

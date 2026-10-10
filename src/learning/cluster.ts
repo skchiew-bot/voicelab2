@@ -3,6 +3,7 @@
  * same thing, pick one script for a group, and check a script before anyone is asked about it. No model, no database:
  * clustering uses word overlap and a threshold, and the checks are rules (per the model-tier rules).
  */
+import { createHash } from 'node:crypto';
 import { SLOT_RE } from '../workflows/definition.js';
 import { normalizeSpoken } from '../workflows/stitch.js';
 import { checkModelLine } from '../workflows/engine.js';
@@ -27,7 +28,7 @@ export function similarity(a: string, b: string): number {
  */
 export function slotify(line: string, vars: Record<string, unknown>, forbidden: readonly string[]): { text: string; slots: string[]; slotChars: number } {
   const entries = Object.entries(vars)
-    .filter(([k, v]) => !forbidden.includes(k) && (typeof v === 'string' || typeof v === 'number') && String(v).trim().length >= 2)
+    .filter(([k, v]) => !forbidden.includes(k) && (typeof v === 'string' || typeof v === 'number') && String(v).trim().length >= 3)
     .map(([k, v]) => [k, String(v).trim()] as const)
     .sort((a, b) => b[1].length - a[1].length);
   let text = line; const slots: string[] = []; let slotChars = 0;
@@ -91,3 +92,7 @@ export function checkScript(script: string, o: { variables: readonly string[]; s
 export function fixedChars(script: string): number {
   return script.split(new RegExp(SLOT_RE.source, 'g')).filter((_, i) => i % 2 === 0).reduce((s, p) => s + [...p.trim()].length, 0);
 }
+
+/** The part of a node a script depends on: what the model is told and the fallback text. A change to either makes a script stale. */
+export const nodeHash = (node: { prompt?: string; text?: unknown } | undefined): string =>
+  createHash('sha256').update(JSON.stringify({ prompt: node?.prompt ?? null, text: node?.text ?? null })).digest('hex');

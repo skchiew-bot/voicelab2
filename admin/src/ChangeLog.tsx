@@ -4,7 +4,7 @@ import { Errors, fmtDate } from './ui';
 
 const CATEGORIES: [string, string][] = [
   ['', 'Every change'], ['workflows', 'Workflows'], ['money', 'Money and rates'], ['providers', 'Providers and capacity'], ['compliance', 'Do not call'],
-  ['policy', 'Policy and knowledge'], ['learning', 'Learning loop'], ['journey', 'Journey and QA'], ['modules', 'Cases and appointments'], ['people', 'Clients and people'],
+  ['policy', 'Policy and knowledge'], ['learning', 'Learning loop'], ['journey', 'Journey and QA'], ['modules', 'Cases and appointments'], ['people', 'Clients and people'], ['platform', 'Platform and scheduled jobs'],
   ['activity', 'Day-to-day activity (not changes)'],
 ];
 

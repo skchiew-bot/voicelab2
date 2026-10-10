@@ -119,8 +119,20 @@ CREATE TABLE notifications (
   created_at     timestamptz NOT NULL DEFAULT now(),
   marked_at      timestamptz
 );
+-- Only the delivery status may change: who a message is for, and what it says, never do.
+CREATE FUNCTION notifications_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id OR NEW.appointment_id IS DISTINCT FROM OLD.appointment_id OR NEW.recipient_kind IS DISTINCT FROM OLD.recipient_kind
+     OR NEW.recipient_ref IS DISTINCT FROM OLD.recipient_ref OR NEW.channel IS DISTINCT FROM OLD.channel OR NEW.kind IS DISTINCT FROM OLD.kind
+     OR NEW.body IS DISTINCT FROM OLD.body OR NEW.dedupe_key IS DISTINCT FROM OLD.dedupe_key OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'a notification''s text and recipient are append-only; only its status changes';
+  END IF;
+  RETURN NEW;
+END $$;
 CREATE INDEX notifications_pending_idx ON notifications (tenant_id, created_at) WHERE status = 'pending';
 CREATE UNIQUE INDEX notifications_dedupe_idx ON notifications (appointment_id, recipient_kind, dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE TRIGGER notifications_guard BEFORE UPDATE ON notifications FOR EACH ROW EXECUTE FUNCTION notifications_guard();
+CREATE TRIGGER notifications_no_delete BEFORE DELETE ON notifications FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO voicelab_internal;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO voicelab_internal;

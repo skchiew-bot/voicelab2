@@ -39,7 +39,22 @@ describe('a delay moves what follows', () => {
   });
   it('flags, rather than pushes, an appointment that would end after closing and everything after it', () => {
     const moves = cascade(dayOf, 'a', 20, at('2026-10-12T03:30:00Z'));
-    expect(moves.map((m) => [m.id, m.overflow])).toEqual([['a', false], ['b', false], ['c', true]]);
+    expect(moves.map((m) => [m.id, m.overflow])).toEqual([['a', false], ['b', false], ['c', true]]);   // c would start at 03:20 and end 04:05
+  });
+  it('flags only the appointments the delay actually pushes out, not the ones after that still fit', () => {
+    const two = [a('x', '2026-10-12T01:00:00Z', '2026-10-12T01:30:00Z', 0), a('y', '2026-10-12T08:00:00Z', '2026-10-12T08:30:00Z')];   // 09:00 and 16:00 local
+    // a delay of 8 hours sends the first past closing (17:00 local = 09:00Z), but the 16:00 is untouched
+    expect(cascade(two, 'x', 480, at('2026-10-12T09:00:00Z')).map((m) => [m.id, m.overflow])).toEqual([['x', true]]);
+    // with the second one now squeezed by the first's removal from the chain, it is judged on its own
+    const three = [a('p', '2026-10-12T07:00:00Z', '2026-10-12T07:45:00Z', 0), a('q', '2026-10-12T08:00:00Z', '2026-10-12T08:45:00Z'), a('r', '2026-10-12T08:50:00Z', '2026-10-12T09:00:00Z', 0)];
+    const moves = cascade(three, 'p', 60, at('2026-10-12T09:00:00Z'));
+    expect(moves.map((m) => [m.id, m.overflow])).toEqual([['p', false], ['q', true]]);                       // q cannot fit after p; r, with no journey, is untouched and not mentioned
+  });
+  it('treats time off like closing: an appointment a delay would push into it is flagged, not moved', () => {
+    const one = [a('t', '2026-10-12T03:00:00Z', '2026-10-12T03:30:00Z', 0)];                                // 11:00 to 11:30 local
+    const off = [{ from: at('2026-10-12T04:00:00Z'), to: at('2026-10-12T05:00:00Z') }];                      // 12:00 to 13:00 local
+    expect(cascade(one, 't', 45, close, off).map((m) => [m.id, m.overflow])).toEqual([['t', true]]);        // 11:45 to 12:15 would overlap
+    expect(cascade(one, 't', 20, close, off).map((m) => [m.id, m.overflow])).toEqual([['t', false]]);       // 11:20 to 11:50 is clear
   });
   it('does nothing for a delay of nothing or an appointment that is not in the day', () => {
     expect(cascade(dayOf, 'a', 0, close)).toEqual([]);

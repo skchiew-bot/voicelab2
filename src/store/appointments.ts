@@ -24,6 +24,8 @@ async function event(c: pg.PoolClient, appointmentId: string, kind: string, deta
   await c.query('INSERT INTO appointment_events (appointment_id, kind, detail, actor_id) VALUES ($1,$2,$3,$4)', [appointmentId, kind, JSON.stringify(detail), actorId]);
 }
 const lockDiary = (c: pg.PoolClient, id: string) => c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`diary:${id}`]);
+/** Take several diaries' locks in one fixed order, so two requests that need the same diaries cannot each hold one and wait for the other. */
+async function lockDiaries(c: pg.PoolClient, ids: string[]) { for (const id of [...new Set(ids)].sort()) await lockDiary(c, id); }
 
 // ------------------------------------------------------------------------------------------------ locations and diaries
 export const locationSchema = z.object({ name: z.string().min(1).max(100), address: z.string().min(1).max(300) }).strict();
@@ -82,6 +84,13 @@ export async function setHours(c: pg.PoolClient, actorId: string | null, diaryId
   if (new Set(e.hours.map((h) => h.dow)).size !== e.hours.length) throw new AppError(400, 'A day is listed once.');
   if (e.hours.some((h) => h.starts >= h.ends)) throw new AppError(400, 'A day opens before it closes.');
   await lockDiary(c, diaryId);
+  const week = new Map(e.hours.map((h) => [h.dow, h]));
+  const future = (await c.query(`SELECT starts_at, ends_at FROM appointments WHERE diary_id = $1 AND status = ANY($3) AND ends_at > $2`, [diaryId, new Date(), ACTIVE])).rows;
+  const stranded = future.filter((r) => {
+    const p = localParts(r.starts_at, d.timeZone); const h = week.get(p.dow);
+    return !h || r.starts_at < localToInstant(p.date, h.starts, d.timeZone) || r.ends_at > localToInstant(p.date, h.ends, d.timeZone);
+  });
+  if (stranded.length) throw new AppError(409, `${stranded.length} booked appointment${stranded.length === 1 ? ' falls' : 's fall'} outside those hours. Move or cancel ${stranded.length === 1 ? 'it' : 'them'} first.`);
   await c.query('DELETE FROM diary_hours WHERE diary_id = $1', [diaryId]);
   for (const h of e.hours) await c.query('INSERT INTO diary_hours (diary_id, dow, starts, ends) VALUES ($1,$2,$3,$4)', [diaryId, h.dow, h.starts, h.ends]);
   await audit(c, actorId, 'diary.hours', 'diary', diaryId, { days: e.hours.length });
@@ -174,13 +183,14 @@ const placeText = async (c: pg.PoolClient, a: ApptRow) => a.kind === 'at_locatio
 const officerPlace = async (c: pg.PoolClient, a: ApptRow) => a.kind === 'at_location'
   ? `at ${(await c.query('SELECT name FROM locations WHERE id = $1', [a.location_id])).rows[0]?.name ?? 'the branch'}` : `visit to ${a.visit_address}`;
 
-async function notify(c: pg.PoolClient, a: ApptRow, d: DiaryRow, to: 'customer' | 'officer', kind: MessageKind, o: { was?: Date; minutes?: number; fee?: string; currency?: string; dedupe?: string } = {}) {
+async function notify(c: pg.PoolClient, a: ApptRow, d: DiaryRow, to: 'customer' | 'officer', kind: MessageKind, o: { was?: Date; minutes?: number; fee?: string; currency?: string; dedupe?: string } = {}): Promise<boolean> {
   const when = whenText(a.starts_at, d.time_zone);
   const body = messageFor(kind, { when, was: o.was ? whenText(o.was, d.time_zone) : undefined, where: to === 'officer' ? await officerPlace(c, a) : await placeText(c, a), minutes: o.minutes, fee: o.fee, currency: o.currency, for: to });
-  await c.query(
+  const r = await c.query(
     `INSERT INTO notifications (tenant_id, appointment_id, recipient_kind, recipient_ref, channel, kind, body, dedupe_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
      ON CONFLICT (appointment_id, recipient_kind, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING`,
     [a.tenant_id, a.id, to, to === 'officer' ? d.officer_ref : a.contact_ref, to === 'officer' ? d.officer_channel : a.customer_channel, kind, body, o.dedupe ?? null]);
+  return (r.rowCount ?? 0) > 0;
 }
 const apptRow = async (c: pg.PoolClient, id: string, lock = false): Promise<ApptRow> => {
   const a = (await c.query(`SELECT * FROM appointments WHERE id = $1${lock ? ' FOR UPDATE' : ''}`, [id])).rows[0];
@@ -198,14 +208,17 @@ export const bookSchema = z.object({
 
 /** The individual diary that can take a booking at `start`: the diary itself, or the least busy member of a group that is free then. */
 async function chooseDiary(c: pg.PoolClient, d: DiaryRow, start: Date, durationMinutes: number, travelMinutes: number, now: Date, exclude?: string): Promise<DiaryRow | null> {
+  const members = await membersOf(c, d);
+  await lockDiaries(c, members.map((m) => m.id));
   const candidates: { m: DiaryRow; load: number }[] = [];
-  for (const m of await membersOf(c, d)) {
-    await lockDiary(c, m.id);
+  for (const m of members) {
     const date = localParts(start, m.time_zone).date;
     const day = await hoursOn(c, m, date);
     if (!day || !m.active) continue;
     if (!fits({ day, start, durationMinutes, travelMinutes, busy: await busyAround(c, m.id, start, exclude), now })) continue;
-    const load = (await c.query(`SELECT count(*)::int AS n FROM appointments WHERE diary_id = $1 AND status = ANY($3) AND starts_at >= $2::date AND starts_at < $2::date + 1`, [m.id, start, ACTIVE])).rows[0].n as number;
+    // How busy the officer already is that day, by their own calendar day.
+    const from = localToInstant(date, '00:00', m.time_zone); const to = localToInstant(addDays(date, 1), '00:00', m.time_zone);
+    const load = (await c.query(`SELECT count(*)::int AS n FROM appointments WHERE diary_id = $1 AND status = ANY($4) AND starts_at >= $2 AND starts_at < $3`, [m.id, from, to, ACTIVE])).rows[0].n as number;
     candidates.push({ m, load });
   }
   return candidates.sort((a, b) => a.load - b.load || a.m.name.localeCompare(b.m.name))[0]?.m ?? null;
@@ -269,11 +282,12 @@ export const delaySchema = z.object({ minutes: z.number().int().min(1).max(480) 
  * earliest time the officer can be there; one that would end after closing is flagged for a new time instead. Each
  * customer affected is told, and so is the officer.
  */
-export async function reportDelay(c: pg.PoolClient, actorId: string | null, appointmentId: string, e: z.infer<typeof delaySchema>) {
+export async function reportDelay(c: pg.PoolClient, actorId: string | null, appointmentId: string, e: z.infer<typeof delaySchema>, now = new Date()) {
   const first = await apptRow(c, appointmentId);
   await lockDiary(c, first.diary_id);
   const a = await apptRow(c, appointmentId, true);
   if (a.status !== 'booked') throw new AppError(409, `That appointment is ${a.status.replace('_', ' ')}, so it cannot be delayed.`);
+  if (a.ends_at <= now) throw new AppError(409, 'That appointment is already over.');
   const d = await diaryRow(c, a.diary_id);
   const date = localParts(a.starts_at, d.time_zone).date;
   const day = await hoursOn(c, d, date);
@@ -281,18 +295,20 @@ export async function reportDelay(c: pg.PoolClient, actorId: string | null, appo
   const from = localToInstant(date, '00:00', d.time_zone); const to = localToInstant(addDays(date, 1), '00:00', d.time_zone);
   const rows = (await c.query(`SELECT id, starts_at, ends_at, travel_minutes FROM appointments WHERE diary_id = $1 AND status = 'booked' AND starts_at >= $2 AND starts_at < $3`, [a.diary_id, from, to])).rows;
   const booked: Booked[] = rows.map((r) => ({ id: r.id, startsAt: r.starts_at, endsAt: r.ends_at, travelMinutes: r.travel_minutes }));
-  const moves = cascade(booked, a.id, e.minutes, closeAt);
+  const blocks = (await c.query('SELECT starts_at, ends_at FROM diary_blocks WHERE diary_id = $1 AND ends_at > $2 AND starts_at < $3', [a.diary_id, from, to])).rows.map((b) => ({ from: b.starts_at as Date, to: b.ends_at as Date }));
+  const moves = cascade(booked, a.id, e.minutes, closeAt, blocks);
   const changed: string[] = [];
   for (const m of moves) {
     const row = await apptRow(c, m.id, true);
+    if (row.status !== 'booked') continue;                       // finished or cancelled meanwhile: leave it be
     const was = row.starts_at;
     if (m.overflow) {
-      await c.query(`UPDATE appointments SET status = 'needs_reschedule' WHERE id = $1`, [m.id]);
-      await event(c, m.id, 'needs_reschedule', { reason: 'A delay earlier in the day pushes it past closing.' }, actorId);
+      await c.query(`UPDATE appointments SET status = 'needs_reschedule' WHERE id = $1 AND status = 'booked'`, [m.id]);
+      await event(c, m.id, 'needs_reschedule', { reason: 'A delay earlier in the day pushes it past closing or into time off.' }, actorId);
       await notify(c, { ...row, status: 'needs_reschedule' }, d, 'customer', 'needs_new_time', { was });
       await notify(c, { ...row, status: 'needs_reschedule' }, d, 'officer', 'needs_new_time', { was });
     } else {
-      await c.query('UPDATE appointments SET starts_at = $2, ends_at = $3 WHERE id = $1', [m.id, m.startsAt, m.endsAt]);
+      await c.query(`UPDATE appointments SET starts_at = $2, ends_at = $3 WHERE id = $1 AND status = 'booked'`, [m.id, m.startsAt, m.endsAt]);
       await event(c, m.id, 'delayed', { minutes: m.shiftedMinutes, was: was.toISOString(), now: m.startsAt.toISOString() }, actorId);
       const moved = { ...row, starts_at: m.startsAt, ends_at: m.endsAt };
       await notify(c, moved, d, 'customer', 'delayed', { was, minutes: m.shiftedMinutes });
@@ -304,6 +320,9 @@ export async function reportDelay(c: pg.PoolClient, actorId: string | null, appo
   return { moved: changed.length, appointments: await Promise.all(changed.map((id) => getAppointment(c, id))) };
 }
 
+/** A customer is never charged for a time the business broke: one it delayed, or flagged for a new time. */
+const brokenByBusiness = (a: ApptRow) => a.status === 'needs_reschedule' || a.starts_at.getTime() !== a.original_starts_at.getTime();
+
 export const cancelSchema = z.object({ by: z.enum(['customer', 'officer', 'client']), reason: z.string().min(1).max(300) }).strict();
 
 /** Cancel an appointment. A customer who cancels inside the client's free window owes the late fee; nobody else does. */
@@ -313,9 +332,10 @@ export async function cancelAppointment(c: pg.PoolClient, actorId: string | null
   await lockDiary(c, first.diary_id);
   const a = await apptRow(c, appointmentId, true);
   if (!ACTIVE.includes(a.status)) throw new AppError(409, `That appointment is already ${a.status.replace('_', ' ')}.`);
+  if (a.ends_at <= now) throw new AppError(409, 'That appointment is already over: mark it done, or as a no-show.');
   const d = await diaryRow(c, a.diary_id);
   const policy = await getPolicy(c, a.tenant_id);
-  const { fee, reason } = feeFor(policy, { event: 'cancel', by: e.by, startsAt: a.starts_at, now });
+  const { fee, reason } = feeFor(policy, { event: 'cancel', by: brokenByBusiness(a) ? 'client' : e.by, startsAt: a.starts_at, now });
   await c.query(`UPDATE appointments SET status = 'cancelled', cancelled_by = $2, cancel_reason = $3, fee = $4, fee_reason = $5 WHERE id = $1`, [a.id, e.by, e.reason, fee, reason]);
   await event(c, a.id, 'cancelled', { by: e.by, fee, feeReason: reason }, actorId);
   await notify(c, a, d, 'customer', 'cancelled'); await notify(c, a, d, 'officer', 'cancelled');
@@ -329,16 +349,18 @@ export const rescheduleSchema = z.object({ by: z.enum(['customer', 'officer', 'c
 /** Move an appointment to a free time (the same diary, or another or a group). The old one is closed as moved, with a fee if a customer moved it late. */
 export async function reschedule(c: pg.PoolClient, actorId: string | null, appointmentId: string, e: z.infer<typeof rescheduleSchema>, now = new Date()) {
   const first = await apptRow(c, appointmentId);
-  await lockDiary(c, first.diary_id);
+  const target = e.diaryId ? await diaryRow(c, e.diaryId) : await diaryRow(c, first.diary_id);
+  if (target.tenant_id !== first.tenant_id || !target.active) throw new AppError(404, 'Diary not found.');
+  // Every diary this will touch, locked in one fixed order before anything else, so it cannot deadlock with another booking or move.
+  await lockDiaries(c, [first.diary_id, ...(await membersOf(c, target)).map((m) => m.id)]);
   const a = await apptRow(c, appointmentId, true);
   if (!ACTIVE.includes(a.status)) throw new AppError(409, `That appointment is already ${a.status.replace('_', ' ')}.`);
-  const target = e.diaryId ? await diaryRow(c, e.diaryId) : await diaryRow(c, a.diary_id);
-  if (target.tenant_id !== a.tenant_id) throw new AppError(404, 'Diary not found.');
+  if (a.ends_at <= now) throw new AppError(409, 'That appointment is already over.');
   const start = new Date(e.startsAt); const duration = Math.round((a.ends_at.getTime() - a.starts_at.getTime()) / 60_000);
   const chosen = await chooseDiary(c, target, start, duration, a.travel_minutes, now, a.id);
   if (!chosen) throw new AppError(409, 'That time is not free.');
   const policy = await getPolicy(c, a.tenant_id);
-  const { fee, reason } = feeFor(policy, { event: 'cancel', by: e.by, startsAt: a.starts_at, now });
+  const { fee, reason } = feeFor(policy, { event: 'cancel', by: brokenByBusiness(a) ? 'client' : e.by, startsAt: a.starts_at, now });
   await c.query(`UPDATE appointments SET status = 'rescheduled', cancelled_by = $2, cancel_reason = 'Moved to another time.', fee = $3, fee_reason = $4 WHERE id = $1`, [a.id, e.by, fee, reason]);
   const n = (await c.query(
     `INSERT INTO appointments (tenant_id, diary_id, booked_via, case_id, contact_ref, customer_channel, kind, location_id, visit_address, travel_minutes, starts_at, ends_at, original_starts_at, replaces_id, note)
@@ -349,31 +371,37 @@ export async function reschedule(c: pg.PoolClient, actorId: string | null, appoi
   await notify(c, n, chosen, 'customer', 'moved', { was: a.starts_at }); await notify(c, n, chosen, 'officer', 'moved', { was: a.starts_at });
   const oldDiary = await diaryRow(c, a.diary_id);
   if (oldDiary.id !== chosen.id) await notify(c, a, oldDiary, 'officer', 'cancelled');
-  if (toScaled(fee) > 0n) await notify(c, n, chosen, 'customer', 'fee', { fee: stripZeros(fee), currency: policy.currency });
+  if (toScaled(fee) > 0n) await notify(c, a, oldDiary, 'customer', 'fee', { fee: stripZeros(fee), currency: policy.currency });      // the fee is for the time that was given up
   await audit(c, actorId, 'appointment.reschedule', 'appointment', a.id, { by: e.by });
   return getAppointment(c, n.id);
 }
 
 /** A customer who did not come. The appointment is closed, and the client's no-show fee is recorded. */
 export async function markNoShow(c: pg.PoolClient, actorId: string | null, appointmentId: string, now = new Date()) {
+  const first = await apptRow(c, appointmentId);
+  await lockDiary(c, first.diary_id);
   const a = await apptRow(c, appointmentId, true);
   if (a.status !== 'booked') throw new AppError(409, `That appointment is ${a.status.replace('_', ' ')}.`);
   if (a.starts_at > now) throw new AppError(409, 'That appointment has not started yet.');
   const d = await diaryRow(c, a.diary_id);
   const policy = await getPolicy(c, a.tenant_id);
   const { fee, reason } = feeFor(policy, { event: 'no_show', by: 'officer', startsAt: a.starts_at, now });
-  await c.query(`UPDATE appointments SET status = 'no_show', fee = $2, fee_reason = $3 WHERE id = $1`, [a.id, fee, reason]);
+  await c.query(`UPDATE appointments SET status = 'no_show', fee = $2, fee_reason = $3 WHERE id = $1 AND status = 'booked'`, [a.id, fee, reason]);
   await event(c, a.id, 'no_show', { fee }, actorId);
   if (toScaled(fee) > 0n) await notify(c, a, d, 'customer', 'fee', { fee: stripZeros(fee), currency: policy.currency });
+  await audit(c, actorId, 'appointment.no_show', 'appointment', a.id, {});
   return getAppointment(c, a.id);
 }
 
 export async function completeAppointment(c: pg.PoolClient, actorId: string | null, appointmentId: string, now = new Date()) {
+  const first = await apptRow(c, appointmentId);
+  await lockDiary(c, first.diary_id);
   const a = await apptRow(c, appointmentId, true);
   if (a.status !== 'booked') throw new AppError(409, `That appointment is ${a.status.replace('_', ' ')}.`);
   if (a.starts_at > now) throw new AppError(409, 'That appointment has not started yet.');
-  await c.query(`UPDATE appointments SET status = 'completed' WHERE id = $1`, [a.id]);
+  await c.query(`UPDATE appointments SET status = 'completed' WHERE id = $1 AND status = 'booked'`, [a.id]);
   await event(c, a.id, 'completed', {}, actorId);
+  await audit(c, actorId, 'appointment.complete', 'appointment', a.id, {});
   return getAppointment(c, a.id);
 }
 
@@ -386,10 +414,8 @@ export async function sweepReminders(c: pg.PoolClient, tenantId: string, now = n
   const rows = (await c.query(`SELECT * FROM appointments WHERE tenant_id = $1 AND status = 'booked' AND starts_at > $2 AND starts_at <= $3`, [tenantId, now, new Date(now.getTime() + policy.reminderHours * 3_600_000)])).rows as ApptRow[];
   let made = 0;
   for (const a of rows) {
-    const d = await diaryRow(c, a.diary_id);
-    const before = (await c.query('SELECT count(*)::int AS n FROM notifications WHERE appointment_id = $1', [a.id])).rows[0].n as number;
-    await notify(c, a, d, 'customer', 'reminder', { dedupe: `reminder:${a.starts_at.toISOString()}` });
-    made += ((await c.query('SELECT count(*)::int AS n FROM notifications WHERE appointment_id = $1', [a.id])).rows[0].n as number) - before;
+    // One reminder per appointment: a delay already sent its own message with the new time.
+    if (await notify(c, a, await diaryRow(c, a.diary_id), 'customer', 'reminder', { dedupe: 'reminder' })) made++;
   }
   return { reminders: made };
 }

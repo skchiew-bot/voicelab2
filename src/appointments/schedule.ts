@@ -42,21 +42,27 @@ export interface Move { id: string; startsAt: Date; endsAt: Date; shiftedMinutes
 /**
  * An officer is running late for one appointment. It starts `delayMinutes` later, and every later appointment that day
  * starts as soon as the officer can get there from the one before, never earlier than booked. One that would finish
- * after the diary closes is not moved past it: it is flagged for a new time. Only appointments that change are returned.
+ * after the diary closes, or run into time off, is not moved there: it is flagged for a new time and taken out of the
+ * chain, so the appointments after it are judged only by what actually happens before them. Only appointments that
+ * change are returned.
  */
-export function cascade(day: Booked[], delayedId: string, delayMinutes: number, closeAt: Date): Move[] {
+export function cascade(day: Booked[], delayedId: string, delayMinutes: number, closeAt: Date, blocks: Interval[] = []): Move[] {
   const sorted = [...day].sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime());
   const i = sorted.findIndex((a) => a.id === delayedId);
   if (i < 0 || delayMinutes <= 0) return [];
-  const moves: Move[] = []; let prevEnd = null as Date | null; let overflowed = false;
+  const moves: Move[] = [];
+  let prevEnd = (i > 0 ? sorted[i - 1]!.endsAt : null) as Date | null;       // the officer is free after the last appointment that is not affected
   for (let k = i; k < sorted.length; k++) {
     const a = sorted[k]!; const length = a.endsAt.getTime() - a.startsAt.getTime();
-    if (overflowed) { moves.push({ id: a.id, startsAt: a.startsAt, endsAt: a.endsAt, shiftedMinutes: 0, overflow: true }); continue; }
     const earliest: number = k === i ? a.startsAt.getTime() + delayMinutes * MIN : Math.max(a.startsAt.getTime(), (prevEnd?.getTime() ?? 0) + a.travelMinutes * MIN);
     const startsAt = new Date(earliest); const endsAt = new Date(earliest + length);
-    if (endsAt > closeAt) { overflowed = true; moves.push({ id: a.id, startsAt: a.startsAt, endsAt: a.endsAt, shiftedMinutes: 0, overflow: true }); continue; }
+    const take: Interval = { from: new Date(earliest - a.travelMinutes * MIN), to: endsAt };
+    if (endsAt > closeAt || blocks.some((b) => overlaps(take, b))) {
+      moves.push({ id: a.id, startsAt: a.startsAt, endsAt: a.endsAt, shiftedMinutes: 0, overflow: true });
+      continue;
+    }
+    if (startsAt.getTime() === a.startsAt.getTime()) break;        // this one is not moved, so nothing after it is
     prevEnd = endsAt;
-    if (startsAt.getTime() === a.startsAt.getTime()) break;      // this one is not moved, so nothing after it is
     moves.push({ id: a.id, startsAt, endsAt, shiftedMinutes: Math.round((earliest - a.startsAt.getTime()) / MIN), overflow: false });
   }
   return moves;

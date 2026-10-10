@@ -142,10 +142,10 @@ describe('a delay moves what follows', () => {
 
   it('flags an appointment a delay would push past closing for a new time, and says so to its customer and the officer', async () => {
     const date = dayPlus(9);
-    const a = (await must(visit(officerB, date, '15:30', { travelMinutes: 0 }))).json();
-    const b = (await must(visit(officerB, date, '16:30', { durationMinutes: 30 }))).json();
-    await must(post(`/internal/appointments/${a.id}/delay`, { minutes: 60 }));                                   // a would end 17:15
-    expect((await appt(a.id)).status).toBe('needs_reschedule');
+    const a = (await must(visit(officerB, date, '15:00', { travelMinutes: 0 }))).json();
+    const b = (await must(visit(officerB, date, '16:00'))).json();
+    await must(post(`/internal/appointments/${a.id}/delay`, { minutes: 30 }));                                   // a ends 16:15, b cannot be there before 16:30 and would end 17:15
+    expect((await appt(a.id)).status).toBe('booked');
     expect((await appt(b.id)).status).toBe('needs_reschedule');
     expect((await notes(b.id)).filter((n) => n.kind === 'needs_new_time').map((n) => n.recipient_kind).sort()).toEqual(['customer', 'officer']);
     expect((await post(`/internal/appointments/${b.id}/delay`, { minutes: 5 })).statusCode).toBe(409);            // already waiting for a new time
@@ -208,7 +208,8 @@ describe('messages for people', () => {
     for (const n of list) expect(redactNumbers(n.body)).toBe(n.body);
     expect((await must(post(`/internal/notifications/${mine[0]!.id}/mark`, { status: 'sent' }))).json()).toEqual({ status: 'sent' });
     expect((await post(`/internal/notifications/${mine[0]!.id}/mark`, { status: 'sent' })).statusCode).toBe(409);
-    await expect(env.pool.query(`UPDATE notifications SET body = 'x' WHERE id = $1`, [mine[0]!.id])).resolves.toBeDefined();      // status is the only thing the API changes
+    await expect(env.pool.query(`UPDATE notifications SET body = 'x' WHERE id = $1`, [mine[0]!.id])).rejects.toThrow(/only its status changes/);   // the text and the recipient never change
+    await expect(env.pool.query(`DELETE FROM notifications WHERE id = $1`, [mine[0]!.id])).rejects.toThrow(/append-only/);
     expect(((await get(`/internal/tenants/${tenantId}/notifications?status=sent`)).json() as { id: string }[]).map((n) => n.id)).toContain(mine[0]!.id);
   });
 
@@ -228,5 +229,95 @@ describe('what stays private and what cannot be rewritten', () => {
   it('never rewrites an appointment\'s history', async () => {
     await expect(env.pool.query(`UPDATE appointment_events SET kind = 'x'`)).rejects.toThrow(/append-only/);
     await expect(env.pool.query('DELETE FROM appointment_events')).rejects.toThrow(/append-only/);
+  });
+});
+
+describe('what the independent review found', () => {
+  const statuses = (rs: { statusCode: number }[]) => rs.map((r) => r.statusCode);
+
+  it('does not deadlock when a move into a group meets group bookings, or two moves cross', async () => {
+    const out: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      const date = dayPlus(20 + i);
+      const mine = (await must(comeIn(officerB, date, '09:00'))).json();
+      const rs = await Promise.all([post(`/internal/appointments/${mine.id}/reschedule`, { by: 'client', startsAt: at(date, '13:00'), diaryId: team }), comeIn(team, date, '13:00'), comeIn(team, date, '13:00')]);
+      out.push(...statuses(rs));
+    }
+    expect(out.every((n) => n === 200 || n === 201 || n === 409)).toBe(true);                                       // never a 500
+    const date = dayPlus(26);
+    const x = (await must(comeIn(officerA, date, '10:00'))).json(); const y = (await must(comeIn(officerB, date, '11:00'))).json();
+    const crossed = await Promise.all([post(`/internal/appointments/${x.id}/reschedule`, { by: 'client', startsAt: at(date, '14:00'), diaryId: officerB }), post(`/internal/appointments/${y.id}/reschedule`, { by: 'client', startsAt: at(date, '15:00'), diaryId: officerA })]);
+    expect(statuses(crossed)).toEqual([200, 200]);
+  });
+
+  it('does not push an appointment into the officer\'s time off, and does not flag one the delay never reaches', async () => {
+    const date = dayPlus(27);
+    const a = (await must(visit(officerA, date, '11:00', { durationMinutes: 30, travelMinutes: 0 }))).json();
+    await must(post(`/internal/diaries/${officerA}/blocks`, { startsAt: at(date, '12:00'), endsAt: at(date, '13:00'), reason: 'Prayers and lunch' }));
+    await must(post(`/internal/appointments/${a.id}/delay`, { minutes: 45 }));                                        // would be 11:45 to 12:15
+    expect((await appt(a.id)).status).toBe('needs_reschedule');
+    const date2 = dayPlus(28);
+    const first = (await must(visit(officerA, date2, '09:00', { durationMinutes: 30, travelMinutes: 0 }))).json();
+    const late = (await must(visit(officerA, date2, '16:00', { durationMinutes: 30 }))).json();
+    await must(post(`/internal/appointments/${first.id}/delay`, { minutes: 480 }));                                   // sends the first past closing
+    expect((await appt(first.id)).status).toBe('needs_reschedule');
+    expect((await appt(late.id)).status).toBe('booked');                                                               // untouched, and not told otherwise
+    expect((await notes(late.id)).some((n) => n.kind === 'needs_new_time')).toBe(false);
+  });
+
+  it('never charges a customer for a time the business broke', async () => {
+    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { freeUntilHours: 720, lateFee: '10' }));
+    const date = dayPlus(29);
+    const a = (await must(visit(officerB, date, '15:00', { travelMinutes: 0 }))).json();
+    const b = (await must(visit(officerB, date, '16:00'))).json();
+    await must(post(`/internal/appointments/${a.id}/delay`, { minutes: 30 }));
+    expect((await appt(b.id)).status).toBe('needs_reschedule');
+    expect((await must(post(`/internal/appointments/${b.id}/cancel`, { by: 'customer', reason: 'Cannot wait' }))).json().fee).toBe('0.00000000');   // flagged by the business
+    const c = (await must(visit(officerB, dayPlus(30), '09:00', { travelMinutes: 0 }))).json();
+    const d = (await must(visit(officerB, dayPlus(30), '10:00'))).json();
+    await must(post(`/internal/appointments/${c.id}/delay`, { minutes: 30 }));
+    expect((await must(post(`/internal/appointments/${d.id}/reschedule`, { by: 'customer', startsAt: at(dayPlus(31), '10:00') }))).json().replacesId).toBe(d.id);
+    expect((await appt(d.id)).fee).toBe('0.00000000');                                                                // delayed by the business
+    const own = (await must(visit(officerB, dayPlus(18), '09:00'))).json();
+    expect((await must(post(`/internal/appointments/${own.id}/cancel`, { by: 'customer', reason: 'Busy' }))).json().fee).toBe('10.00000000');           // its own cancellation is charged
+    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { freeUntilHours: 24, lateFee: '25.50' }));
+  });
+
+  it('counts a group member\'s load by their own calendar day', async () => {
+    const mk = async (name: string, ref: string) => (await must(post(`/internal/tenants/${tenantId}/diaries`, { name, kind: 'individual', officerRef: ref, timeZone: KL }))).json().id as string;
+    const c = await mk('Early C', 'officer-c'); const d = await mk('Early D', 'officer-d');
+    for (const x of [c, d]) await must(put(`/internal/diaries/${x}/hours`, { hours: [0, 1, 2, 3, 4, 5, 6].map((dow) => ({ dow, starts: '06:00', ends: '17:00' })) }));
+    const grp = (await must(post(`/internal/tenants/${tenantId}/diaries`, { name: 'Early team', kind: 'group', timeZone: KL, members: [c, d] }))).json().id as string;
+    const date = dayPlus(33);
+    for (const t of ['06:00', '06:30', '07:00']) await must(comeIn(c, date, t, { durationMinutes: 20 }));                // 22:00 to 23:00 UTC the day before: the same local day
+    await must(comeIn(d, date, '10:00'));
+    const booked = (await must(comeIn(grp, date, '12:00'))).json();
+    expect(booked.diaryId).toBe(d);                                                                                    // D has one that day, C has three
+  });
+
+  it('will not delay, cancel or move an appointment that is already over, and will not strand a booking by changing hours', async () => {
+    const r = (await must(comeIn(officerA, dayPlus(34), '09:00'))).json();
+    await env.pool.query(`UPDATE appointments SET starts_at = starts_at - interval '40 days', ends_at = ends_at - interval '40 days' WHERE id = $1`, [r.id]);
+    expect((await post(`/internal/appointments/${r.id}/delay`, { minutes: 10 })).statusCode).toBe(409);
+    expect((await post(`/internal/appointments/${r.id}/cancel`, { by: 'customer', reason: 'late' })).statusCode).toBe(409);
+    expect((await post(`/internal/appointments/${r.id}/reschedule`, { by: 'customer', startsAt: at(dayPlus(35), '09:00') })).statusCode).toBe(409);
+    await must(comeIn(officerA, dayPlus(36), '09:00'));
+    expect((await put(`/internal/diaries/${officerA}/hours`, { hours: [] })).statusCode).toBe(409);                    // would leave that booking with no hours
+    expect((await put(`/internal/diaries/${officerA}/hours`, { hours: [0, 1, 2, 3, 4, 5, 6].map((dow) => ({ dow, starts: '09:00', ends: '17:00' })) })).statusCode).toBe(200);
+  });
+
+  it('refuses to move an appointment into an inactive diary, and sends one reminder even after a delay', async () => {
+    const inactive = (await must(post(`/internal/tenants/${tenantId}/diaries`, { name: 'Retired', kind: 'individual', officerRef: 'officer-old', timeZone: KL }))).json().id as string;
+    await env.pool.query('UPDATE diaries SET active = false WHERE id = $1', [inactive]);
+    const date = dayPlus(37);
+    const a = (await must(comeIn(officerA, date, '09:00'))).json();
+    expect((await post(`/internal/appointments/${a.id}/reschedule`, { by: 'client', startsAt: at(date, '10:00'), diaryId: inactive })).statusCode).toBe(404);
+    const v = (await must(visit(officerB, dayPlus(38), '09:00', { travelMinutes: 0 }))).json();
+    await env.pool.query(`UPDATE appointments SET starts_at = now() + interval '6 hours', ends_at = now() + interval '6 hours 45 minutes', original_starts_at = now() + interval '6 hours' WHERE id = $1`, [v.id]);
+    await must(post(`/internal/tenants/${tenantId}/appointments/sweep-reminders`));
+    await must(post(`/internal/appointments/${v.id}/delay`, { minutes: 15 }));
+    const again = (await must(post(`/internal/tenants/${tenantId}/appointments/sweep-reminders`))).json();
+    expect((await notes(v.id)).filter((n) => n.kind === 'reminder')).toHaveLength(1);
+    expect(again.reminders).toBeGreaterThanOrEqual(0);
   });
 });

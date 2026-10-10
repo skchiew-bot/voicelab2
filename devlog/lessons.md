@@ -186,11 +186,12 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/appointments.test.ts` › "counts a group member's load by their own calendar day"
 
 ### L-023: Keep every branch accountable to the plan, and the trunk as the default
-- **Seen:** The repository's default branch on GitHub was still the first session branch (`claude/elegant-fermat-er13o8`), long merged, so clones and the GitHub page showed stale code; seven merged branches were never deleted; and nothing checked that a branch belonged to the plan (found by the dev Control Tower branch audit, 2026-10-10).
-- **Rule:** Every branch is either named for a plan phase or carries a PR titled with one. A branch justified only by a board task is listed for the owner to confirm, and anything else is a fork; never create or link a task just to clear the warning. The default branch is `main`. Deleting branches and changing the default are the owner's calls: report them, never do them unasked.
+- **Seen:** The repository's default branch on GitHub was still the first session branch (`claude/elegant-fermat-er13o8`), long merged, so clones and the GitHub page showed stale code; seven merged branches were never deleted; and nothing checked that a branch belonged to the plan (found by the dev Control Tower branch audit, 2026-10-10). A cloud session could not delete merged branches when asked: the git proxy refuses deletes and no GitHub tool deletes a branch, so a workflow now does it ([#20](https://github.com/skchiew-bot/voicelab2/pull/20)).
+- **Rule:** Every branch is either named for a plan phase or carries a PR titled with one. A branch justified only by a board task is listed for the owner to confirm, and anything else is a fork; never create or link a task just to clear the warning. The default branch is `main`. Deleting branches and changing the default are the owner's calls: report them, never do them unasked. Merged `claude/` branches are deleted on merge by the `delete-merged-branches` workflow; when the owner asks, run that workflow (a cloud session cannot delete a branch with git).
 - **Guards:**
   - `tests/devlog.test.ts` › "classes every branch as the trunk, part of the plan, task-only or a fork"
   - `tests/devlog.test.ts` › "runs no audit and flags nothing when the trunk cannot be found"
+  - `.github/workflows/delete-merged-branches.yml` › "Refusing to delete the default branch."
 
 ### L-024: A check the checked party can pass by itself proves nothing
 - **Seen:** The first branch audit counted any branch linked to a board task as part of the plan, and its instructions told sessions to link a task to clear the fork warning: a session could invent a task and approve its own branch (independent review, 2026-10-10).

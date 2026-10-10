@@ -1,11 +1,22 @@
-# Keeps the repository's branch list honest (lesson L-023): a branch is deleted once its pull request is merged, and the
-# "Run workflow" button sweeps any `claude/` branch already fully contained in main. Only merged work is ever deleted.
+# Keeps the repository's branch list honest (lesson L-023). A branch is deleted once its pull request is merged. Run by
+# hand (or by a Claude Code session through the GitHub tools, which cannot delete a branch directly), it sweeps every
+# `claude/` branch already fully contained in main, or, given `branch`, deletes that one branch. A branch with work not
+# in main is kept unless `unmerged` is "yes", which only the owner asks for.
 name: Delete merged branches
 
 on:
   pull_request:
     types: [closed]
   workflow_dispatch:
+    inputs:
+      branch:
+        description: 'One branch to delete (blank: sweep every claude/ branch already in main)'
+        required: false
+        default: ''
+      unmerged:
+        description: 'Type yes to delete the named branch even though it has work not in main'
+        required: false
+        default: 'no'
 
 permissions:
   contents: write
@@ -27,11 +38,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - name: Delete claude/ branches already contained in main
+      - name: Delete merged branches (or the one named)
         env:
           GH_TOKEN: ${{ github.token }}
+          ONE: ${{ inputs.branch }}
+          UNMERGED: ${{ inputs.unmerged }}
         run: |
           git fetch origin main
+          if [ -n "$ONE" ]; then
+            if [ "$ONE" = "main" ] || [ "$ONE" = "${{ github.event.repository.default_branch }}" ]; then echo "Refusing to delete the default branch."; exit 1; fi
+            if ! git rev-parse --verify --quiet "origin/$ONE" >/dev/null; then echo "No branch named $ONE."; exit 0; fi
+            ahead=$(git rev-list --count "origin/main..origin/$ONE")
+            if [ "$ahead" != "0" ] && [ "$UNMERGED" != "yes" ]; then echo "Keeping $ONE: $ahead commits not in main (set unmerged=yes to delete anyway)."; exit 1; fi
+            echo "Deleting $ONE ($ahead commits not in main)"
+            gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$ONE"
+            exit 0
+          fi
           for b in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin/claude/ | sed 's#^origin/##'); do
             if [ "$(git rev-list --count "origin/main..origin/$b")" = "0" ]; then
               echo "Deleting $b (fully merged)"

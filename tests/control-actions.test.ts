@@ -77,6 +77,30 @@ describe('draining a provider', () => {
   });
 });
 
+describe('a drained provider in the retry path', () => {
+  it('is not tried when the first provider refuses the dial: the call fails rather than going to a drained provider', async () => {
+    const t = await freshTenant('Retry Co', [[telnyxId, '+60300000601'], [twilioId, '+60300000602']]);
+    await forgetDials(); env.provider.calls.length = 0;
+    await must(act({ action: 'drain', providerId: twilioId, reason: 'Resting Twilio.' }));
+    const before = env.provider.state.respond;
+    // Telnyx (the cheaper, first choice) refuses outright: a definite "no", which would normally be tried on another provider.
+    env.provider.state.respond = (url, init) => (url.endsWith('/v2/calls') ? new Response('{"errors":[{"detail":"number not allowed"}]}', { status: 403 }) : before(url, init));
+    try {
+      const r = await dial(t);
+      expect(r.statusCode).toBe(502);
+      expect(dials().map(usedProvider)).toEqual([telnyxId]);                                       // never Twilio
+    } finally { env.provider.state.respond = before; }
+    // With Twilio restored, the same refusal is retried there.
+    await must(act({ action: 'restore', providerId: twilioId, reason: 'Done resting.' }));
+    env.provider.state.respond = (url, init) => (url.endsWith('/v2/calls') ? new Response('{"errors":[{"detail":"number not allowed"}]}', { status: 403 }) : before(url, init));
+    try {
+      expect((await must(dial(t))).json().status).toBe('dialing');
+      expect(dials().map(usedProvider).slice(-2)).toEqual([telnyxId, twilioId]);
+    } finally { env.provider.state.respond = before; }
+    await clearActive();
+  });
+});
+
 describe('a drain that leaves no provider', () => {
   it('holds dials back instead of failing them, so a case callback keeps its retries, and voice providers cannot be drained to nothing', async () => {
     const t = await freshTenant('Only Co', [[twilioId, '+60300000501']]);

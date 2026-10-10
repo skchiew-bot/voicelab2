@@ -283,3 +283,25 @@ describe('what a review found', () => {
 });
 
 const createArticleRaw = (b: object) => A.post(`/internal/tenants/${tenantId}/knowledge`, { title: 'T', body: 'Body text.', ...b });
+
+describe('requests that arrive together', () => {
+  it('approves each level once and in order when three people approve at the same moment, and publishes a draft once', async () => {
+    const mk = async (email: string) => (await withActor(env.pool, { kind: 'internal' }, (c) => createUser(c, null, { tenantId: null, email, role: 'internal_admin' }))).token;
+    const [p1, p2, p3] = [await mk('race-1@daythree.test'), await mk('race-2@daythree.test'), await mk('race-3@daythree.test')];
+    const t = (await must(A.post('/internal/tenants', { name: 'Race Co' }))).json().id as string;
+    await must(A.put(`/internal/tenants/${t}/policy/levels`, { levels: ['One', 'Two'] }));
+    const prop = (await must(A.post(`/internal/tenants/${t}/policy/proposals`, { rules: [{ id: 'r', kind: 'must_not_say', phrases: ['we will sue'] }], summary: 'Race test.' }))).json();
+    const res = await Promise.all([p1, p2, p3].map((tok) => as(tok).post(`/internal/policy-versions/${prop.id}/decision`, { decision: 'approved' })));
+    expect(res.map((r) => r.statusCode).sort()).toEqual([200, 200, 409]);                       // two levels, two approvals; the third finds it settled
+    const v = (await A.get(`/internal/policy-versions/${prop.id}`)).json();
+    expect(v.status).toBe('approved');
+    expect(v.progress.map((l: { level: number; decision: string }) => [l.level, l.decision])).toEqual([[0, 'approved'], [1, 'approved']]);
+    expect(new Set(v.progress.map((l: { decided_by: string }) => l.decided_by)).size).toBe(2);   // two different people
+
+    const art = (await must(A.post(`/internal/tenants/${t}/knowledge`, { slug: 'race', title: 'Race', body: 'Only one publish wins.' }))).json();
+    const draft = art.versions[0].id as string;
+    const pub = await Promise.all([p1, p2].map((tok) => as(tok).post(`/internal/knowledge-versions/${draft}/publish`, {})));
+    expect(pub.map((r) => r.statusCode).sort()).toEqual([200, 409]);
+    expect((await env.pool.query(`SELECT count(*)::int AS n FROM knowledge_versions WHERE article_id = $1 AND status = 'published'`, [art.id])).rows[0].n).toBe(1);
+  });
+});

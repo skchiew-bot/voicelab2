@@ -316,3 +316,20 @@ describe('found in review', () => {
     expect((await probeProviders(session())).map((p) => p.providerId)).not.toContain(B);
   });
 });
+
+describe('a voice provider an operator drained', () => {
+  it('is skipped for new calls while its real health stays healthy, and is used again once restored', async () => {
+    await reset();
+    await must(post('/internal/control-tower/actions', { action: 'drain', providerId: A, reason: 'Voice A maintenance.' }));
+    try {
+      const r = await speakLines(session(), { tenantId, callId: callId(), lines: LINES });
+      expect(r.outcome).toBe('completed');
+      expect(voices[A]!.attempts).toBe(0);                                       // never asked
+      expect(voices[B]!.said).toEqual(LINES);
+      expect(await healthOf(A)).toBeUndefined();                                 // draining is not a failure
+    } finally { await must(post('/internal/control-tower/actions', { action: 'restore', providerId: A, reason: 'Maintenance over.' })); }
+    await reset();
+    await speakLines(session(), { tenantId, callId: callId(), lines: LINES });
+    expect(voices[A]!.said).toEqual(LINES);
+  });
+});

@@ -934,9 +934,13 @@ describe.skipIf(!run)('admin UI', () => {
     await signIn(page, env.staffToken);
     const card = page.getByLabel('Take action');
     await card.getByLabel('Action').selectOption('set_pace');
-    await card.getByLabel(/^Dials a minute/).fill('30');
+    await card.getByLabel(/^Dials a minute/).fill('1,000');
     await expect(card.getByRole('button', { name: 'Do it' })).toBeDisabled();                  // no reason, no action
     await card.getByLabel(/^Why/).fill('Ramping up the new campaign.');
+    await card.getByRole('button', { name: 'Do it' }).click();
+    await expect(card.getByRole('alert')).toContainText('digits only');                         // "1,000" is never read as "no limit"
+    await expect(card).toContainText('Dialling pace: no limit');
+    await card.getByLabel(/^Dials a minute/).fill('30');
     await card.getByRole('button', { name: 'Do it' }).click();
     await expect(card.getByRole('status')).toContainText('Done');
     await expect(card).toContainText('Dialling pace: 30 dials a minute');

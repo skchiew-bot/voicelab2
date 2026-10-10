@@ -156,7 +156,7 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   if (ap.unsentOverAnHour > 0) add('medium', 'appointments_unsent', `${ap.unsentOverAnHour} appointment message${ap.unsentOverAnHour === 1 ? ' has' : 's have'} waited over an hour to be delivered.`, '#/appointments');
   const queued = (await c.query(`SELECT count(*)::int AS n FROM calls WHERE status = 'queued'`)).rows[0].n as number;
   if (queued > 0) add('medium', 'calls_queued', `${queued} inbound call${queued === 1 ? ' is' : 's are'} waiting for a free channel.`, '#/calls');
-  const deferred = (await c.query(`SELECT count(*)::int AS n FROM failover_events WHERE scope = 'telephony' AND trigger = 'capacity' AND coalesce(detail->>'reason', '') <> 'pace' AND at > now() - interval '1 hour'`)).rows[0].n as number;
+  const deferred = (await c.query(`SELECT count(*)::int AS n FROM failover_events WHERE scope = 'telephony' AND trigger = 'capacity' AND coalesce(detail->>'reason', '') NOT IN ('pace', 'drained') AND at > now() - interval '1 hour'`)).rows[0].n as number;
   if (deferred > 0) add('medium', 'dials_deferred', `${deferred} outbound dial${deferred === 1 ? ' was' : 's were'} held back in the last hour because every provider was at its concurrency limit.`, '#/numbers');
 
   alerts.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);

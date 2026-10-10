@@ -10,6 +10,7 @@ import { AppError } from '../errors.js';
 import type { State } from '../resilience/failover.js';
 import { audit } from './audit.js';
 import { cleanNote } from './cases.js';
+import { outboundPerMinuteUsd } from './dids.js';
 import { healthMap, logFailover } from './resilience.js';
 
 const id = z.string().uuid();
@@ -18,6 +19,7 @@ export const actionSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('drain'), providerId: id, reason }).strict(),
   z.object({ action: z.literal('restore'), providerId: id, reason }).strict(),
   z.object({ action: z.literal('force_failover'), providerId: id, reason }).strict(),
+  z.object({ action: z.literal('end_failover'), providerId: id, reason }).strict(),
   z.object({ action: z.literal('set_preferred'), providerId: id, reason }).strict(),
   z.object({ action: z.literal('clear_preferred'), providerId: id, reason }).strict(),
   z.object({ action: z.literal('set_pace'), perMinute: z.number().int().min(1).max(100_000).nullable(), reason }).strict(),
@@ -45,6 +47,16 @@ export async function runAction(c: pg.PoolClient, actorId: string, e: ControlAct
       if (e.action === 'drain') {
         if (p.status !== 'active') throw new AppError(409, `${p.name} is not in use, so there is nothing to drain.`);
         if (cur?.drained_at) throw new AppError(409, `${p.name} is already drained.`);
+        // A voice provider is routed per client. Draining the last usable one a client has would send every new call
+        // of theirs down the fallback ladder, so it is refused: route them to another provider first.
+        if (p.kind !== 'telephony') {
+          const stranded = (await c.query(
+            `SELECT count(DISTINCT r.tenant_id)::int AS n FROM provider_routes r WHERE r.provider_id = $1 AND r.role = 'voice'
+                AND NOT EXISTS (SELECT 1 FROM provider_routes o JOIN providers op ON op.id = o.provider_id
+                                 WHERE o.tenant_id = r.tenant_id AND o.role = 'voice' AND o.provider_id <> $1 AND op.status = 'active'
+                                   AND NOT EXISTS (SELECT 1 FROM provider_controls k WHERE k.provider_id = o.provider_id AND k.drained_at IS NOT NULL))`, [p.id])).rows[0].n as number;
+          if (stranded > 0) throw new AppError(409, `${p.name} is the only usable voice provider for ${stranded} client${stranded === 1 ? '' : 's'}. Add another provider to their routes on the Resilience screen before draining it.`);
+        }
         await c.query(`INSERT INTO provider_controls (provider_id, drained_at, drained_by, drained_reason) VALUES ($1, now(), $2, $3)
                        ON CONFLICT (provider_id) DO UPDATE SET drained_at = now(), drained_by = $2, drained_reason = $3, updated_at = now()`, [p.id, actorId, why]);
       } else if (e.action === 'restore') {
@@ -53,23 +65,34 @@ export async function runAction(c: pg.PoolClient, actorId: string, e: ControlAct
       } else {
         if (p.kind !== 'telephony') throw new AppError(400, 'Only a telephony provider can be preferred here. A client\'s voice providers are put in order on the Resilience screen.');
         const want = e.action === 'set_preferred';
+        if (want && (await outboundPerMinuteUsd(c, p.id, new Date())) === null) throw new AppError(409, `${p.name} has no outbound rate in force, so its calls could not be priced. Add its rates before preferring it.`);
         if ((cur?.preferred ?? false) === want) throw new AppError(409, `${p.name} is ${want ? 'already' : 'not'} preferred.`);
         await c.query(`INSERT INTO provider_controls (provider_id, preferred) VALUES ($1, $2) ON CONFLICT (provider_id) DO UPDATE SET preferred = $2, updated_at = now()`, [p.id, want]);
       }
       await audit(c, actorId, `control.${e.action}`, 'provider', p.id, { reason: why });
       break;
     }
-    case 'force_failover': {
+    case 'force_failover': case 'end_failover': {
       const p = await provider(c, e.providerId);
       if (p.status !== 'active') throw new AppError(409, `${p.name} is not in use.`);
       await lock(c, `health:${p.id}`);                  // the lock health changes take
       const state = (await healthMap(c, [p.id])).get(p.id) ?? 'healthy';
-      if (state !== 'healthy') throw new AppError(409, `${p.name} is already ${state === 'unfunded' ? 'out of funding' : 'failed over'}.`);
-      // Failed like any other failover: it earns its way back through the recovery rules, after a run of good attempts.
-      await c.query(`INSERT INTO provider_health (provider_id, state, reason, ok_streak, since, updated_at) VALUES ($1, 'failed', $2, 0, now(), now())
-                     ON CONFLICT (provider_id) DO UPDATE SET state = 'failed', reason = $2, ok_streak = 0, since = now(), updated_at = now()`, [p.id, 'Failed over by an operator.']);
-      await logFailover(c, { scope: 'provider_health', from: p.id, trigger: 'operator', detail: { from: 'healthy', to: 'failed' } });
-      await audit(c, actorId, 'control.force_failover', 'provider', p.id, { reason: why });
+      // The application's clock, as for every health change, so samples after this moment are compared on one clock.
+      const now = new Date();
+      if (e.action === 'force_failover') {
+        if (state !== 'healthy') throw new AppError(409, `${p.name} is already ${state === 'unfunded' ? 'out of funding' : 'failed over'}.`);
+        // Failed like any other failover: a voice provider earns its way back through probes and the recovery rules.
+        // A telephony provider has no probe yet, so an operator ends the failover by hand (end_failover).
+        await c.query(`INSERT INTO provider_health (provider_id, state, reason, ok_streak, since, updated_at) VALUES ($1, 'failed', $2, 0, $3, now())
+                       ON CONFLICT (provider_id) DO UPDATE SET state = 'failed', reason = $2, ok_streak = 0, since = $3, updated_at = now()`, [p.id, 'Failed over by an operator.', now]);
+        await logFailover(c, { scope: 'provider_health', from: p.id, trigger: 'operator', detail: { from: 'healthy', to: 'failed' } });
+      } else {
+        // The way back from any failover a person judges over. Running out of funding is not ended here: a top-up does that.
+        if (state !== 'failed') throw new AppError(409, state === 'unfunded' ? `${p.name} is out of funding; record a top-up to bring it back.` : `${p.name} is not failed over.`);
+        await c.query(`UPDATE provider_health SET state = 'healthy', reason = NULL, ok_streak = 0, since = $2, updated_at = now() WHERE provider_id = $1`, [p.id, now]);
+        await logFailover(c, { scope: 'provider_health', from: p.id, trigger: 'operator', detail: { from: 'failed', to: 'healthy' } });
+      }
+      await audit(c, actorId, `control.${e.action}`, 'provider', p.id, { reason: why });
       break;
     }
     case 'set_pace': {
@@ -102,6 +125,10 @@ export async function routingHealth(c: pg.PoolClient, providerIds?: string[]): P
   for (const d of drained) health.set(d.provider_id, 'failed');
   return health;
 }
+
+/** Providers an operator has drained. */
+export const drainedSet = async (c: pg.PoolClient): Promise<Set<string>> =>
+  new Set((await c.query('SELECT provider_id FROM provider_controls WHERE drained_at IS NOT NULL')).rows.map((r) => r.provider_id as string));
 
 /** The current pace, or null for no limit. */
 export const dialPace = async (c: pg.PoolClient): Promise<number | null> => (await c.query('SELECT per_minute FROM dial_pace')).rows[0]?.per_minute ?? null;

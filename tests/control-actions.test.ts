@@ -59,9 +59,10 @@ describe('draining a provider', () => {
     await must(act({ action: 'drain', providerId: telnyxId, reason: 'Carrier incident reported by Telnyx.' }));
     expect((await act({ action: 'drain', providerId: telnyxId, reason: 'again' })).statusCode).toBe(409);
     await must(dial(t)); expect(dials().map(usedProvider)).toEqual([telnyxId, twilioId]);                       // the pool goes elsewhere
-    // Naming a drained provider's own caller ID is refused, as for a failed provider, instead of going out anyway.
+    // Naming a drained provider's own caller ID waits (it is resting, not broken): nothing goes out and no call is recorded.
     const named = await dial(t, { from: '+60300000101' });
-    expect(named.statusCode).toBe(503); expect(dials()).toHaveLength(2);
+    expect(named.statusCode).toBe(429); expect(named.json()).toMatchObject({ deferred: true }); expect(dials()).toHaveLength(2);
+    expect((await env.pool.query('SELECT 1 FROM calls WHERE id = $1', [named.json().callId])).rowCount).toBe(0);
     const alert = (await must(env.call(st(), 'GET', '/internal/control-tower'))).json().alerts.find((a: { code: string }) => a.code === 'provider_drained');
     expect(alert).toMatchObject({ severity: 'medium', message: 'tx is drained by an operator and takes no new calls until it is restored.' });
     expect((await controls()).providers.find((p: { id: string }) => p.id === telnyxId).drained).toMatchObject({ by: 'staff@daythree.test', reason: 'Carrier incident reported by Telnyx.' });
@@ -72,6 +73,27 @@ describe('draining a provider', () => {
       ['control.restore', 'staff@daythree.test', 'Telnyx says the incident is over.'],
       ['control.drain', 'staff@daythree.test', 'Carrier incident reported by Telnyx.'],
     ]);
+    await clearActive();
+  });
+});
+
+describe('a drain that leaves no provider', () => {
+  it('holds dials back instead of failing them, so a case callback keeps its retries, and voice providers cannot be drained to nothing', async () => {
+    const t = await freshTenant('Only Co', [[twilioId, '+60300000501']]);
+    env.provider.calls.length = 0;
+    await must(act({ action: 'drain', providerId: twilioId, reason: 'Planned maintenance window.' }));
+    const r = await dial(t);
+    expect(r.statusCode).toBe(429); expect(r.json()).toMatchObject({ deferred: true }); expect(dials()).toHaveLength(0);
+    expect((await env.pool.query(`SELECT count(*)::int AS n FROM calls WHERE tenant_id = $1`, [t])).rows[0].n).toBe(0);   // no failed call row
+    expect((await env.pool.query(`SELECT detail->>'reason' AS reason FROM failover_events WHERE tenant_id = $1 ORDER BY id DESC LIMIT 1`, [t])).rows[0].reason).toBe('drained');
+    // Named by provider too: still a wait, not a refusal.
+    expect((await dial(t, { providerId: twilioId })).statusCode).toBe(429);
+    await must(act({ action: 'restore', providerId: twilioId, reason: 'Maintenance done.' }));
+    expect((await must(dial(t))).json().status).toBe('dialing');
+    // A client whose only voice route is this provider would be left with none: refused, with the reason.
+    await must(env.call(st(), 'PUT', `/internal/tenants/${t}/routes/voice`, { providerIds: [voiceId] }));
+    const v = await act({ action: 'drain', providerId: voiceId, reason: 'Testing.' });
+    expect(v.statusCode).toBe(409); expect(v.json().error).toContain('only usable voice provider for 1 client');
     await clearActive();
   });
 });
@@ -87,6 +109,12 @@ describe('forcing a failover', () => {
     expect(ev).toEqual({ trigger: 'operator', detail: { from: 'healthy', to: 'failed' } });
     for (let i = 0; i < 2; i++) await must(post(`/internal/providers/${twilioId}/samples`, { kind: 'ok', latencyMs: 50 }));
     expect((await must(env.call(st(), 'GET', '/internal/resilience/health'))).json().find((h: { provider_id: string }) => h.provider_id === twilioId).state).toBe('healthy');
+    // A telephony provider has no probe, so a person can end a failover, with a reason; one that is not failed cannot be "ended".
+    await must(act({ action: 'force_failover', providerId: twilioId, reason: 'Again, to test ending it.' }));
+    await must(act({ action: 'end_failover', providerId: twilioId, reason: 'Twilio confirmed the fix.' }));
+    expect((await must(env.call(st(), 'GET', '/internal/resilience/health'))).json().find((h: { provider_id: string }) => h.provider_id === twilioId).state).toBe('healthy');
+    expect((await act({ action: 'end_failover', providerId: twilioId, reason: 'nothing to end' })).statusCode).toBe(409);
+    expect((await log())[0]).toMatchObject({ action: 'control.end_failover', why: 'Twilio confirmed the fix.' });
   });
 });
 
@@ -99,6 +127,10 @@ describe('a preferred telephony provider', () => {
     await must(act({ action: 'clear_preferred', providerId: twilioId, reason: 'Trial over.' }));
     await must(dial(t)); expect(dials().map(usedProvider)).toEqual([twilioId, telnyxId]);
     expect((await act({ action: 'set_preferred', providerId: voiceId, reason: 'not telephony' })).statusCode).toBe(400);
+    // A provider with no outbound rate cannot be preferred: its calls could not be priced.
+    const bare = (await must(post('/internal/providers', { adapterKey: 'twilio', name: 'tw-norate', params: { accountSid: 'AC9', authToken: 'tok', twimlAppVoiceUrl: `${BASE}/v` } }))).json().id;
+    const refused = await act({ action: 'set_preferred', providerId: bare, reason: 'Cheaper, apparently.' });
+    expect(refused.statusCode).toBe(409); expect(refused.json().error).toContain('no outbound rate');
     await clearActive();
   });
 });
@@ -118,6 +150,11 @@ describe('the dialling pace', () => {
     // Held back by the pace is not "every provider is full".
     expect((await must(env.call(st(), 'GET', '/internal/control-tower'))).json().alerts.map((a: { code: string }) => a.code)).not.toContain('dials_deferred');
     expect((await must(env.call(st(), 'GET', '/internal/control-tower/panels'))).json().concurrency).toMatchObject({ pacePerMinute: 2, paced24h: 2 });
+    // A dial that never went out (blocked by the gate) does not use up the minute.
+    await forgetDials(); await must(act({ action: 'set_pace', perMinute: 1, reason: 'One a minute.' }));
+    await env.pool.query(`INSERT INTO calls (id, tenant_id, provider_id, direction, status) VALUES (gen_random_uuid(), $1, $2, 'outbound', 'blocked')`, [t, telnyxId]);
+    await env.pool.query(`INSERT INTO calls (id, tenant_id, provider_id, direction, status, end_reason) VALUES (gen_random_uuid(), $1, $2, 'outbound', 'failed', 'did_locked')`, [t, telnyxId]);
+    expect((await must(dial(t))).json().status).toBe('dialing');
     await must(act({ action: 'set_pace', perMinute: null, reason: 'Campaign is stable.' }));
     expect((await must(dial(t))).json().status).toBe('dialing');
     expect((await log())[0]).toMatchObject({ action: 'control.set_pace', why: 'Campaign is stable.' });
@@ -146,7 +183,10 @@ describe('who may act', () => {
   it('is staff only, and keeps a number out of the reason', async () => {
     const tenant = (await must(post('/internal/tenants', { name: 'Who Co' }))).json().id;
     const user = (await must(post(`/internal/tenants/${tenant}/users`, { email: 'client@who.test', role: 'tenant_admin' }))).json();
-    expect((await act({ action: 'set_pace', perMinute: 5, reason: 'try' }, user.token)).statusCode).toBe(403);
+    for (const body of [{ action: 'set_pace', perMinute: 5 }, { action: 'drain', providerId: twilioId }, { action: 'force_failover', providerId: twilioId }, { action: 'end_failover', providerId: twilioId },
+      { action: 'set_preferred', providerId: twilioId }, { action: 'retire_number', phoneNumberId: twilioId }]) {
+      expect((await act({ ...body, reason: 'try this' }, user.token)).statusCode).toBe(403);
+    }
     expect((await env.call(user.token, 'GET', '/internal/control-tower/controls')).statusCode).toBe(403);
     expect((await act({ action: 'set_pace', perMinute: 5, reason: 'customer on +60 12-345 6789 complained' })).statusCode).toBe(400);
     void withActor; void createUser;

@@ -76,7 +76,7 @@ async function concurrency(c: pg.PoolClient) {
   const load = await providerLoad(c, providers.map((p) => p.id));
   const burst = (await c.query(`SELECT provider_id, count(*)::int AS n FROM calls WHERE burst AND started_at > now() - interval '24 hours' GROUP BY provider_id`)).rows;
   const held = (await c.query(
-    `SELECT count(*) FILTER (WHERE coalesce(detail->>'reason', '') <> 'pace')::int AS full, count(*) FILTER (WHERE detail->>'reason' = 'pace')::int AS paced
+    `SELECT count(*) FILTER (WHERE coalesce(detail->>'reason', '') NOT IN ('pace', 'drained'))::int AS full, count(*) FILTER (WHERE detail->>'reason' = 'pace')::int AS paced
        FROM failover_events WHERE scope = 'telephony' AND trigger = 'capacity' AND at > now() - interval '24 hours'`)).rows[0];
   const deferred = held.full as number;
   const tenants = (await c.query(

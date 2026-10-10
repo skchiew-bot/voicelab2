@@ -322,7 +322,7 @@ async function dispatchOne(d: CaseDeps, a: { id: string; case_id: string; kind: 
       return 'blocked' as const;
     }
     if ('deferred' in placed && placed.deferred) {
-      await hold(c, a.id, new Date(clock().getTime() + RETRY_AFTER_SECONDS * 1000), 'Every provider is full; trying again shortly.');
+      await hold(c, a.id, new Date(clock().getTime() + RETRY_AFTER_SECONDS * 1000), 'No dial could start yet (providers full or drained, or the dialling pace reached); trying again shortly.');
       return 'deferred' as const;
     }
     await c.query('UPDATE calls SET case_id = $2 WHERE id = $1', [placed.callId, cs.id]);

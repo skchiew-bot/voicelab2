@@ -21,5 +21,8 @@ CREATE TABLE dial_pace (
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- The dialling pace counts outbound dials started in the last minute on every dial.
+CREATE INDEX calls_outbound_started_idx ON calls (started_at) WHERE direction = 'outbound';
+
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO voicelab_internal;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO voicelab_internal;

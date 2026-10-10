@@ -9,7 +9,7 @@ export const DID_FAILURE_REASONS = ['spam_flagged', 'carrier_blocked', 'rejected
 export type DidFailureReason = (typeof DID_FAILURE_REASONS)[number];
 
 /** USD per minute a provider charges for the outbound telephony leg now, or null if no rate is captured. */
-async function outboundPerMinuteUsd(c: pg.PoolClient, providerId: string, at: Date): Promise<bigint | null> {
+export async function outboundPerMinuteUsd(c: pg.PoolClient, providerId: string, at: Date): Promise<bigint | null> {
   const version = (await c.query(
     `SELECT id FROM charging_versions WHERE provider_id = $1 AND effective_from <= $2 ORDER BY effective_from DESC LIMIT 1`, [providerId, at])).rows[0];
   if (!version) return null;
@@ -82,7 +82,8 @@ export async function chooseDid(
   // A provider an operator preferred comes first; then providers with a known price, cheapest first; a provider with no
   // captured rate is used only if no priced one is eligible.
   const rank = (pid: string) => price.get(pid) ?? null;
-  const preferred = new Set(eligible.filter((n) => n.preferred).map((n) => n.provider_id));
+  // A preference never puts an unpriced provider ahead of a priced one: a call that cannot be priced is refused, not guessed.
+  const preferred = new Set(eligible.filter((n) => n.preferred && price.get(n.provider_id) != null).map((n) => n.provider_id));
   const cheapest = [...new Set(eligible.map((n) => n.provider_id))].sort((a, b) => {
     if (preferred.has(a) !== preferred.has(b)) return preferred.has(a) ? -1 : 1;
     const x = rank(a); const y = rank(b);

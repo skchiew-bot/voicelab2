@@ -15,8 +15,8 @@ import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.
 import { recordCallEnd } from './call-end.js';
 import { caseCallEnded, recogniseInbound, safely } from './cases.js';
 import { recordEvent } from './events.js';
-import { logFailover, recordSample } from './resilience.js';
-import { dialPace, routingHealth } from './control-actions.js';
+import { healthMap, logFailover, recordSample } from './resilience.js';
+import { dialPace, drainedSet, routingHealth } from './control-actions.js';
 
 export interface CallDeps { pool: pg.Pool; key: Buffer; dncKey: Buffer; http: Fetch; baseUrl?: string; tolerancePct?: number }
 
@@ -100,8 +100,9 @@ export async function placeOutboundCall(d: CallDeps, actorId: string | null, inp
     const decision = await gateOutbound(c, d.dncKey, { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, to: input.to, contactHash: chash ?? undefined, timeZone: input.timeZone, now: input.now });
     const anyTelephony = async () => (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' ORDER BY created_at LIMIT 1`)).rows[0]?.id as string | undefined;
     const insertCall = (providerId: string, status: string, fromId: string | null, o: { reason?: string; burst?: boolean; creditMultiplier?: string | null } = {}) => c.query(
-      `INSERT INTO calls (id, tenant_id, project_id, provider_id, direction, status, country, cost_status, from_number_id, contact_hash, end_reason, ended_at, burst, credit_multiplier)
-       VALUES ($1,$2,$3,$4,'outbound',$5,$6,$7,$8,$9,$10, CASE WHEN $5 = 'dialing' THEN NULL ELSE now() END,$11,$12)`,
+      // Started when it is decided (the clock now, not when the transaction began), so the dialling pace counts real minutes.
+      `INSERT INTO calls (id, tenant_id, project_id, provider_id, direction, status, country, cost_status, from_number_id, contact_hash, end_reason, ended_at, burst, credit_multiplier, started_at)
+       VALUES ($1,$2,$3,$4,'outbound',$5,$6,$7,$8,$9,$10, CASE WHEN $5 = 'dialing' THEN NULL ELSE now() END,$11,$12, clock_timestamp())`,
       // A call that never connects (blocked, no usable caller ID) has nothing to price.
       [callId, input.tenantId, input.projectId ?? null, providerId, status, input.country, status === 'dialing' ? 'pending' : 'not_applicable', fromId, chash, o.reason ?? null, o.burst ?? false, o.creditMultiplier ?? null]);
 
@@ -121,13 +122,22 @@ export async function placeOutboundCall(d: CallDeps, actorId: string | null, inp
     const pace = await dialPace(c);
     if (pace !== null) {
       const started = (await c.query(
-        `SELECT count(*)::int AS n FROM calls WHERE direction = 'outbound' AND started_at > now() - interval '1 minute' AND status <> 'blocked'
+        `SELECT count(*)::int AS n FROM calls WHERE direction = 'outbound' AND started_at > clock_timestamp() - interval '1 minute' AND status <> 'blocked'
             AND coalesce(end_reason, '') NOT IN ('did_locked', 'all_locked_for_contact', 'no_numbers', 'providers_unhealthy')`)).rows[0].n as number;
       if (started >= pace) return await defer(c, 'pace');
     }
     const telephony = (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' AND status = 'active' AND ($1::uuid IS NULL OR id = $1)`, [input.providerId ?? null])).rows.map((r) => r.id as string);
     const health = await routingHealth(c, telephony);
     const unhealthy = new Set(telephony.filter((id) => (health.get(id) ?? 'healthy') !== 'healthy'));
+    // Drained, not failed: a provider an operator is resting. A dial it blocks waits rather than failing, so a planned
+    // drain never spends anyone's retries.
+    const drained = await drainedSet(c);
+    const real = await healthMap(c, telephony);
+    const reallyUnhealthy = new Set(telephony.filter((id) => (real.get(id) ?? 'healthy') !== 'healthy'));
+    // A caller ID named for this dial is checked again under the lock: it may have been retired since it was looked up.
+    if (own && !(await c.query(`SELECT 1 FROM phone_numbers WHERE id = $1 AND status = 'active'`, [own.id])).rowCount) {
+      throw new AppError(409, 'That caller ID was retired a moment ago. Choose another, or let the pool choose.');
+    }
     const load = await providerLoad(c, telephony);
     const full = new Set(telephony.filter((id) => isFull(load.get(id)!)));
 
@@ -137,6 +147,7 @@ export async function placeOutboundCall(d: CallDeps, actorId: string | null, inp
 
     if (own) {
       if (await didLockedFor(c, input.tenantId, own.id, chash)) refusal = { reason: 'did_locked', message: 'That caller ID has failed for this contact before and is locked away from them. Choose another, or let the pool choose.', status: 409 };
+      else if (unhealthy.has(own.provider_id) && !reallyUnhealthy.has(own.provider_id)) return await defer(c, 'drained');
       else if (unhealthy.has(own.provider_id)) refusal = { reason: 'providers_unhealthy', message: 'That caller ID belongs to a provider that is currently failed or out of funding. Let the pool choose, so another provider can take the call.', status: 503 };
       else if (full.has(own.provider_id)) {
         const ent = await getEntitlement(c, input.tenantId);
@@ -150,6 +161,14 @@ export async function placeOutboundCall(d: CallDeps, actorId: string | null, inp
         if (!ent?.overburst_multiplier) return await defer(c, 'at_capacity');
         choice = await chooseDid(c, base);                 // the client has agreed to the premium: use capacity beyond the ceiling
         burst = true; creditMultiplier = ent.overburst_multiplier;
+      }
+      // Every provider that could take it is drained (none actually failed): wait for one to be restored.
+      if (!choice.ok && choice.reason === 'providers_unhealthy') {
+        const candidates = (await c.query(
+          `SELECT DISTINCT n.provider_id FROM phone_numbers n JOIN providers p ON p.id = n.provider_id
+            WHERE n.tenant_id = $1 AND n.country = $2 AND n.status = 'active' AND p.kind = 'telephony' AND p.status = 'active' AND ($3::uuid IS NULL OR n.provider_id = $3)`,
+          [input.tenantId, input.country, input.providerId ?? null])).rows.map((r) => r.provider_id as string);
+        if (candidates.some((pid) => drained.has(pid) && !reallyUnhealthy.has(pid))) return await defer(c, 'drained');
       }
       if (choice.ok) { from = choice.e164; fromId = choice.phoneNumberId; providerId = choice.providerId; }
       else refusal = {

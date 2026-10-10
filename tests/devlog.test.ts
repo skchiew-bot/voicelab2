@@ -248,7 +248,9 @@ describe('fallback hook for a session opened outside the repository (lesson L-02
   };
   /**
    * One event as Claude Code delivers it: the handlers in the project folder's settings (shared and
-   * local) and in the user's, a handler found twice run once, all given the same input.
+   * local) and in the user's, a handler found twice run once, all given the same input. Only the
+   * devlog hook and its fallback: the project's other hooks (such as its session setup) are not
+   * what these tests are about.
    */
   const deliver = (home: string, projectDir: string, payload: Record<string, unknown>, env: Record<string, string | undefined> = {}) => {
     const event = String(payload.hook_event_name);
@@ -256,7 +258,7 @@ describe('fallback hook for a session opened outside the repository (lesson L-02
       ...commandsFor(path.join(projectDir, '.claude/settings.json'), event),
       ...commandsFor(path.join(projectDir, '.claude/settings.local.json'), event),
       ...commandsFor(userSettings(home), event),
-    ]);
+    ].filter((c) => /\/devlog(-fallback)?\.mjs\b/.test(c)));
     return [...commands].map((c) => spawnSync('sh', ['-c', c], {
       input: JSON.stringify({ cwd: projectDir, ...payload }), encoding: 'utf8',
       env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: projectDir, CLAUDE_CODE_REMOTE_SESSION_ID: undefined, CLAUDE_CODE_REMOTE: undefined, DEVLOG_VIA: undefined, ...env },

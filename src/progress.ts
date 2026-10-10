@@ -138,7 +138,10 @@ export const PHASES: PhaseProgress[] = [
       'Messages on other channels (WhatsApp, SMS, email) are not sent by the platform: they are queued for the client\'s own sender (`/internal/tenants/:id/case-outbox`)',
       'The dispatcher (`POST /internal/cases/dispatch`), the payment check and the ageing sweep must be run on a schedule by the deployment; callbacks are placed within the agreed lateness of their time only if the dispatcher runs at least that often',
       'Promises are recorded through the API; a workflow does not yet record one from what a caller says on a call',
-      'Quiet hours and contact limits apply to every dial only for a client with a contact policy; a client without one has no limits',
+      'Quiet hours and contact limits apply to every dial only for a client with a contact policy; a client without one has no limits. The daily and weekly limits are rolling 24 hours and 7 days, not calendar days in the contact\'s zone',
+      'It is assumed, not checked against a real system, that the client\'s payment-status integration reports the total paid since the case was opened, as an exact decimal string; a total that goes down is ignored and logged each time it is seen',
+      'The keyed hash of every inbound caller\'s number is now kept on the call, whether or not they have a case',
+      'A case or contact reference containing a run of eight or more digits is refused because it looks like a phone number, which also refuses some genuine references',
     ],
   },
   {

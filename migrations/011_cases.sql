@@ -74,8 +74,9 @@ CREATE TABLE case_actions (
   case_id       uuid NOT NULL REFERENCES cases(id),
   kind          text NOT NULL CHECK (kind IN ('callback', 'reminder', 'thanks', 'retry', 'handoff')),
   channel       text NOT NULL DEFAULT 'voice' CHECK (channel IN ('voice', 'whatsapp', 'sms', 'email')),
-  scheduled_for timestamptz NOT NULL,
-  status        text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'leased', 'placed', 'done', 'missed', 'blocked', 'unknown', 'cancelled', 'failed')),
+  scheduled_for timestamptz NOT NULL,                  -- when it is next due; a hold-back moves this
+  locked_for    timestamptz NOT NULL,                  -- the time it was locked to; lateness is always measured from this
+  status        text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'leased', 'placed', 'done', 'missed', 'unanswered', 'blocked', 'unknown', 'cancelled', 'failed')),
   attempt       integer NOT NULL DEFAULT 1,
   lease_until   timestamptz,
   call_id       uuid,
@@ -117,6 +118,7 @@ CREATE TRIGGER case_attempts_immutable BEFORE UPDATE OR DELETE ON case_attempts 
 
 -- An inbound call that matched an open case.
 ALTER TABLE calls ADD COLUMN case_id uuid;
+CREATE INDEX calls_contact_window_idx ON calls (tenant_id, contact_hash, started_at) WHERE contact_hash IS NOT NULL;
 CREATE INDEX calls_case_idx ON calls (case_id) WHERE case_id IS NOT NULL;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO voicelab_internal;

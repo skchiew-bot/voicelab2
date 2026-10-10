@@ -15,7 +15,7 @@ import { chargingAt, addChargingVersion, confirmVersion, listChargingVersions } 
 import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
-import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
+import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, gateOutbound, normalizeE164, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
 import { addNumber, callKnown, callQueued, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
 import { registerJourneyRoutes } from './routes/journey.js';
 import { registerCaseRoutes } from './routes/cases.js';
@@ -59,6 +59,8 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   const app = Fastify({ logger: false });
   const key = parseKey(config.VOICELAB_SECRET_KEY);
   const dncKey = dncKeyFrom(key);
+  /** The gate judges quiet hours and contact limits by the keyed hash of the number; derive it for callers who only send the number. */
+  const withContact = <T extends { to: string }>(b: T): T & { contactHash?: string } => { const n = normalizeE164(b.to); return n ? { ...b, contactHash: contactHash(n, contactKeyFrom(key)) } : b; };
 
   async function authenticate(req: FastifyRequest): Promise<Session> {
     const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1];
@@ -353,14 +355,14 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   app.post('/internal/dial/check', async (req) => {
     const s = await internal(req);
     const body = z.object({ tenantId: z.string().uuid(), country, to: z.string() }).parse(req.body);
-    return withActor(pool, s.actor, (c) => preDialCheck(c, dncKey, body));
+    return withActor(pool, s.actor, (c) => preDialCheck(c, dncKey, withContact(body)));
   });
   app.post('/internal/dial/gate', async (req) => {
     const s = await internal(req);
     const body = z.object({
       tenantId: z.string().uuid(), projectId: z.string().uuid().optional(), callId: z.string().uuid(), country, to: z.string(),
     }).parse(req.body);
-    return withActor(pool, s.actor, (c) => gateOutbound(c, dncKey, body));
+    return withActor(pool, s.actor, (c) => gateOutbound(c, dncKey, withContact(body)));
   });
 
   registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });

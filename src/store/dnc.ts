@@ -101,7 +101,10 @@ export async function preDialCheck(
     const pol = await getContactPolicy(c, e.tenantId);
     if (pol) {
       const now = e.now ?? new Date();
-      if (inQuietHours(now, e.timeZone ?? pol.timeZone, pol.quietStart, pol.quietEnd)) return { allowed: false, reason: 'quiet_hours' };
+      // The contact's own zone, if they have an open case; else the client's. One dial to a contact is judged at a time, so two at once cannot both pass.
+      const own = e.timeZone ?? (await c.query(`SELECT time_zone FROM cases WHERE tenant_id = $1 AND contact_hash = $2 AND status <> 'closed' ORDER BY last_activity_at DESC LIMIT 1`, [e.tenantId, e.contactHash])).rows[0]?.time_zone as string | undefined;
+      await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`contact:${e.tenantId}:${e.contactHash}`]);
+      if (inQuietHours(now, own ?? pol.timeZone, pol.quietStart, pol.quietEnd)) return { allowed: false, reason: 'quiet_hours' };
       if (waitForLimits(now, await contactWindow(c, e.tenantId, e.contactHash, now), pol)) return { allowed: false, reason: 'contact_limit' };
     }
   }
@@ -119,7 +122,7 @@ export async function contactWindow(c: pg.PoolClient, tenantId: string, hash: st
   const r = (await c.query(
     `SELECT count(*) FILTER (WHERE started_at > $3::timestamptz - interval '24 hours')::int AS day, count(*)::int AS week, max(started_at) AS last
        FROM calls WHERE tenant_id = $1 AND contact_hash = $2 AND direction = 'outbound' AND status NOT IN ('blocked', 'failed')
-        AND started_at > $3::timestamptz - interval '7 days' AND started_at <= $3::timestamptz`, [tenantId, hash, now])).rows[0];
+        AND started_at > $3::timestamptz - interval '7 days'`, [tenantId, hash, now])).rows[0];
   return { dayCount: r.day, weekCount: r.week, lastAt: r.last ?? null };
 }
 

@@ -90,6 +90,12 @@ export async function setContactPolicy(c: pg.PoolClient, actorId: string | null,
 }
 
 // ------------------------------------------------------------------------------------------------ cases
+/** Free text a person types is kept for good, so a phone number in it is refused, as it is in a reference. */
+export const cleanNote = (text: string | undefined | null, label = 'note'): string | undefined => {
+  if (text === undefined || text === null) return undefined;
+  if (redactNumbers(text) !== text) throw new AppError(400, `The ${label} looks like it contains a phone number. Customers' numbers are never kept: leave it out.`);
+  return text;
+};
 async function event(c: pg.PoolClient, caseId: string, kind: string, detail: Record<string, unknown> = {}, actorId: string | null = null, at?: Date) {
   await c.query('INSERT INTO case_events (case_id, kind, detail, actor_id, at) VALUES ($1,$2,$3,$4,coalesce($5, now()))', [caseId, kind, JSON.stringify(detail), actorId, at ?? null]);
 }
@@ -167,9 +173,9 @@ export async function scheduleCallback(c: pg.PoolClient, actorId: string | null,
     throw new AppError(409, `That time is inside the quiet hours (${pol.quietStart} to ${pol.quietEnd}) in the contact's time zone. The next time they may be called is ${nextAllowed(e.at, cs.time_zone, pol.quietStart, pol.quietEnd).toISOString()}.`);
   }
   const row = (await c.query(
-    `INSERT INTO case_actions (case_id, kind, channel, scheduled_for, dedupe_key, note) VALUES ($1,$2,$3,$4,$5,$6)
+    `INSERT INTO case_actions (case_id, kind, channel, scheduled_for, locked_for, dedupe_key, note) VALUES ($1,$2,$3,$4,$4,$5,$6)
      ON CONFLICT (case_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id`,
-    [caseId, e.kind ?? 'callback', e.channel ?? 'voice', e.at, e.dedupeKey ?? null, e.note ?? null])).rows[0];
+    [caseId, e.kind ?? 'callback', e.channel ?? 'voice', e.at, e.dedupeKey ?? null, cleanNote(e.note, 'callback note') ?? null])).rows[0];
   if (!row) return { id: null, duplicate: true };
   await event(c, caseId, `${e.kind ?? 'callback'}.scheduled`, { at: e.at.toISOString(), channel: e.channel ?? 'voice' }, actorId);
   await c.query('UPDATE cases SET last_activity_at = now() WHERE id = $1', [caseId]);
@@ -181,15 +187,15 @@ async function scheduleNext(c: pg.PoolClient, cs: { id: string; tenant_id: strin
   const pol = await getContactPolicy(c, cs.tenant_id);
   const at = pol ? nextAllowed(from, cs.time_zone, pol.quietStart, pol.quietEnd) : from;
   const row = (await c.query(
-    `INSERT INTO case_actions (case_id, kind, channel, scheduled_for, dedupe_key, attempt, note) VALUES ($1,$2,$3,$4,$5,$6,$7)
+    `INSERT INTO case_actions (case_id, kind, channel, scheduled_for, locked_for, dedupe_key, attempt, note) VALUES ($1,$2,$3,$4,$4,$5,$6,$7)
      ON CONFLICT (case_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id`,
     [cs.id, e.kind, e.channel, at, e.dedupeKey, e.attempt ?? 1, e.note ?? null])).rows[0];
   if (row) await event(c, cs.id, `${e.kind}.scheduled`, { at: at.toISOString(), channel: e.channel, attempt: e.attempt ?? 1 });
   return at;
 }
 
-const cancelActions = (c: pg.PoolClient, caseId: string, why: string) =>
-  c.query(`UPDATE case_actions SET status = 'cancelled', note = $2, updated_at = now() WHERE case_id = $1 AND status IN ('pending', 'leased')`, [caseId, why]);
+const cancelActions = (c: pg.PoolClient, caseId: string, why: string, keepThanks = false) =>
+  c.query(`UPDATE case_actions SET status = 'cancelled', note = $2, updated_at = now() WHERE case_id = $1 AND status IN ('pending', 'leased') AND ($3::boolean IS FALSE OR kind <> 'thanks')`, [caseId, why, keepThanks]);
 
 /** A call that was leased and never reported on is not dialled again: whether it went out is unknown. */
 export async function expireLeases(c: pg.PoolClient, now: Date) {
@@ -202,22 +208,25 @@ export async function expireLeases(c: pg.PoolClient, now: Date) {
 
 /**
  * Place the voice actions that have come due. Each is claimed first (so two dispatchers never take the same one), and
- * placed within the agreed lateness of its time or not at all: a callback an hour late is missed and retried by the
- * rules, never made when the person no longer expects it. Quiet hours and call limits are checked before the dial and
- * again by the gate. A dial that may or may not have gone out is never repeated.
+ * placed within the agreed lateness of the time it was locked to or not at all: a callback an hour late is missed and
+ * retried by the rules, never made when the person no longer expects it, however many times it was held back. Quiet hours
+ * and call limits are checked before the dial and again by the gate. A dial that may or may not have gone out is never
+ * repeated. `now` is the clock: each action is judged by the time it is reached, not by when the batch began.
  */
-export async function dispatchDue(d: CaseDeps, now = new Date(), limit = 20) {
+export async function dispatchDue(d: CaseDeps, now: Date | (() => Date) = () => new Date(), limit = 20) {
+  const clock = typeof now === 'function' ? now : () => now;
+  const start = clock();
   const claimed = await asInternal(d, async (c) => {
-    await expireLeases(c, now);
+    await expireLeases(c, start);
     return (await c.query(
       `UPDATE case_actions SET status = 'leased', lease_until = $2, updated_at = now()
         WHERE id IN (SELECT id FROM case_actions WHERE channel = 'voice' AND kind IN ('callback', 'retry', 'reminder', 'thanks') AND status = 'pending' AND scheduled_for <= $1
                       ORDER BY scheduled_for LIMIT $3 FOR UPDATE SKIP LOCKED)
-        RETURNING id, case_id, kind, scheduled_for, attempt`, [now, new Date(now.getTime() + 5 * 60_000), limit])).rows;
+        RETURNING id, case_id, kind, locked_for, attempt`, [start, new Date(start.getTime() + 5 * 60_000), limit])).rows;
   });
   const result = { placed: [] as string[], missed: [] as string[], deferred: [] as string[], blocked: [] as string[], failed: [] as string[], unknown: [] as string[], cancelled: [] as string[] };
   for (const a of claimed) {
-    try { result[await dispatchOne(d, a, now)].push(a.id as string); }
+    try { result[await dispatchOne(d, a, clock)].push(a.id as string); }
     catch (err) {
       // One action's trouble must not stop the rest, and it is not tried again by itself.
       await asInternal(d, async (c) => {
@@ -230,19 +239,25 @@ export async function dispatchDue(d: CaseDeps, now = new Date(), limit = 20) {
   return result;
 }
 
-async function dispatchOne(d: CaseDeps, a: { id: string; case_id: string; kind: string; scheduled_for: Date; attempt: number }, now: Date): Promise<'placed' | 'missed' | 'deferred' | 'blocked' | 'failed' | 'unknown' | 'cancelled'> {
+type Outcome = 'placed' | 'missed' | 'deferred' | 'blocked' | 'failed' | 'unknown' | 'cancelled';
+const canBeCalled = (cs: { status: string; close_reason: string | null }, kind: string) => cs.status === 'open' || (kind === 'thanks' && cs.status === 'closed' && cs.close_reason === 'paid_in_full');
+
+async function dispatchOne(d: CaseDeps, a: { id: string; case_id: string; kind: string; locked_for: Date; attempt: number }, clock: () => Date): Promise<Outcome> {
+  const hold = (c: pg.PoolClient, id: string, until: Date, note: string) => c.query(`UPDATE case_actions SET status = 'pending', scheduled_for = $2, lease_until = NULL, note = $3, updated_at = now() WHERE id = $1 AND status = 'leased'`, [id, until, note]);
   const plan = await asInternal(d, async (c) => {
+    const now = clock();
     const cs = await caseRow(c, a.case_id);
     const s = await getSettings(c, cs.tenant_id);
-    if (cs.status !== 'open') {
-      await c.query(`UPDATE case_actions SET status = 'cancelled', note = $2, updated_at = now() WHERE id = $1`, [a.id, `The case is ${cs.status.replace('_', ' ')}.`]);
+    if (!canBeCalled(cs, a.kind)) {
+      await c.query(`UPDATE case_actions SET status = 'cancelled', note = $2, updated_at = now() WHERE id = $1 AND status = 'leased'`, [a.id, `The case is ${cs.status.replace('_', ' ')}.`]);
       return { done: 'cancelled' as const };
     }
-    const lateBy = now.getTime() - new Date(a.scheduled_for).getTime();
+    const lateBy = now.getTime() - new Date(a.locked_for).getTime();
     if (lateBy > s.callbackLatenessMin * 60_000) {
-      await c.query(`UPDATE case_actions SET status = 'missed', note = 'Not placed within the agreed lateness of its time.', updated_at = now() WHERE id = $1`, [a.id]);
+      await c.query(`UPDATE case_actions SET status = 'missed', note = 'Not placed within the agreed lateness of its time.', updated_at = now() WHERE id = $1 AND status = 'leased'`, [a.id]);
       await event(c, cs.id, `${a.kind}.missed`, { action: a.id, lateMinutes: Math.round(lateBy / 60_000) });
-      if (a.kind === 'callback' || a.kind === 'retry') await retryOrStop(c, cs, s, a, now);
+      // Nobody was dialled, so this does not use up one of the person's retries.
+      if (a.kind === 'callback' || a.kind === 'retry') await retryOrStop(c, cs, s, a, now, false);
       return { done: 'missed' as const };
     }
     const pol = await getContactPolicy(c, cs.tenant_id);
@@ -250,7 +265,7 @@ async function dispatchOne(d: CaseDeps, a: { id: string; case_id: string; kind: 
       const wait = inQuietHours(now, cs.time_zone, pol.quietStart, pol.quietEnd) ? { until: nextAllowed(now, cs.time_zone, pol.quietStart, pol.quietEnd), reason: 'quiet_hours' }
         : waitForLimits(now, await contactWindow(c, cs.tenant_id, cs.contact_hash, now), pol as ContactLimits);
       if (wait) {
-        await c.query(`UPDATE case_actions SET status = 'pending', scheduled_for = $2, lease_until = NULL, note = $3, updated_at = now() WHERE id = $1`, [a.id, wait.until, `Held back: ${wait.reason}.`]);
+        await hold(c, a.id, wait.until, `Held back: ${wait.reason}.`);
         await event(c, cs.id, `${a.kind}.deferred`, { action: a.id, reason: wait.reason, until: wait.until.toISOString() });
         return { done: 'deferred' as const };
       }
@@ -261,47 +276,63 @@ async function dispatchOne(d: CaseDeps, a: { id: string; case_id: string; kind: 
   const { cs, s } = plan;
 
   const to = d.resolveNumber ? await d.resolveNumber(cs.tenant_id, cs.contact_ref ?? '', cs.case_ref) : null;
-  if (!to) {
-    await asInternal(d, async (c) => {
-      await c.query(`UPDATE case_actions SET status = 'failed', note = 'No number could be found for this contact, so nothing was dialled.', updated_at = now() WHERE id = $1`, [a.id]);
+  // The lookup may have taken a while: look again at the case and the action just before the dial.
+  const still = await asInternal(d, async (c) => {
+    await lockCase(c, cs.id);
+    const now = (await caseRow(c, cs.id));
+    const act = (await c.query('SELECT status FROM case_actions WHERE id = $1', [a.id])).rows[0];
+    if (!canBeCalled(now, a.kind) || act?.status !== 'leased') {
+      await c.query(`UPDATE case_actions SET status = 'cancelled', note = 'The case changed before the call was made.', updated_at = now() WHERE id = $1 AND status = 'leased'`, [a.id]);
+      return false;
+    }
+    if (!to) {
+      await c.query(`UPDATE case_actions SET status = 'failed', note = 'No number could be found for this contact, so nothing was dialled.', updated_at = now() WHERE id = $1 AND status = 'leased'`, [a.id]);
       await event(c, cs.id, `${a.kind}.failed`, { action: a.id, reason: 'no_number' });
-    });
-    return 'failed';
-  }
+      await c.query(`UPDATE cases SET status = 'decision_required' WHERE id = $1 AND status = 'open'`, [cs.id]);
+      await event(c, cs.id, 'decision_required', { reason: 'No number can be found for this contact, so the case cannot be called.' });
+      return false;
+    }
+    return true;
+  });
+  if (!still) return to ? 'cancelled' : 'failed';
+
   let placed;
-  try { placed = await placeOutboundCall(d.calls, null, { tenantId: cs.tenant_id, to, country: cs.country.trim(), timeZone: cs.time_zone, now }); }
+  try { placed = await placeOutboundCall(d.calls, null, { tenantId: cs.tenant_id, to: to!, country: cs.country.trim(), timeZone: cs.time_zone, now: clock() }); }
   catch (err) {
     const status = err instanceof AppError ? err.status : 0;
     const reason = redactNumbers((err as Error).message).slice(0, 300);
     return asInternal(d, async (c) => {
-      // A refusal from the pool (409, 503) is definite. Anything else, including a provider error, may have gone out: do not repeat it.
-      const definite = status === 409 || status === 503;
-      await c.query(`UPDATE case_actions SET status = $2, note = $3, updated_at = now() WHERE id = $1`, [a.id, definite ? 'failed' : 'unknown', reason]);
+      // A refusal before anything went out (400, 404, 409, 503) is definite. Anything else, including a provider error, may have gone out: do not repeat it.
+      const definite = [400, 404, 409, 503].includes(status);
+      await c.query(`UPDATE case_actions SET status = $2, note = $3, updated_at = now() WHERE id = $1 AND status = 'leased'`, [a.id, definite ? 'failed' : 'unknown', reason]);
       await event(c, cs.id, definite ? `${a.kind}.failed` : 'action.unknown', { action: a.id, reason });
-      if (definite && (a.kind === 'callback' || a.kind === 'retry')) await retryOrStop(c, cs, s, a, now);
+      if (definite && (a.kind === 'callback' || a.kind === 'retry')) await retryOrStop(c, cs, s, a, clock());
       return definite ? 'failed' as const : 'unknown' as const;
     });
   }
   return asInternal(d, async (c) => {
     if (!placed.allowed) {
-      const policyBlock = placed.reason === 'quiet_hours' || placed.reason === 'contact_limit';
-      if (policyBlock) {
-        await c.query(`UPDATE case_actions SET status = 'pending', scheduled_for = $2, lease_until = NULL, note = $3, updated_at = now() WHERE id = $1`, [a.id, new Date(now.getTime() + 30 * 60_000), `Held back by the gate: ${placed.reason}.`]);
+      if (placed.reason === 'quiet_hours' || placed.reason === 'contact_limit') {
+        await hold(c, a.id, new Date(clock().getTime() + 30 * 60_000), `Held back by the gate: ${placed.reason}.`);
         await event(c, cs.id, `${a.kind}.deferred`, { action: a.id, reason: placed.reason });
         return 'deferred' as const;
       }
-      await c.query(`UPDATE case_actions SET status = 'blocked', call_id = $2, note = $3, updated_at = now() WHERE id = $1`, [a.id, placed.callId, `Blocked: ${placed.reason}.`]);
+      await c.query(`UPDATE case_actions SET status = 'blocked', call_id = $2, note = $3, updated_at = now() WHERE id = $1 AND status = 'leased'`, [a.id, placed.callId, `Blocked: ${placed.reason}.`]);
       await event(c, cs.id, `${a.kind}.blocked`, { action: a.id, reason: placed.reason });
       return 'blocked' as const;
     }
     if ('deferred' in placed && placed.deferred) {
-      await c.query(`UPDATE case_actions SET status = 'pending', scheduled_for = $2, lease_until = NULL, note = 'Every provider is full; trying again shortly.', updated_at = now() WHERE id = $1`, [a.id, new Date(now.getTime() + RETRY_AFTER_SECONDS * 1000)]);
+      await hold(c, a.id, new Date(clock().getTime() + RETRY_AFTER_SECONDS * 1000), 'Every provider is full; trying again shortly.');
       return 'deferred' as const;
     }
-    await c.query(`UPDATE case_actions SET status = 'placed', call_id = $2, updated_at = now() WHERE id = $1`, [a.id, placed.callId]);
     await c.query('UPDATE calls SET case_id = $2 WHERE id = $1', [placed.callId, cs.id]);
+    const upd = await c.query(`UPDATE case_actions SET status = 'placed', call_id = $2, updated_at = now() WHERE id = $1 AND status = 'leased'`, [a.id, placed.callId]);
+    if (!upd.rowCount) await c.query(`UPDATE case_actions SET call_id = coalesce(call_id, $2) WHERE id = $1`, [a.id, placed.callId]);    // the case changed meanwhile: keep the link, change nothing else
     await event(c, cs.id, `${a.kind}.placed`, { action: a.id, call: placed.callId });
     await c.query('UPDATE cases SET last_activity_at = now() WHERE id = $1', [cs.id]);
+    // The provider may have reported the call over before it was recorded here: settle it now rather than lose its outcome.
+    const call = (await c.query('SELECT id, started_at, answered_at, ended_at, end_reason, duration_seconds FROM calls WHERE id = $1', [placed.callId])).rows[0];
+    if (upd.rowCount && call?.ended_at) await caseCallEnded(c, call, call.end_reason ?? undefined, clock());
     return 'placed' as const;
   });
 }
@@ -321,10 +352,10 @@ export async function safely<T>(c: pg.PoolClient, label: string, fn: () => Promi
 interface CaseRow { id: string; tenant_id: string; time_zone: string }
 
 /** After a missed or unanswered try: another by the backoff rules, on the next channel after enough failures, or a decision. */
-async function retryOrStop(c: pg.PoolClient, cs: CaseRow, s: CaseSettings, a: { id: string; attempt: number }, now: Date) {
+async function retryOrStop(c: pg.PoolClient, cs: CaseRow, s: CaseSettings, a: { id: string; attempt: number }, now: Date, consume = true) {
   const failures = (await c.query(
     `SELECT count(*)::int AS n FROM case_attempts WHERE case_id = $1 AND outcome <> 'answered' AND id > coalesce((SELECT max(id) FROM case_attempts WHERE case_id = $1 AND outcome = 'answered'), 0)`, [cs.id])).rows[0].n as number;
-  if (a.attempt > s.retryMax) {
+  if (consume && a.attempt > s.retryMax) {
     await event(c, cs.id, 'retries_exhausted', { attempts: a.attempt });
     await c.query(`UPDATE cases SET status = 'decision_required', last_activity_at = now() WHERE id = $1 AND status = 'open'`, [cs.id]);
     await event(c, cs.id, 'decision_required', { reason: 'Every retry has been used without reaching the person.' });
@@ -333,7 +364,7 @@ async function retryOrStop(c: pg.PoolClient, cs: CaseRow, s: CaseSettings, a: { 
   const delay = retryDelayMinutes(s.retryBackoffMinutes, a.attempt);
   const channel = channelFor(s.channels, Math.max(failures, a.attempt), s.rotateAfter);
   if (channel !== 'voice') await event(c, cs.id, 'channel.rotated', { to: channel, afterFailures: Math.max(failures, a.attempt) });
-  await scheduleNext(c, cs, new Date(now.getTime() + delay * 60_000), { kind: 'retry', channel, dedupeKey: `retry:${a.id}`, attempt: a.attempt + 1 });
+  await scheduleNext(c, cs, new Date(now.getTime() + delay * 60_000), { kind: 'retry', channel, dedupeKey: `retry:${a.id}`, attempt: consume ? a.attempt + 1 : a.attempt });
 }
 
 /**
@@ -348,7 +379,7 @@ export async function caseCallEnded(c: pg.PoolClient, call: { id: string; starte
   const outcome = answered ? 'answered' : endReason === 'busy' ? 'busy' : endReason === 'failed' ? 'failed' : 'no_answer';
   const p = localParts(call.started_at, cs.time_zone);
   await c.query('INSERT INTO case_attempts (case_id, action_id, call_id, at, local_dow, local_hour, outcome) VALUES ($1,$2,$3,$4,$5,$6,$7)', [cs.id, a.id, call.id, call.started_at, p.dow, p.hour, outcome]);
-  await c.query(`UPDATE case_actions SET status = $2, updated_at = now() WHERE id = $1`, [a.id, answered ? 'done' : 'missed']);
+  await c.query(`UPDATE case_actions SET status = $2, updated_at = now() WHERE id = $1`, [a.id, answered ? 'done' : 'unanswered']);
   await event(c, cs.id, answered ? 'call.answered' : 'call.unanswered', { action: a.id, call: call.id, outcome });
   if (!answered && cs.status === 'open' && (a.kind === 'callback' || a.kind === 'retry')) await retryOrStop(c, cs, await getSettings(c, cs.tenant_id), a, now);
   return { outcome };
@@ -362,7 +393,8 @@ export async function recordPromise(c: pg.PoolClient, actorId: string | null, ca
   await lockCase(c, caseId);
   const cs = await caseRow(c, caseId);
   if (cs.status !== 'open') throw new AppError(409, `This case is ${cs.status.replace('_', ' ')}.`);
-  if (Number.isNaN(Date.parse(`${e.dueOn}T00:00:00Z`))) throw new AppError(400, 'That is not a date.');
+  const parsed = new Date(`${e.dueOn}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== e.dueOn) throw new AppError(400, 'That is not a date.');
   if (e.dueOn < localParts(now, cs.time_zone).date) throw new AppError(400, 'A promise is for today or a later day.');
   if (toScaled(e.amount) > toScaled(balanceAfter(cs.opening_balance, cs.paid_total))) throw new AppError(400, 'A promise cannot be for more than the balance.');
   if ((await c.query(`SELECT 1 FROM promises WHERE case_id = $1 AND status = 'open'`, [caseId])).rowCount) throw new AppError(409, 'There is already an open promise on this case. Let it settle first.');
@@ -392,22 +424,36 @@ export async function checkPayments(d: CaseDeps, tenantId: string, now = new Dat
   const todo = await asInternal(d, async (c) => {
     const s = await getSettings(c, tenantId);
     if (!s.paymentIntegration) return { s, cases: [] as { id: string; case_ref: string }[], integ: null };
-    const cases = (await c.query(
-      `SELECT DISTINCT c.id, c.case_ref FROM cases c JOIN promises p ON p.case_id = c.id AND p.status = 'open' WHERE c.tenant_id = $1 AND c.status <> 'closed'`, [tenantId])).rows;
+    // Every case that is not closed, not only those with a promise: a person who has paid in full must stop being called.
+    const cases = (await c.query(`SELECT id, case_ref FROM cases WHERE tenant_id = $1 AND status <> 'closed'`, [tenantId])).rows;
     return { s, cases, integ: await integrationsFor(c, tenantId, d.calls.key, 'production', d.paymentHttp) };
   });
   const out = { checked: 0, kept: [] as string[], partial: [] as string[], broken: [] as string[], failed: [] as string[] };
   if (!todo.integ) return out;
   for (const k of todo.cases) {
-    let paid: string | null = null;
-    try { paid = paidOf(await todo.integ.call(todo.s.paymentIntegration!, { method: 'GET', path: todo.s.paymentPath.replace('{ref}', encodeURIComponent(k.case_ref)) })); }
-    catch (err) { await asInternal(d, (c) => event(c, k.id, 'payment_check_failed', { reason: redactNumbers((err as Error).message).slice(0, 200) })); out.failed.push(k.id); continue; }
-    if (paid === null) { await asInternal(d, (c) => event(c, k.id, 'payment_check_failed', { reason: 'The reply did not carry a total paid as an exact decimal string.' })); out.failed.push(k.id); continue; }
-    out.checked++;
-    const r = await asInternal(d, (c) => settleFromTotal(c, k.id, paid!, todo.s, now));
-    if (r) out[r].push(k.id);
+    const r = await checkOne(d, k, todo.s, todo.integ, now);
+    if (r === 'failed') out.failed.push(k.id); else { out.checked++; if (r) out[r].push(k.id); }
   }
   return out;
+}
+
+async function checkOne(d: CaseDeps, k: { id: string; case_ref: string }, s: CaseSettings, integ: NonNullable<Awaited<ReturnType<typeof integrationsFor>>>, now: Date): Promise<'kept' | 'partial' | 'broken' | null | 'failed'> {
+  let paid: string | null = null;
+  try { paid = paidOf(await integ.call(s.paymentIntegration!, { method: 'GET', path: s.paymentPath.replace('{ref}', encodeURIComponent(k.case_ref)) })); }
+  catch (err) { await asInternal(d, (c) => event(c, k.id, 'payment_check_failed', { reason: redactNumbers((err as Error).message).slice(0, 200) })); return 'failed'; }
+  if (paid === null) { await asInternal(d, (c) => event(c, k.id, 'payment_check_failed', { reason: 'The reply did not carry a total paid as an exact decimal string.' })); return 'failed'; }
+  return asInternal(d, (c) => settleFromTotal(c, k.id, paid!, s, now));
+}
+
+/** Bring one case's paid total up to date before something depends on it (a new promise counts only what is paid after it is made). */
+export async function refreshPayment(d: CaseDeps, caseId: string, now = new Date()) {
+  const ctx = await asInternal(d, async (c) => {
+    const cs = await caseRow(c, caseId);
+    const s = await getSettings(c, cs.tenant_id);
+    return s.paymentIntegration ? { cs, s, integ: await integrationsFor(c, cs.tenant_id, d.calls.key, 'production', d.paymentHttp) } : null;
+  });
+  if (!ctx) return null;
+  return checkOne(d, { id: ctx.cs.id, case_ref: ctx.cs.case_ref }, ctx.s, ctx.integ, now);
 }
 
 export async function settleFromTotal(c: pg.PoolClient, caseId: string, paid: string, s: CaseSettings, now: Date): Promise<'kept' | 'partial' | 'broken' | null> {
@@ -421,11 +467,11 @@ export async function settleFromTotal(c: pg.PoolClient, caseId: string, paid: st
     await event(c, caseId, 'payment_received', { total: paid, added: fromScaled(total - before) });
   }
   const balance = balanceAfter(cs.opening_balance, paid);
-  const p = (await c.query(`SELECT * FROM promises WHERE case_id = $1 AND status = 'open' FOR UPDATE`, [caseId])).rows[0];
+  const p = (await c.query(`SELECT *, due_on::text AS due_text FROM promises WHERE case_id = $1 AND status = 'open' FOR UPDATE`, [caseId])).rows[0];
   let result: 'kept' | 'partial' | 'broken' | null = null;
   if (p) {
     const counted = total - toScaled(p.paid_base);
-    const due = p.due_on instanceof Date ? p.due_on.toISOString().slice(0, 10) : String(p.due_on);
+    const due = p.due_text as string;
     const today = localParts(now, cs.time_zone).date;
     if (counted >= toScaled(p.amount)) {
       await c.query(`UPDATE promises SET status = 'kept', settled_at = now() WHERE id = $1`, [p.id]);
@@ -451,7 +497,7 @@ export async function settleFromTotal(c: pg.PoolClient, caseId: string, paid: st
   }
   if (toScaled(balance) === 0n) {
     await c.query(`UPDATE cases SET status = 'closed', closed_at = now(), close_reason = 'paid_in_full' WHERE id = $1`, [caseId]);
-    await cancelActions(c, caseId, 'The case was paid in full.');
+    await cancelActions(c, caseId, 'The case was paid in full.', true);        // the thank-you still goes
     await event(c, caseId, 'closed', { reason: 'paid_in_full' });
   }
   return result;
@@ -479,7 +525,8 @@ export async function sweepAgeing(c: pg.PoolClient, tenantId: string, now = new 
 export const decisionSchema = z.object({ decision: z.enum(['continue', 'escalate', 'close']), note: z.string().min(1).max(1000) }).strict();
 
 /** A person decides what happens to a case that cannot go on as it is. Every decision is kept. */
-export async function decideCase(c: pg.PoolClient, actorId: string, caseId: string, e: z.infer<typeof decisionSchema>) {
+export async function decideCase(c: pg.PoolClient, actorId: string, caseId: string, e: z.infer<typeof decisionSchema>, now = new Date()) {
+  cleanNote(e.note, 'reason');
   await lockCase(c, caseId);
   const cs = await caseRow(c, caseId);
   if (cs.status !== 'decision_required') throw new AppError(409, 'This case is not waiting for a decision.');
@@ -493,6 +540,8 @@ export async function decideCase(c: pg.PoolClient, actorId: string, caseId: stri
     await c.query(`UPDATE cases SET status = 'open', last_activity_at = now() WHERE id = $1`, [caseId]);
   }
   await event(c, caseId, 'decision', { decision: e.decision, note: e.note }, actorId);
+  // A case that carries on is not left with nothing scheduled: the next call is set up straight away.
+  if (e.decision !== 'close') await scheduleNext(c, { id: caseId, tenant_id: cs.tenant_id, time_zone: cs.time_zone }, new Date(now.getTime() + 60 * 60_000), { kind: 'callback', channel: 'voice', dedupeKey: `decision:${Date.now()}`, note: 'Set up after a decision.' });
   await audit(c, actorId, 'case.decide', 'case', caseId, { decision: e.decision });
   return getCase(c, caseId);
 }
@@ -533,16 +582,22 @@ export async function caseVariables(c: pg.PoolClient, caseId: string): Promise<R
 export const listOutbox = async (c: pg.PoolClient, tenantId: string) =>
   (await c.query(
     `SELECT a.id, a.case_id, c.case_ref, c.contact_ref, a.kind, a.channel, a.scheduled_for FROM case_actions a JOIN cases c ON c.id = a.case_id
-      WHERE c.tenant_id = $1 AND a.status = 'pending' AND (a.channel <> 'voice' OR a.kind = 'handoff') ORDER BY a.scheduled_for LIMIT 200`, [tenantId])).rows;
+      WHERE c.tenant_id = $1 AND a.status = 'pending' AND a.scheduled_for <= now() AND c.status = 'open' AND (a.channel <> 'voice' OR a.kind = 'handoff') ORDER BY a.scheduled_for LIMIT 200`, [tenantId])).rows;
 
 export async function completeAction(c: pg.PoolClient, actorId: string | null, actionId: string, note?: string) {
-  const a = (await c.query(`UPDATE case_actions SET status = 'done', note = coalesce($2, note), updated_at = now() WHERE id = $1 AND status = 'pending' RETURNING case_id`, [actionId, note ?? null])).rows[0];
+  const a = (await c.query(`UPDATE case_actions SET status = 'done', note = coalesce($2, note), updated_at = now() WHERE id = $1 AND status = 'pending' RETURNING case_id, kind, attempt`, [actionId, cleanNote(note, 'note') ?? null])).rows[0];
   if (!a) throw new AppError(409, 'That action is not waiting.');
   await event(c, a.case_id, 'action.completed', { action: actionId, note: note ?? null }, actorId);
+  // A message on another channel was one try of the chain: if the case is still open, the chain goes on.
+  if (a.kind === 'retry') {
+    const cs = await caseRow(c, a.case_id);
+    if (cs.status === 'open') await retryOrStop(c, cs, await getSettings(c, cs.tenant_id), { id: actionId, attempt: a.attempt }, new Date());
+  }
   return { done: true };
 }
 
 export async function cancelCase(c: pg.PoolClient, actorId: string | null, caseId: string, reason: string) {
+  cleanNote(reason, 'reason');
   await lockCase(c, caseId);
   const cs = await caseRow(c, caseId);
   if (cs.status === 'closed') throw new AppError(409, 'That case is already closed.');

@@ -9,7 +9,7 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:** one or more lines `` `path` › "exact text" ``. The text must appear in that file, usually a test title. The test fails if a guard's file or text is removed, so a lesson cannot quietly lose its protection.
 
 ### L-001: Check-then-act needs a lock or an atomic claim
-- **Seen:** 6 times. Racing final callbacks ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)); two reconciliation checks at once ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)); two replies both firing an integration write ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)); the dial retry bypassing the capacity lock, and inbound capacity decided without it ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)); concurrent rate changes (Phase 0). Two approved changes to one flow could both go live, the older silently undoing the newer; the drop watchdog could flag a call twice (Phase 5 independent review, 2026-10-10). Two audio finishes at once recorded every phrase twice and spent the voice provider twice (Phase 6 independent review, 2026-10-10).
+- **Seen:** 6 times. Racing final callbacks ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)); two reconciliation checks at once ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)); two replies both firing an integration write ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)); the dial retry bypassing the capacity lock, and inbound capacity decided without it ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)); concurrent rate changes (Phase 0). Two approved changes to one flow could both go live, the older silently undoing the newer; the drop watchdog could flag a call twice (Phase 5 independent review, 2026-10-10). Two audio finishes at once recorded every phrase twice and spent the voice provider twice (Phase 6 independent review, 2026-10-10). Contact limits were read without a lock, so three simultaneous dials to one person all passed; a case closed while its number was being looked up was still dialled (Phase 7 independent review, 2026-10-10).
 - **Rule:** Any "read state, decide, write" path that two requests can reach at once takes a lock (`pg_advisory_xact_lock`, `SELECT … FOR UPDATE`) or claims the work atomically, and re-checks inside the lock. Write the simultaneous-requests test first.
 - **Guards:**
   - `tests/telephony.test.ts` › "survives the same final callback arriving three times at once"
@@ -19,6 +19,8 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/concurrency.test.ts` › "counts a caller on hold against the provider"
   - `tests/changes.test.ts` › "is refused, so approving one change never silently undoes another"
   - `tests/learning.test.ts` › "records the audio once when two finishes arrive together"
+  - `tests/cases.test.ts` › "holds every dial to a contact's limits even when they arrive together, or in one dispatcher batch"
+  - `tests/cases.test.ts` › "does not call a case that was closed while its number was being looked up"
 
 ### L-002: Never repeat an action whose outcome is unknown
 - **Seen:** The dial retry re-dialled after a timeout, risking two calls to one person ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)).
@@ -43,7 +45,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "keeps money out of floating point in the console"
 
 ### L-005: Something that never happened gets no status as if it had
-- **Seen:** 4 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10). A call never answered was recorded as a customer hang-up or a system drop; a QA run with nothing scored was stored as 0; a later normal end cleared a fault already flagged (Phase 5 independent review, 2026-10-10).
+- **Seen:** 4 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10). A call never answered was recorded as a customer hang-up or a system drop; a QA run with nothing scored was stored as 0; a later normal end cleared a fault already flagged (Phase 5 independent review, 2026-10-10). A plain no-answer was counted as a missed call in the alert, and a callback the dispatcher was late for used up one of the person's retries though nobody was dialled (Phase 7 independent review, 2026-10-10).
 - **Rule:** Give "never started" or "unknown" its own state (such as `not_applicable`, or `null` rather than 0) and keep it out of failure counts, alerts, retries and anything that recommends an action.
 - **Guards:**
   - `tests/phase3.test.ts` › "will not lock a DID because of a call that never went out"
@@ -53,6 +55,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/journey.test.ts` › "does not call a call that was never answered a hang-up or a drop"
   - `tests/journey.test.ts` › "keeps a fault the watchdog found, with the time it was first seen, when the call then ends in a way that looks fine"
   - `tests/qa.test.ts` › "stores no score at all when nothing could be scored, and scores the call once a model is connected"
+  - `tests/cases.test.ts` › "counts only a real failure to reach someone as an alert, not a plain no-answer"
 
 ### L-006: One bad record must not take a whole feature down
 - **Seen:** 3 times. One unreadable secret returned a 500 for the whole Control Tower ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). One provider priced in a currency with no exchange rate made every pooled dial fail ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). A very large number gave a 500 instead of a 400 ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). One script's audio failure aborted the whole sweep, so drift screening stopped for everyone (Phase 6 independent review, 2026-10-10).
@@ -79,12 +82,13 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/phase3.test.ts` › "locks the caller ID the contact sees, even when the same number is registered at two providers"
 
 ### L-009: A privacy rule must hold across every boundary
-- **Seen:** A child workflow could speak or send a parent's sensitive value. Phone numbers nested in values, or written in local form, got through ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)).
+- **Seen:** A child workflow could speak or send a parent's sensitive value. Phone numbers nested in values, or written in local form, got through ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). Free text a person types (a decision note, a close reason, a callback note) could have stored a customer's number in an append-only table (Phase 7 independent review, 2026-10-10).
 - **Rule:** Enforce sensitivity and number rules across workflows, nesting levels and every input path (start variables, integration replies), both at publish time and at run time.
 - **Guards:**
   - `tests/workflow-hardening.test.ts` › "a parent's sensitive variable cannot be spoken by the workflow it hands over to"
   - `tests/workflow-hardening.test.ts` › "are refused in the starting record, however deep, and in the local form"
   - `tests/workflow-hardening.test.ts` › "are refused in what an integration returns, nested or not"
+  - `tests/cases.test.ts` › "refuses a customer's number in a note, a reason or a callback note, and an impossible date"
 
 ### L-010: A test that cannot fail proves nothing
 - **Seen:** 5 times. The Control Tower drift test passed with wrong data ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The Phase 2 production gate accepted scenarios that asserted nothing ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). The guard for L-015 pointed at a code comment, not a test, so it could never fail (independent review, 2026-10-10). A report test asserted the sum of two transcripts' costs and so locked in a double count; three new tests passed with the code they protect broken (independent review and mutation checks, 2026-10-10).
@@ -172,10 +176,11 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/tracker.test.ts` › "reads a plain "no" or "no, thank you" as neutral or kind, and two declined questions do not hand the call to a person"
 
 ### L-022: Compare times as times, not as text
-- **Seen:** The report compared git commit dates written with a +08:00 offset against UTC log timestamps as strings, so logging gaps, audit completeness and session times were wrong for anyone outside UTC (independent review, 2026-10-10).
+- **Seen:** The report compared git commit dates written with a +08:00 offset against UTC log timestamps as strings, so logging gaps, audit completeness and session times were wrong for anyone outside UTC (independent review, 2026-10-10). A date column read on a server east of UTC came back as the day before, so a promise was judged broken a day early (Phase 7 independent review, 2026-10-10).
 - **Rule:** Turn every timestamp into one form (`new Date(x).toISOString()`, or milliseconds) at the edge, before comparing or sorting.
 - **Guards:**
   - `tests/devlog.test.ts` › "finds logging gaps"
+  - `tests/cases.test.ts` › "records a part payment, recalculates the balance exactly, and passes the case to a person or plan"
 
 ### L-023: Keep every branch accountable to the plan, and the trunk as the default
 - **Seen:** The repository's default branch on GitHub was still the first session branch (`claude/elegant-fermat-er13o8`), long merged, so clones and the GitHub page showed stale code; seven merged branches were never deleted; and nothing checked that a branch belonged to the plan (found by the dev Control Tower branch audit, 2026-10-10).
@@ -210,3 +215,15 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:**
   - `tests/learning.test.ts` › "does not ask a model to write a script for a node that already has one in review, and refuses to approve a script that fails the rules"
   - `tests/learning.test.ts` › "leaves a low-confidence pass for a person, who can approve it; it stays approved, still live, until its audio exists"
+
+### L-028: Measure a promised time from the promise, not from the last time it was moved
+- **Seen:** A callback held back by a quiet hour or a call limit had its time overwritten, so the lateness limit was measured from the new time and a callback locked for 11:00 could be placed days later (Phase 7 independent review, 2026-10-10).
+- **Rule:** Keep the time something was promised for separate from when it is next tried. Deferring changes the second, never the first, and anything past its allowed lateness is missed, however many times it was held back.
+- **Guards:**
+  - `tests/cases.test.ts` › "measures lateness from the time a callback was locked to, however long it was held back"
+
+### L-029: An event can arrive before the record that expects it
+- **Seen:** A provider's end-of-call report was processed before the dispatcher had recorded the call against its case, so the outcome was dropped and the retry chain stopped for good (Phase 7 independent review, 2026-10-10).
+- **Rule:** When a record is written after a call to an outside system, look at whether the outside system has already reported by the time it is written, and settle it then. Never rely on the order in which two requests commit.
+- **Guards:**
+  - `tests/cases.test.ts` › "does not lose the outcome of a call the provider reported over before it was recorded"

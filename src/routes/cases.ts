@@ -5,7 +5,7 @@ import { bestTimesToCall } from '../cases/policy.js';
 import { withActor, type Actor } from '../db.js';
 import {
   caseSummary, cancelCase, checkPayments, completeAction, decideCase, decisionSchema, dispatchDue, getCase, getSettings, listCases, listOutbox, openCase, openCaseSchema,
-  policySchema, promiseSchema, recordPromise, scheduleCallback, setContactPolicy, setSettings, settingsSchema, sweepAgeing, type CaseDeps,
+  policySchema, promiseSchema, recordPromise, refreshPayment, scheduleCallback, setContactPolicy, setSettings, settingsSchema, sweepAgeing, type CaseDeps,
 } from '../store/cases.js';
 import { getContactPolicy } from '../store/dnc.js';
 
@@ -51,6 +51,8 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: Ctx): void {
   app.post('/internal/cases/:caseId/promises', async (req, reply) => {
     const { caseId } = z.object({ caseId: id }).parse(req.params);
     const b = promiseSchema.parse(req.body);
+    await ctx.internal(req);
+    await refreshPayment(ctx.cases, caseId).catch(() => null);          // a promise counts only what is paid after it is made
     const out = await run(req, (c, u) => recordPromise(c, u, caseId, b));
     return reply.code(201).send(out);
   });

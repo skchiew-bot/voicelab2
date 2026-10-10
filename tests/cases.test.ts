@@ -51,8 +51,8 @@ const dials = () => env.provider.calls.filter((c) => c.url.endsWith('/v2/calls')
 let sid = 0;
 const answerDials = () => { env.provider.state.respond = (url) => url.endsWith('/v2/calls') ? new Response(JSON.stringify({ data: { call_control_id: `cc_case_${++sid}` } })) : new Response('{}'); };
 
-async function mkCase(ref: string, balance = '500', extra: object = {}) {
-  const phone = newPhone();
+async function mkCase(ref: string, balance = '500', extra: object = {}, samePhone?: string) {
+  const phone = samePhone ?? newPhone();
   numbers.set(ref, phone);
   const r = await must(post(`/internal/tenants/${tenantId}/cases`, { caseRef: ref, contactRef: `client-${ref}`, phone, country: 'MY', currency: 'MYR', openingBalance: balance, timeZone: KL, ...extra }));
   return { id: r.json().id as string, phone, ref };
@@ -77,7 +77,7 @@ beforeAll(async () => {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   paymentHttp = { lookup: toLoopback, ca: cert, port: (server.address() as AddressInfo).port };
 
-  env = await (await import('./helpers.js')).setupDb();
+  env = await (await import('./helpers.js')).setupDb({ cases: { paymentHttp } });
   tenantId = (await must(post('/internal/tenants', { name: 'Cases Co' }))).json().id;
   telnyxId = (await must(post('/internal/providers', { adapterKey: 'telnyx', name: 'tx', params: { apiKey: 'K', webhookUrl: `${BASE}/h`, connectionId: 'c1', webhookPublicKey: 'AAAA' } }))).json().id;
   await must(post(`/internal/providers/${telnyxId}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.006', currency: 'USD' }] }));
@@ -180,7 +180,7 @@ describe('a callback locked to a time', () => {
     expect(out.missed).toContain(cb!.id);
     expect(dials()).toHaveLength(before);
     const [retry] = await actionsOf(c.id, 'retry');
-    expect(retry).toMatchObject({ status: 'pending', channel: 'voice', attempt: 2 });
+    expect(retry).toMatchObject({ status: 'pending', channel: 'voice', attempt: 1 });                           // nobody was dialled, so no retry is used up
     expect(new Date(retry!.scheduled_for).toISOString()).toBe(mins(now, 60).toISOString());                    // the first backoff step is 60 minutes
     expect(await eventsOf(c.id)).toContain('callback.missed');
   });
@@ -227,7 +227,7 @@ describe('calls that are not answered', () => {
     await dispatchDue(deps, mins(T, 1));
     const [first] = await actionsOf(c.id, 'callback');
     await send(evt('ended', await providerCallIdOf(first!.call_id!), { endReason: 'no_answer', occurredAt: mins(T, 2) }));
-    expect((await actionsOf(c.id, 'callback'))[0]).toMatchObject({ status: 'missed' });
+    expect((await actionsOf(c.id, 'callback'))[0]).toMatchObject({ status: 'unanswered' });
     const r1 = (await actionsOf(c.id, 'retry'))[0]!;
     expect(r1).toMatchObject({ status: 'pending', channel: 'voice', attempt: 2 });
     const attempts = (await env.pool.query('SELECT local_hour, outcome FROM case_attempts WHERE case_id = $1', [c.id])).rows;
@@ -242,7 +242,9 @@ describe('calls that are not answered', () => {
     expect(new Date(r2.scheduled_for).getTime()).toBeGreaterThan(Date.now() + 3 * 3_600_000);                    // the second backoff step is 240 minutes
     const before = dials().length;
     await dispatchDue(deps, mins(new Date(r2.scheduled_for), 1));
-    expect(dials()).toHaveLength(before);                                                                         // a message is not a call: it waits for the client's own sender
+    expect(dials()).toHaveLength(before);                                                                         // a message is not a call
+    expect(((await get(`/internal/tenants/${tenantId}/case-outbox`)).json() as { id: string }[]).some((o) => o.id === r2.id)).toBe(false);   // and it is not handed over before its time
+    await env.pool.query(`UPDATE case_actions SET scheduled_for = now() - interval '1 minute' WHERE id = $1`, [r2.id]);                 // time passes: it waits for the client's own sender
     const outbox = (await get(`/internal/tenants/${tenantId}/case-outbox`)).json() as { id: string; channel: string; case_ref: string }[];
     expect(outbox.find((o) => o.id === r2.id)).toMatchObject({ channel: 'whatsapp', case_ref: 'retry-1' });
     await must(post(`/internal/case-actions/${r2.id}/complete`, { note: 'sent' }));
@@ -316,12 +318,15 @@ describe('promises to pay, tracked through the client\'s payment system', () => 
     const due = addDays(today(), 0);
     await must(post(`/internal/cases/${c.id}/promises`, { amount: '200', dueOn: due }));
     paid.set('pay-part', '50.05');
-    expect((await check(mins(localToInstant(addDays(due, 1), '12:00', KL), 0))).partial).toHaveLength(0);       // inside the grace day: still waiting
+    const zone = process.env.TZ; process.env.TZ = 'Asia/Kuala_Lumpur';                                           // a server east of UTC reads a date column as the day before
+    try { expect((await check(localToInstant(addDays(due, 1), '12:00', KL))).partial).toHaveLength(0); }       // inside the grace day: still waiting
+    finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }
     const out = await check(localToInstant(addDays(due, 3), '12:00', KL));
     expect(out.partial).toContain(c.id);
     expect(await view(c.id)).toMatchObject({ needsHuman: true, balance: '450.05000000', paidTotal: '50.05000000' });
     expect((await view(c.id)).promises[0]).toMatchObject({ status: 'partial' });
     expect((await actionsOf(c.id, 'handoff'))).toHaveLength(1);
+    await env.pool.query(`UPDATE case_actions SET scheduled_for = now() - interval '1 minute' WHERE case_id = $1 AND kind = 'handoff'`, [c.id]);
     expect(((await get(`/internal/tenants/${tenantId}/case-outbox`)).json() as { case_ref: string; kind: string }[]).some((o) => o.case_ref === 'pay-part' && o.kind === 'handoff')).toBe(true);
   });
 
@@ -355,7 +360,7 @@ describe('promises to pay, tracked through the client\'s payment system', () => 
     paid.set('pay-full', '100'); await check();
     const v = await view(c.id);
     expect(v).toMatchObject({ status: 'closed', closeReason: 'paid_in_full', balance: '0.00000000' });
-    expect((await actionsOf(c.id)).filter((a) => a.status === 'pending')).toHaveLength(0);
+    expect((await actionsOf(c.id)).filter((a) => a.status === 'pending').map((a) => a.kind)).toEqual(['thanks']);          // everything else is cancelled; the thank-you still goes
     expect((await post(`/internal/cases/${c.id}/callbacks`, { at: nextLocal('11:00').toISOString() })).statusCode).toBe(409);
   });
 
@@ -430,5 +435,119 @@ describe('what stays private and what cannot be rewritten', () => {
     const alerts = (await get('/internal/control-tower')).json().alerts as { code: string }[];
     expect(alerts.map((a) => a.code)).toContain('cases_decision');
     void c;
+  });
+});
+
+describe('what the independent review found', () => {
+  const setPolicy = (b: object) => must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0, ...b }));
+
+  it('holds every dial to a contact\'s limits even when they arrive together, or in one dispatcher batch', async () => {
+    await setPolicy({ minGapMinutes: 10000 });
+    const phone = newPhone(); const now = nextLocal('10:00');
+    const out = await Promise.all([0, 1, 2].map(() => placeOutboundCall(calls, null, { tenantId, to: phone, country: 'MY', now })));
+    expect(out.filter((o) => o.allowed).length).toBe(1);                                                          // three at once: one goes
+    const a = await mkCase('batch-a', '500', {}, newPhone()); const phone2 = numbers.get('batch-a')!;
+    const b = await mkCase('batch-b', '500', {}, phone2); const T = nextLocal('11:00');
+    await must(callbackAt(a.id, T)); await must(callbackAt(b.id, T));
+    const before = dials().length;
+    const batch = await dispatchDue(deps, mins(T, 1));
+    expect(dials().length - before).toBe(1);                                                                      // two cases, one person: one call
+    expect(batch.deferred).toHaveLength(1);
+    await setPolicy({});
+  });
+
+  it('does not call a case that was closed while its number was being looked up', async () => {
+    const c = await mkCase('closing'); const T = nextLocal('11:00');
+    await must(callbackAt(c.id, T));
+    const closing: CaseDeps = { ...deps, resolveNumber: async (t, r, ref) => { await post(`/internal/cases/${c.id}/close`, { reason: 'paid elsewhere' }); return deps.resolveNumber!(t, r, ref); } };
+    const before = dials().length;
+    const out = await dispatchDue(closing, mins(T, 1));
+    expect(dials()).toHaveLength(before);
+    expect(out.cancelled).toHaveLength(1);
+    expect((await actionsOf(c.id, 'callback'))[0]).toMatchObject({ status: 'cancelled' });
+  });
+
+  it('measures lateness from the time a callback was locked to, however long it was held back', async () => {
+    await setPolicy({ minGapMinutes: 10000 });
+    const phone = newPhone(); const c = await mkCase('held', '500', {}, phone);
+    await placeOutboundCall(calls, null, { tenantId, to: phone, country: 'MY', now: nextLocal('10:00') });          // a call to the same person, which holds a callback back
+    const T = nextLocal('11:00'); await must(callbackAt(c.id, T));
+    expect((await dispatchDue(deps, mins(T, 1))).deferred).toHaveLength(1);
+    const [held] = await actionsOf(c.id, 'callback');
+    expect(new Date(held!.scheduled_for).getTime()).toBeGreaterThan(T.getTime() + 24 * 3_600_000);              // held back for days
+    const before = dials().length;
+    const out = await dispatchDue(deps, mins(new Date(held!.scheduled_for), 1));
+    expect(out.missed).toContain(held!.id);                                                                         // days late: missed, not made
+    expect(dials()).toHaveLength(before);
+    await setPolicy({});
+  });
+
+  it('does not lose the outcome of a call the provider reported over before it was recorded', async () => {
+    const c = await mkCase('early-end'); const T = nextLocal('11:00');
+    await must(callbackAt(c.id, T));
+    const real = env.provider.state.respond;
+    env.provider.state.respond = async (url) => {
+      if (url.endsWith('/v2/calls')) await env.pool.query(`UPDATE calls SET status = 'unanswered', ended_at = now(), end_reason = 'no_answer' WHERE id = (SELECT id FROM calls WHERE tenant_id = $1 AND status = 'dialing' ORDER BY started_at DESC LIMIT 1)`, [tenantId]);
+      return real(url);
+    };
+    try { await dispatchDue(deps, mins(T, 1)); } finally { env.provider.state.respond = real; }
+    expect((await actionsOf(c.id, 'callback'))[0]).toMatchObject({ status: 'unanswered' });
+    expect((await actionsOf(c.id, 'retry'))).toHaveLength(1);                                                       // the retry chain goes on
+    expect((await env.pool.query('SELECT count(*)::int AS n FROM case_attempts WHERE case_id = $1', [c.id])).rows[0].n).toBe(1);
+  });
+
+  it('closes a case that has been paid in full even when no promise was made, and counts only what is paid after a promise', async () => {
+    const full = await mkCase('rev-full', '100');
+    paid.set('rev-full', '100');
+    expect((await checkPayments(deps, tenantId)).checked).toBeGreaterThan(0);
+    expect(await view(full.id)).toMatchObject({ status: 'closed', closeReason: 'paid_in_full' });
+    const c = await mkCase('rev-base', '500');
+    paid.set('rev-base', '100');
+    await must(post(`/internal/cases/${c.id}/promises`, { amount: '100', dueOn: addDays(localParts(new Date(), KL).date, 3) }));
+    expect((await view(c.id)).paidTotal).toBe('100.00000000');                                                      // brought up to date first
+    expect((await checkPayments(deps, tenantId)).kept).not.toContain(c.id);                                         // the earlier 100 does not pay the new promise
+    paid.set('rev-base', '200');
+    expect((await checkPayments(deps, tenantId)).kept).toContain(c.id);
+  });
+
+  it('applies quiet hours and limits to the gate API too, in the contact\'s zone', async () => {
+    const now = localParts(new Date(), KL); const h = (n: number) => `${String((now.hour + n) % 24).padStart(2, '0')}:00`;
+    await setPolicy({ quietStart: h(0), quietEnd: h(1) });                                                          // quiet right now
+    const gate = (to: string) => post('/internal/dial/check', { tenantId, country: 'MY', to });
+    expect((await gate(newPhone())).json()).toEqual({ allowed: false, reason: 'quiet_hours' });
+    await setPolicy({});
+    expect((await gate(newPhone())).json()).toEqual({ allowed: true });
+  });
+
+  it('counts only a real failure to reach someone as an alert, not a plain no-answer', async () => {
+    const c = await mkCase('quiet-alert'); const T = nextLocal('11:00');
+    await must(callbackAt(c.id, T));
+    await dispatchDue(deps, mins(T, 1));
+    const [a] = await actionsOf(c.id, 'callback');
+    await send(evt('ended', await providerCallIdOf(a!.call_id!), { endReason: 'no_answer' }));
+    expect((await actionsOf(c.id, 'callback'))[0]).toMatchObject({ status: 'unanswered' });
+    const alarming = (await actionsOf(c.id)).filter((x) => x.status === 'missed' || x.status === 'unknown');
+    expect(alarming).toHaveLength(0);                                                                               // what the alert counts is missed and unknown, and this is neither
+  });
+
+  it('refuses a customer\'s number in a note, a reason or a callback note, and an impossible date', async () => {
+    const c = await mkCase('notes');
+    expect((await post(`/internal/cases/${c.id}/callbacks`, { at: nextLocal('11:00').toISOString(), note: 'call him on 012-345 6789' })).statusCode).toBe(400);
+    expect((await post(`/internal/cases/${c.id}/promises`, { amount: '10', dueOn: '2026-02-31' })).statusCode).toBe(400);
+    await env.pool.query(`UPDATE cases SET status = 'decision_required' WHERE id = $1`, [c.id]);
+    expect((await post(`/internal/cases/${c.id}/decision`, { decision: 'continue', note: 'try +60123456789 again' })).statusCode).toBe(400);
+    expect((await post(`/internal/cases/${c.id}/close`, { reason: 'number is +60123456789' })).statusCode).toBe(400);
+    expect(JSON.stringify((await env.pool.query('SELECT detail FROM case_events WHERE case_id = $1', [c.id])).rows)).not.toContain('6789');
+  });
+
+  it('hands nothing to the client\'s sender for a case that is waiting on a decision, and sets up the next call after a decision', async () => {
+    const c = await mkCase('outbox-gate');
+    await env.pool.query(`INSERT INTO case_actions (case_id, kind, channel, scheduled_for, locked_for) VALUES ($1, 'retry', 'whatsapp', now() - interval '1 minute', now() - interval '1 minute')`, [c.id]);
+    const listed = async () => ((await get(`/internal/tenants/${tenantId}/case-outbox`)).json() as { case_ref: string }[]).some((o) => o.case_ref === 'outbox-gate');
+    expect(await listed()).toBe(true);
+    await env.pool.query(`UPDATE cases SET status = 'decision_required' WHERE id = $1`, [c.id]);
+    expect(await listed()).toBe(false);
+    await must(post(`/internal/cases/${c.id}/decision`, { decision: 'continue', note: 'Carry on.' }));
+    expect((await actionsOf(c.id, 'callback')).filter((a) => a.status === 'pending')).toHaveLength(1);              // not left with nothing scheduled
   });
 });

@@ -105,7 +105,8 @@ describe('every real dial goes through the gate and leaves a trace without the n
     expect(b.map((e: { type: string }) => e.type)).toEqual(['dial.blocked']);
     expect(b[0].payload).toEqual({ country: 'MY', reason: 'on_national_registry' });
     expect(a.map((e: { type: string }) => e.type)).toEqual(['dial.allowed']);
-    expect(JSON.stringify([...a, ...b])).not.toMatch(/6012/);
+    // The numbers themselves, in any form; not a fragment like "6012", which a timestamp's microseconds can contain.
+    expect(JSON.stringify([...a, ...b])).not.toMatch(/60123456789|60122223333|0123456789|0122223333|123456789|122223333/);
   });
 
   it('never stores a phone number in clear', async () => {

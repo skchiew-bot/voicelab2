@@ -207,6 +207,8 @@ describe('review fixes', () => {
     expect(seen).toHaveLength(1);
     expect(bRan).toBe(false);
     expect((await q("SELECT outcome, summary FROM job_runs WHERE job = 't-stop-a'"))).toEqual([{ outcome: 'partly', summary: { clients: 3, clientsFailed: 0, clientsNotReached: 2 } }]);
+    // Cut short, not failed: it is due again at once, and not counted as a failure.
+    expect((await q("SELECT consecutive_failures, next_run_at <= now() AS due, lease_until FROM scheduled_jobs WHERE name = 't-stop-a'"))[0]).toEqual({ consecutive_failures: 0, due: true, lease_until: null });
   });
 
   it('works through a backlog in batches while each batch is full, and stops at its bound', async () => {
@@ -240,5 +242,47 @@ describe('review fixes', () => {
     await q("UPDATE scheduled_jobs SET lease_until = now() - interval '1 second' WHERE name = 't-lease'");
     expect((await s.tick()).map((r) => r.outcome)).toEqual(['ok']);
     expect((await q("SELECT lease_until FROM scheduled_jobs WHERE name = 't-lease'"))[0].lease_until).toBeNull();
+  });
+
+  it('lets a run that outlived its lease record itself, but never report the newer run as finished or give back its lease', async () => {
+    await job('t-stale', 60);
+    const gates: (() => void)[] = []; let n = 0;
+    const j: Job = { name: 't-stale', everySeconds: 60, run: () => { n++; return new Promise((r) => { gates.push(() => r({ run: n })); }); } };
+    const a = createScheduler(env.pool, [j], quiet).tick();
+    await sleep(200);
+    await q("UPDATE scheduled_jobs SET lease_until = now() - interval '1 second', next_run_at = now() - interval '1 second' WHERE name = 't-stale'");
+    const b = createScheduler(env.pool, [j], quiet).tick();
+    await sleep(200);
+    const [bStart] = await q("SELECT last_started_at::text AS s FROM scheduled_jobs WHERE name = 't-stale'");
+    gates[0]!(); await a; // the stale run finishes while the newer one is still going
+    const [row] = await q("SELECT last_started_at::text AS s, lease_until IS NOT NULL AS leased FROM scheduled_jobs WHERE name = 't-stale'");
+    expect(row).toEqual({ s: bStart.s, leased: true });
+    expect((await env.call(env.staffToken, 'GET', '/internal/scheduler')).json().find((x: { name: string }) => x.name === 't-stale')).toMatchObject({ unfinished: true });
+    expect((await q("SELECT count(*)::int AS n FROM job_runs WHERE job = 't-stale'"))[0].n).toBe(1);
+    gates[1]!(); await b;
+    expect((await q("SELECT lease_until FROM scheduled_jobs WHERE name = 't-stale'"))[0].lease_until).toBeNull();
+    expect((await q("SELECT count(*)::int AS n FROM job_runs WHERE job = 't-stale'"))[0].n).toBe(2);
+  });
+
+  it('gives up waiting for a run past its deadline, records it as failed, and keeps the lease since the work may still be going', async () => {
+    await job('t-hang', 60);
+    const s = createScheduler(env.pool, [{ name: 't-hang', everySeconds: 60, run: () => new Promise(() => {}) }], { ...quiet, deadlineMs: 150 });
+    expect(await s.tick()).toEqual([{ job: 't-hang', outcome: 'failed', summary: { timedOut: 1 } }]);
+    expect((await q("SELECT lease_until > now() AS leased FROM scheduled_jobs WHERE name = 't-hang'"))[0].leased).toBe(true);
+    await due('t-hang');
+    expect(await s.tick()).toEqual([]); // still held: not started a second time alongside the stuck one
+    const run = await env.call(env.staffToken, 'POST', '/internal/scheduler/t-hang/run', { reason: 'Try again now.' });
+    expect(run.statusCode).toBe(409);
+    expect(run.json().error).toMatch(/under way, or was cut off; it can run again from/);
+  });
+
+  it('stops within its grace period even when a run is stuck, leaving that run unfinished', async () => {
+    await job('t-stuck', 60);
+    const s = createScheduler(env.pool, [{ name: 't-stuck', everySeconds: 60, run: () => new Promise(() => {}) }], { ...quiet, stopGraceMs: 200 });
+    s.start(60_000);
+    await sleep(200);
+    const t0 = Date.now(); await s.stop();
+    expect(Date.now() - t0).toBeLessThan(1500);
+    expect((await env.call(env.staffToken, 'GET', '/internal/scheduler')).json().find((x: { name: string }) => x.name === 't-stuck')).toMatchObject({ unfinished: true });
   });
 });

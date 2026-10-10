@@ -6,6 +6,7 @@ import { Calls } from './Calls';
 import { ControlTower } from './ControlTower';
 import { Compliance } from './Compliance';
 import { Numbers } from './Numbers';
+import { Appointments } from './Appointments';
 import { Cases } from './Cases';
 import { Changes } from './Changes';
 import { Outbound } from './Outbound';
@@ -80,7 +81,7 @@ export function App() {
   const providerId = /^#\/providers\/([\w-]+)$/.exec(hash)?.[1];
   const workflowId = /^#\/workflows\/([\w-]+)$/.exec(hash)?.[1];
   const replay = /^#\/replay\/(call|run)\/([\w-]+)$/.exec(hash);
-  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers', 'workflows', 'recordings', 'outbound', 'resilience', 'tickets', 'faults', 'qa', 'changes', 'learning', 'cases', 'replay'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
+  const section = (['tenants', 'rates', 'numbers', 'compliance', 'calls', 'providers', 'workflows', 'recordings', 'outbound', 'resilience', 'tickets', 'faults', 'qa', 'changes', 'learning', 'cases', 'appointments', 'replay'] as const).find((k) => hash.startsWith(`#/${k}`)) ?? 'tower';
 
   return (
     <div className="shell">
@@ -102,6 +103,7 @@ export function App() {
         <a href="#/changes" aria-current={section === 'changes' ? 'page' : undefined}>Changes</a>
         <a href="#/learning" aria-current={section === 'learning' ? 'page' : undefined}>Learning</a>
         <a href="#/cases" aria-current={section === 'cases' ? 'page' : undefined}>Cases</a>
+        <a href="#/appointments" aria-current={section === 'appointments' ? 'page' : undefined}>Appointments</a>
         <span className="spacer" />
         <button className="link" onClick={() => { setToken(null); setSignedIn(false); }}>Sign out</button>
       </nav>
@@ -117,6 +119,7 @@ export function App() {
           : section === 'changes' ? <Changes />
           : section === 'learning' ? <Learning />
           : section === 'cases' ? <Cases />
+          : section === 'appointments' ? <Appointments />
           : section === 'replay' ? (replay ? <Replay kind={replay[1] as 'call' | 'run'} id={replay[2]!} /> : <Calls />)
           : section === 'compliance' ? <Compliance />
           : section === 'calls' ? <Calls />

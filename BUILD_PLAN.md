@@ -392,6 +392,15 @@ Not built or not proven:
   - Delays cascade to every later appointment.
   - Officers are notified of changes. A cancellation policy can be configured.
   - Notifications by SMS, WhatsApp or email.
+**Appointments status (in progress)** Built and tested against fakes:
+- **Diaries** per officer or per group (a group booking goes to the least busy free member), with weekly hours and time off; **locations** for customers who come in, and an address for an officer who goes to the customer, with the journey time counted so two visits cannot be booked closer than the officer can travel.
+- **Booking** is conflict-free under a lock per diary, inside the diary's hours, and never in the past.
+- **A delay** moves the visit and every later one that day by only as much as the officer's travel requires; one that would end after closing is flagged for a new time. Each customer affected, and the officer, is told.
+- **A cancellation policy** per client: free until some hours before, then a late fee for a customer's own cancellation or late move, and a no-show fee; exact decimal money. A fee is recorded and told to the customer, never charged.
+- **Messages** to customers and officers by the channel each prefers, addressed by the client's reference (never a phone number), written to an outbox that the client's own sender delivers and marks; reminders once, before the appointment.
+
+Not built: no SMS, WhatsApp or email provider (messages are queued, not sent); travel time is supplied, not computed; customers do not book for themselves; a fee is not charged.
+
 - **Knowledge base and policy**
   - The knowledge base informs the bot; policy governs what it may do.
   - Content is scoped per tenant and works across channels.

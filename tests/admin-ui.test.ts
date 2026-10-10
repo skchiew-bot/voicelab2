@@ -422,7 +422,7 @@ describe.skipIf(!run)('admin UI', () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
     await signIn(page, env.staffToken);
     await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
-    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience', 'tickets', 'qa', 'changes', 'learning', 'cases']) {
+    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience', 'tickets', 'qa', 'changes', 'learning', 'cases', 'appointments']) {
       await page.goto(`${base}#/${route}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
@@ -820,6 +820,35 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(aged).toContainText('decision');
     await expect(page.getByLabel('Cases list')).toContainText('Open');
     void tenant;
+    await page.close();
+  }, 60_000);
+
+  it('shows a diary\'s day, reports a delay that moves the next visit, and marks a message delivered, from the console', async () => {
+    const { localToInstant } = await import('../src/cases/policy.js');
+    const call = (m: 'POST' | 'PUT', u: string, b: unknown) => env.call(env.staffToken, m, u, b);
+    const tenant = (await call('POST', '/internal/tenants', { name: 'Diary UI Co' })).json().id as string;
+    const diary = (await call('POST', `/internal/tenants/${tenant}/diaries`, { name: 'Aminah', kind: 'individual', officerRef: 'officer-aminah', timeZone: 'Asia/Kuala_Lumpur' })).json().id as string;
+    await call('PUT', `/internal/diaries/${diary}/hours`, { hours: [0, 1, 2, 3, 4, 5, 6].map((dow) => ({ dow, starts: '09:00', ends: '17:00' })) });
+    const date = new Date(Date.now() + 4 * 86_400_000).toISOString().slice(0, 10);
+    const book = async (hhmm: string, ref: string) => (await call('POST', `/internal/tenants/${tenant}/appointments`, { diaryId: diary, contactRef: ref, kind: 'field_visit', visitAddress: '12 Jalan Ampang', travelMinutes: 15, startsAt: localToInstant(date, hhmm, 'Asia/Kuala_Lumpur').toISOString(), durationMinutes: 45 })).json();
+    await book('09:00', 'cust-first'); await book('10:00', 'cust-second');
+    const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
+    await signIn(page, env.staffToken);
+    await page.goto(`${base}#/appointments`);
+    await page.getByLabel('Client').selectOption({ label: 'Diary UI Co' });
+    await page.getByLabel('Diaries').getByRole('button', { name: 'Aminah' }).click();
+    await page.getByLabel(/^Day/).fill(date);
+    const agenda = page.getByLabel('Agenda');
+    await expect(agenda).toContainText('cust-first'); await expect(agenda).toContainText('cust-second');
+    await page.getByLabel(/^Delay in minutes/).fill('20');
+    await agenda.getByRole('row', { name: /cust-first/ }).getByRole('button', { name: 'Running late' }).click();
+    await expect(agenda.getByRole('row', { name: /cust-second/ })).toContainText('02:20 UTC');          // the next visit moved too (10:20 in Kuala Lumpur; the console shows UTC)
+    const outbox = page.getByLabel('Messages to deliver');
+    await expect(outbox).toContainText('delayed by 20 minutes');
+    const rows = outbox.getByRole('row').filter({ hasText: 'delayed by 20 minutes' });
+    const before = await outbox.getByRole('row').count();
+    await rows.first().getByRole('button', { name: 'Mark sent' }).click();
+    await expect(outbox.getByRole('row')).toHaveCount(before - 1);
     await page.close();
   }, 60_000);
 

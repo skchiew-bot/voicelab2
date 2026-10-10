@@ -45,7 +45,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "keeps money out of floating point in the console"
 
 ### L-005: Something that never happened gets no status as if it had
-- **Seen:** 4 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10). A call never answered was recorded as a customer hang-up or a system drop; a QA run with nothing scored was stored as 0; a later normal end cleared a fault already flagged (Phase 5 independent review, 2026-10-10). A plain no-answer was counted as a missed call in the alert, and a callback the dispatcher was late for used up one of the person's retries though nobody was dialled (Phase 7 independent review, 2026-10-10).
+- **Seen:** 4 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10). A call never answered was recorded as a customer hang-up or a system drop; a QA run with nothing scored was stored as 0; a later normal end cleared a fault already flagged (Phase 5 independent review, 2026-10-10). A plain no-answer was counted as a missed call in the alert, and a callback the dispatcher was late for used up one of the person's retries though nobody was dialled (Phase 7 independent review, 2026-10-10). A delay flagged appointments it never reached as needing a new time, and told their customers they could not go ahead (Phase 7 appointments independent review, 2026-10-10).
 - **Rule:** Give "never started" or "unknown" its own state (such as `not_applicable`, or `null` rather than 0) and keep it out of failure counts, alerts, retries and anything that recommends an action.
 - **Guards:**
   - `tests/phase3.test.ts` › "will not lock a DID because of a call that never went out"
@@ -56,6 +56,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/journey.test.ts` › "keeps a fault the watchdog found, with the time it was first seen, when the call then ends in a way that looks fine"
   - `tests/qa.test.ts` › "stores no score at all when nothing could be scored, and scores the call once a model is connected"
   - `tests/cases.test.ts` › "counts only a real failure to reach someone as an alert, not a plain no-answer"
+  - `tests/appointments.test.ts` › "does not push an appointment into the officer's time off, and does not flag one the delay never reaches"
 
 ### L-006: One bad record must not take a whole feature down
 - **Seen:** 3 times. One unreadable secret returned a 500 for the whole Control Tower ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). One provider priced in a currency with no exchange rate made every pooled dial fail ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). A very large number gave a 500 instead of a 400 ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). One script's audio failure aborted the whole sweep, so drift screening stopped for everyone (Phase 6 independent review, 2026-10-10).
@@ -176,11 +177,12 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/tracker.test.ts` › "reads a plain "no" or "no, thank you" as neutral or kind, and two declined questions do not hand the call to a person"
 
 ### L-022: Compare times as times, not as text
-- **Seen:** The report compared git commit dates written with a +08:00 offset against UTC log timestamps as strings, so logging gaps, audit completeness and session times were wrong for anyone outside UTC (independent review, 2026-10-10). A date column read on a server east of UTC came back as the day before, so a promise was judged broken a day early (Phase 7 independent review, 2026-10-10).
+- **Seen:** The report compared git commit dates written with a +08:00 offset against UTC log timestamps as strings, so logging gaps, audit completeness and session times were wrong for anyone outside UTC (independent review, 2026-10-10). A date column read on a server east of UTC came back as the day before, so a promise was judged broken a day early (Phase 7 independent review, 2026-10-10). A group booking counted an officer's busy-ness by the server's UTC day, so early-morning work in Kuala Lumpur counted towards the wrong day (Phase 7 appointments independent review, 2026-10-10).
 - **Rule:** Turn every timestamp into one form (`new Date(x).toISOString()`, or milliseconds) at the edge, before comparing or sorting.
 - **Guards:**
   - `tests/devlog.test.ts` › "finds logging gaps"
   - `tests/cases.test.ts` › "records a part payment, recalculates the balance exactly, and passes the case to a person or plan"
+  - `tests/appointments.test.ts` › "counts a group member's load by their own calendar day"
 
 ### L-023: Keep every branch accountable to the plan, and the trunk as the default
 - **Seen:** The repository's default branch on GitHub was still the first session branch (`claude/elegant-fermat-er13o8`), long merged, so clones and the GitHub page showed stale code; seven merged branches were never deleted; and nothing checked that a branch belonged to the plan (found by the dev Control Tower branch audit, 2026-10-10).
@@ -227,3 +229,15 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** When a record is written after a call to an outside system, look at whether the outside system has already reported by the time it is written, and settle it then. Never rely on the order in which two requests commit.
 - **Guards:**
   - `tests/cases.test.ts` › "does not lose the outcome of a call the provider reported over before it was recorded"
+
+### L-030: A request that needs several locks takes them all first, in one fixed order
+- **Seen:** A move into a group diary held the old diary's lock and then waited for the group's members, while a group booking held a member and waited for the other: Postgres broke the deadlock with an error, and half the requests failed with a 500 (Phase 7 appointments independent review, 2026-10-10).
+- **Rule:** Work out every lock a request will need before taking any, sort them, and take them in that order; locks taken later in a function are the ones that deadlock.
+- **Guards:**
+  - `tests/appointments.test.ts` › "does not deadlock when a move into a group meets group bookings, or two moves cross"
+
+### L-031: A customer is never charged for the business's own fault
+- **Seen:** A customer who cancelled an appointment that a delay had flagged for a new time, or had moved, was charged the late fee (Phase 7 appointments independent review, 2026-10-10).
+- **Rule:** A fee that depends on who changed something must look at who made the change necessary: a time the business moved or broke is free for the customer to give up, whatever the notice.
+- **Guards:**
+  - `tests/appointments.test.ts` › "never charges a customer for a time the business broke"

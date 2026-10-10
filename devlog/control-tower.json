@@ -5,7 +5,7 @@
     "maxFailedTestRunsInARow": 5,
     "maxSameCommandFailures": 3,
     "maxEditsToOneFile": 25,
-    "maxSessionCostUSD": "80",
+    "maxSessionCostUSD": "160",
     "maxTaskAttempts": 3,
     "_maxEditsToOneFile": "Edits to one file with no passing test or typecheck run in between."
   },

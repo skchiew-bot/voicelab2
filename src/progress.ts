@@ -130,9 +130,13 @@ export const PHASES: PhaseProgress[] = [
     ],
   },
   {
-    id: '7', name: 'Business Modules', status: 'in_progress', summary: "Self-contained modules that each plug into the shared backbone. Closed-loop case management is built and tested against fakes: callbacks locked to a time and placed then, promise-to-pay tracked through a payment-status integration, reminders and thanks, retry and channel rotation, reachability learning, treatment after a broken promise, balance recalculation, case ageing, inbound recognition, and quiet hours and contact limits on every dial. Appointments and the knowledge base and policy module are not started.",
+    id: '7', name: 'Business Modules', status: 'in_progress', summary: "Self-contained modules that each plug into the shared backbone. Closed-loop case management is built and tested against fakes: callbacks locked to a time and placed then, promise-to-pay tracked through a payment-status integration, reminders and thanks, retry and channel rotation, reachability learning, treatment after a broken promise, balance recalculation, case ageing, inbound recognition, and quiet hours and contact limits on every dial. Appointments are built and tested against fakes: diaries for an officer or a group, customers coming in or officers visiting, delays that move every later visit, officers told of changes, and a cancellation policy with exact fees. The knowledge base and policy module is not started.",
     criteria: [], open: [
-      'Appointments (diaries, field visits, cascading delays, notifications, cancellation policy) are not started',
+      'Appointment messages (SMS, WhatsApp, email) are written here but delivered by the client\'s own sender: the platform has no provider for them, so none has been sent. Travel time is supplied by the client, not computed from a map',
+      'Appointments are not yet linked to a case\'s read-back, and a customer cannot book or cancel by themselves: staff do it, or the client\'s system through the API. A fee is recorded, never charged',
+      'A customer\'s visit address is kept (it is needed for the visit) but never a phone number; the diary\'s hours are weekly only, with no holidays other than time off. Daylight saving is not tested (the tests use Kuala Lumpur, which has none)',
+      'The check that keeps a phone number out of an address or reference also refuses some genuine ones, such as a unit like "10-03-05" written with long digit runs or a numeric account reference',
+      'A delay flags an appointment for a new time but nothing finds it one; a person (or the client\'s system) moves it. Appointments are not yet part of a case\'s read-back',
       'The knowledge base and policy module is not started',
       'Case management has been tested only against fakes: the lookup of a number to dial at the moment of a call, and the client\'s payment-status system, are stand-ins; no client system is connected',
       'Messages on other channels (WhatsApp, SMS, email) are not sent by the platform: they are queued for the client\'s own sender (`/internal/tenants/:id/case-outbox`)',

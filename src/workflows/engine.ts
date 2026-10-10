@@ -290,7 +290,7 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
               // A line a model wrote is checked before anyone hears it: used as it is, tidied, or turned down for the fallback.
               const checked = checkModelLine(typeof g === 'string' ? g : g.text);
               if (checked.decision !== 'proceeded') ai = { ...(ai ?? {}), decision: checked.decision, decisionReason: checked.reason };
-              else if (ai) ai = { ...ai, decision: 'proceeded', decisionReason: 'The line passed the checks and was used.' };
+              else ai = { ...(ai ?? {}), decision: 'proceeded', decisionReason: 'The line passed the checks and was used.' };
               if (checked.line !== undefined) line = checked.line;
               else if (fallback !== undefined) line = renderText(fallback, state.vars, state.sensitive);
               else { fail(state, out, `The line written for "${id}" was turned down (${checked.reason}), and there is no fallback text.`, id); return; }

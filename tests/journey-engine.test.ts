@@ -45,7 +45,8 @@ describe('every decision leaves its reason', () => {
     expect(say.text).toBe('Good day.');
     expect(say.ai).toEqual({ model: 'small', reasoning: 'Caller at [number] prefers short greetings.', policy: 'greeting-v2', inputTokens: 40, outputTokens: 5, confidence: 0.9, decision: 'proceeded', decisionReason: 'The line passed the checks and was used.' });
     const plain = await start('w', {}, { load: () => dyn, speaker: { generate: async () => 'Hello.' } });
-    expect(plain.records.find((x) => x.type === 'say')!.payload).not.toHaveProperty('ai');
+    // Even a plain string from a model is a model decision: it is recorded as used, without a model name.
+    expect(plain.records.find((x) => x.type === 'say')!.payload.ai).toEqual({ decision: 'proceeded', decisionReason: 'The line passed the checks and was used.' });
   });
 });
 
@@ -146,10 +147,10 @@ describe('a line a model wrote is checked before it is spoken', () => {
     const p = await say('  Good   morning,\n  how are you?  ');
     expect(p).toMatchObject({ text: 'Good morning, how are you?', ai: { decision: 'reworked' } });
   });
-  it('uses a clean line as it is, with nothing added to the record', async () => {
+  it('uses a clean line as it is, and records that it was used', async () => {
     const p = await say('Good morning.');
     expect(p!.text).toBe('Good morning.');
-    expect(p).not.toHaveProperty('ai');
+    expect(p!.ai).toMatchObject({ decision: 'proceeded' });
   });
   it('stops the call rather than say something unchecked when there is no fallback', async () => {
     const nofb: WorkflowDefinition = { start: 'd', nodes: { d: { type: 'speak', speech: 'dynamic', prompt: 'Greet', transitions: [{ to: 'e' }] }, e: { type: 'end', outcome: 'ok' } } };

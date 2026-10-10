@@ -73,3 +73,19 @@ describe('when a call escalates', () => {
     expect(intentChanged(s)).toBe(true);
   });
 });
+
+describe('ordinary answers are not trouble', () => {
+  it('reads a plain "no" or "no, thank you" as neutral or kind, and two declined questions do not hand the call to a person', () => {
+    expect(analyseTurn('No').sentiment).toBe(0);
+    expect(analyseTurn('No, thank you').sentiment).toBeGreaterThanOrEqual(0);
+    expect(analyseTurn('I paid it already, please check again').sentiment).toBe(0);
+    const state: JourneyState = { turns: [], recoveries: 0 };
+    const t = (text: string) => observeTurn(state, { node: 'ask', analysis: analyseTurn(text), understood: true }, DEFAULT_JOURNEY);
+    expect(t('No')).toEqual({ escalate: false });
+    expect(t('No, thank you')).toEqual({ escalate: false });
+  });
+  it('lets a client name a topic like an inherited property without breaking the reading', () => {
+    const lex = mergeLexicon({ topics: { toString: ['cheque'], constructor: ['cheque'] } });
+    expect(analyseTurn('I sent a cheque', lex).topic).toBe('toString');
+  });
+});

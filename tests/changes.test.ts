@@ -175,3 +175,27 @@ describe('showing the client what is changing', () => {
     expect((await A.get('/internal/changes?workflowId=' + wfId)).json().length).toBeGreaterThan(3);
   });
 });
+
+describe('a change written against a flow that has since moved on', () => {
+  it('is refused, so approving one change never silently undoes another', async () => {
+    const live = async () => (await A.get(`/internal/workflows/${wfId}/deployments`)).json().live.staging as string;
+    const v4 = (await must(A.post(`/internal/workflows/${wfId}/versions`, { definition: def('Hello {{name}}, can we count on a payment soon?') }))).json().id;
+    const v5 = (await must(A.post(`/internal/workflows/${wfId}/versions`, { definition: def('Hello {{name}}, is a payment possible today?') }))).json().id;
+    const one = (await must(propose(v4))).json(); const two = (await must(propose(v5))).json();
+    const B = as(tokenB);
+    await must(B.post(`/internal/changes/${one.id}/decision`, { decision: 'approved' }));
+    await must(B.post(`/internal/changes/${two.id}/decision`, { decision: 'approved' }));
+    await must(A.post(`/internal/changes/${one.id}/apply`));
+    expect(await live()).toBe(one.to_version);
+    const late = await A.post(`/internal/changes/${two.id}/apply`);
+    expect(late.statusCode).toBe(409);
+    expect(late.json().error).toContain('changed since');
+    expect(await live()).toBe(one.to_version);                                                       // the first change still stands
+    // and nobody can approve a diff that is already out of date
+    const v6 = (await must(A.post(`/internal/workflows/${wfId}/versions`, { definition: def('Hello {{name}}, may we hear about your payment?') }))).json().id;
+    const three = (await must(propose(v6))).json();
+    await must(A.post(`/internal/workflows/${wfId}/deploy`, { versionId: v5, environment: 'staging' }));
+    const stale = await as(tokenC).post(`/internal/changes/${three.id}/decision`, { decision: 'approved' });
+    expect(stale.statusCode).toBe(409);
+  });
+});

@@ -364,7 +364,7 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
       );
       call.status = status;
       await log('call.ended', { status, reason: ev.endReason ?? 'completed', durationSeconds: seconds });
-      await recordCallEnd(c, call, { endReason: ev.endReason, occurredAt: ev.occurredAt });
+      await recordCallEnd(c, call, { endReason: ev.endReason, occurredAt: ev.occurredAt, answered });
       await costCall(c, null, call.id);
       // A channel has freed: whoever has waited longest moves up.
       if (call.direction === 'inbound') await promoteQueued(c, call.tenant_id);

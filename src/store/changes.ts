@@ -117,6 +117,7 @@ export async function decide(c: pg.PoolClient, actorId: string, changeId: string
   await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`change:${changeId}`]);
   const ch = await getChange(c, changeId);
   if (ch.status !== 'pending') throw new AppError(409, `This change is ${ch.status}; it can no longer be decided.`);
+  await assertStillCurrent(c, ch);
   if (ch.requested_by === actorId) throw new AppError(403, 'You proposed this change, so you cannot decide it.');
   const prior = (await c.query('SELECT 1 FROM change_approvals WHERE change_id = $1 AND decided_by = $2', [changeId, actorId])).rowCount;
   if (prior) throw new AppError(403, 'You have already decided a level of this change. Each level needs someone else.');
@@ -126,12 +127,21 @@ export async function decide(c: pg.PoolClient, actorId: string, changeId: string
   return getChange(c, changeId);
 }
 
+/** The flow must still be at the version the change was written against; otherwise approvers saw a diff that is out of date. */
+async function assertStillCurrent(c: pg.PoolClient, ch: { workflow_id: string; environment: Environment; from_version_id: string | null }) {
+  const live = (await liveVersionId(c, ch.workflow_id, ch.environment)) ?? null;
+  if (live !== ch.from_version_id) throw new AppError(409, 'The live flow has changed since this change was proposed, so what was reviewed is out of date. Propose it again against the current version.');
+}
+
 /** Put an approved change live, by the same gates as any other deploy. Once only. */
 export async function applyChange(c: pg.PoolClient, actorId: string, changeId: string) {
   await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`change:${changeId}`]);
   const ch = await getChange(c, changeId);
   if (ch.status === 'applied') throw new AppError(409, 'This change has already been applied.');
   if (ch.status !== 'approved') throw new AppError(409, `This change is ${ch.status}. It needs every level approved before it can go live.`);
+  // Changes to one flow go live one at a time, and only against the version they were written for.
+  await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`change-live:${ch.workflow_id}:${ch.environment}`]);
+  await assertStillCurrent(c, ch);
   const dep = await deploy(c, actorId, ch.workflow_id, { versionId: ch.to_version_id, environment: ch.environment });
   await c.query('INSERT INTO change_applications (change_id, deployment_id, applied_by) VALUES ($1,$2,$3)', [changeId, dep.id, actorId]);
   await audit(c, actorId, 'change.apply', 'change', changeId, { environment: ch.environment, version: ch.to_version });
@@ -142,6 +152,9 @@ export async function applyChange(c: pg.PoolClient, actorId: string, changeId: s
  * The client-facing story of a change: the flow as it is, what was detected in it, what is changing and why, and the
  * flow after, with the audio that could be played. "Detected" is what the live and test calls on the current version
  * actually showed in the last 30 days.
+ *
+ * Internal only: `financial` is provider cost, `recordingId` points at internal recordings and `approvals` name staff. A
+ * view served to a client must be cut down from this, never passed through.
  */
 export async function showcase(c: pg.PoolClient, changeId: string) {
   const ch = await getChange(c, changeId);

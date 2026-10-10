@@ -32,6 +32,17 @@ export const listCriteriaSets = async (c: pg.PoolClient, tenantId: string) =>
  * configured for the task (and the tier above it for doubtful answers); with none configured, only the rules are applied.
  */
 export async function scoreBatch(d: QaDeps, actorId: string | null, e: { tenantId: string; limit?: number }) {
+  // One batch per client at a time: a second would judge the same calls and spend model tokens that are never recorded.
+  const lock = await d.pool.connect();
+  try {
+    const got = (await lock.query('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [`qa-batch:${e.tenantId}`])).rows[0].ok as boolean;
+    if (!got) return { scored: 0, skipped: 0, failed: 0, waiting: 0, remaining: 0, usedModel: false, busy: true };
+    try { return { ...(await runBatch(d, actorId, e)), busy: false }; }
+    finally { await lock.query('SELECT pg_advisory_unlock(hashtext($1))', [`qa-batch:${e.tenantId}`]); }
+  } finally { lock.release(); }
+}
+
+async function runBatch(d: QaDeps, actorId: string | null, e: { tenantId: string; limit?: number }) {
   const limit = Math.min(e.limit ?? 50, 500);
   const plan = await withActor(d.pool, { kind: 'internal' }, async (c) => {
     const runs = (await c.query(
@@ -44,7 +55,7 @@ export async function scoreBatch(d: QaDeps, actorId: string | null, e: { tenantI
   });
   const primary = plan.cfg ? d.judges?.[plan.cfg.tier] : undefined;
   const escalate = plan.cfg?.escalateTo ? d.judges?.[plan.cfg.escalateTo] : undefined;
-  let scored = 0; let skipped = 0; let failed = 0;
+  let scored = 0; let skipped = 0; let failed = 0; let waiting = 0;
   for (const run of plan.runs) {
     const set = plan.sets.get(run.name) ?? plan.sets.get('*');
     if (!set) { skipped++; continue; }
@@ -52,12 +63,14 @@ export async function scoreBatch(d: QaDeps, actorId: string | null, e: { tenantI
     try {
     const rp = await withActor(d.pool, { kind: 'internal' }, (c) => replayRun(c, run.id));
     const card = await scoreCall(set.criteria as Criterion[], rp, { primary, escalate });
+    // Nothing could be scored (every question needs a model and there is none): store no score rather than a 0, and try again later.
+    if (card.score === null) { waiting++; continue; }
     await withActor(d.pool, { kind: 'internal' }, async (c) => {
       const used = card.usage.length ? card.usage[card.usage.length - 1]! : null;
       const row = await c.query(
         `INSERT INTO qa_scores (tenant_id, run_id, call_id, criteria_set_id, score, results, scorer, model, tier, input_tokens, output_tokens, escalated_from)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (run_id, criteria_set_id) DO NOTHING RETURNING id`,
-        [e.tenantId, run.id, run.call_id, set.id, card.score ?? 0, JSON.stringify({ complete: card.complete, results: card.results }), card.usage.length ? 'model+rules' : 'rules',
+        [e.tenantId, run.id, run.call_id, set.id, card.score, JSON.stringify({ complete: card.complete, results: card.results }), card.usage.length ? 'model+rules' : 'rules',
           used?.model ?? null, used?.tier ?? null, card.usage.reduce((s, u) => s + u.inputTokens, 0), card.usage.reduce((s, u) => s + u.outputTokens, 0), card.usage.find((u) => u.escalatedFrom)?.escalatedFrom ?? null]);
       if (!row.rowCount) return;
       // Every model judgement, and every step up a tier, goes in the audit trail with its tokens.
@@ -77,7 +90,7 @@ export async function scoreBatch(d: QaDeps, actorId: string | null, e: { tenantI
     } catch { failed++; } // one bad run must not stop the rest of the batch; it stays unscored and is tried next time
   }
   if (scored) await withActor(d.pool, { kind: 'internal' }, (c) => audit(c, actorId, 'qa.score_batch', 'tenant', e.tenantId, { scored, skipped }));
-  return { scored, skipped, failed, remaining: Math.max(0, plan.runs.length - scored - skipped - failed), usedModel: Boolean(primary) };
+  return { scored, skipped, failed, waiting, remaining: Math.max(0, plan.runs.length - scored - skipped - failed - waiting), usedModel: Boolean(primary) };
 }
 
 export const listScores = async (c: pg.PoolClient, o: { tenantId?: string; runId?: string; limit?: number }) =>

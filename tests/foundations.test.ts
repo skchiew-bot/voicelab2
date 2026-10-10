@@ -146,7 +146,7 @@ describe('exit criterion 3: a client cannot read internal-ledger data', () => {
   it('keeps provider funding, charging and secrets unreachable from the database role clients run as', async () => {
     const asClient = (sql: string) => withActor(env.pool, { kind: 'client', tenantId: tenantA }, (c) => c.query(sql));
     for (const table of ['provider_funding_entries', 'providers', 'charging_versions', 'charging_components',
-      'provider_capabilities', 'call_events', 'users', 'audit_log', 'model_config']) {
+      'provider_capabilities', 'call_events', 'users', 'audit_log', 'model_config', 'ai_decisions', 'change_requests', 'tickets', 'qa_scores', 'journey_config', 'fault_acks']) {
       await expect(asClient(`SELECT * FROM ${table}`), table).rejects.toThrow(/permission denied/);
     }
     await expect(asClient(`INSERT INTO credit_entries (tenant_id, kind, credits) VALUES ('${tenantA}', 'grant', 1)`))

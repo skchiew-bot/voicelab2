@@ -20,6 +20,7 @@ const FAULT_OUTCOMES = new Set(['error', 'integration_failed']);
 export function classifyEnd(i: EndInput): EndClassification {
   const node = i.run?.node ?? null;
   if (i.endReason === 'failed' && i.answered) return { endedBy: 'system', node, fault: true, reason: 'The provider reported the call as failed after it was answered.' };
+  if (!i.answered) return { endedBy: null, node: null, fault: false, reason: 'The call was never answered, so nobody hung up and the workflow did not drop it.' };
   if (!i.run) return { endedBy: null, node: null, fault: false, reason: 'No workflow was running on this call, so who ended it is not known.' };
   const r = i.run;
   if (r.status === 'ended') {

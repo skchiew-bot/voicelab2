@@ -9,8 +9,8 @@ import { recordEvent } from './events.js';
 
 async function gather(c: pg.PoolClient, runId: string) {
   const run = (await c.query(
-    `SELECT r.id, r.tenant_id, r.call_id, r.workflow_id, r.version_id, r.pins, r.state, r.kind, v.major || '.' || v.minor AS version
-       FROM workflow_runs r JOIN workflow_versions v ON v.id = r.version_id WHERE r.id = $1`, [runId])).rows[0];
+    `SELECT r.id, r.tenant_id, r.call_id, r.workflow_id, r.version_id, r.pins, r.state, r.kind, w.name AS entry, v.major || '.' || v.minor AS version
+       FROM workflow_runs r JOIN workflow_versions v ON v.id = r.version_id JOIN workflows w ON w.id = r.workflow_id WHERE r.id = $1`, [runId])).rows[0];
   if (!run) throw new AppError(404, 'Run not found.');
   const steps = (await c.query('SELECT seq, type, workflow, node, payload, created_at, occurred_at FROM workflow_run_steps WHERE run_id = $1 ORDER BY seq', [runId])).rows;
   const defRows = (await c.query('SELECT id, definition FROM workflow_versions WHERE id = ANY($1::uuid[])', [Object.values(run.pins as Record<string, string>)])).rows;
@@ -19,12 +19,23 @@ async function gather(c: pg.PoolClient, runId: string) {
   return { run, steps, defs, state: run.state as RunState };
 }
 
-async function similar(c: pg.PoolClient, tenantId: string, node: string | null) {
+/** How often the same thing happened in the last 30 days, in the same workflow: escalations (reading the caller or a hand-over), or drops. */
+async function similar(c: pg.PoolClient, tenantId: string, node: string | null, workflowId: string | null, kind: 'escalation' | 'fault') {
+  if (kind === 'fault') {
+    const q = async (extra: string, args: unknown[]) => (await c.query(
+      `SELECT count(*)::int AS n FROM calls WHERE tenant_id = $1 AND fault AND fault_at > now() - interval '30 days' ${extra}`, [tenantId, ...args])).rows[0].n as number;
+    return {
+      atNodeLast30d: node ? await q('AND ended_node = $2', [node]) : 0, allLast30d: await q('', []),
+      callsLast30d: (await c.query(`SELECT count(*)::int AS n FROM calls WHERE tenant_id = $1 AND started_at > now() - interval '30 days'`, [tenantId])).rows[0].n as number,
+    };
+  }
   const q = async (extra: string, args: unknown[]) => (await c.query(
-    `SELECT count(*)::int AS n FROM workflow_runs WHERE tenant_id = $1 AND kind IN ('live', 'test') AND started_at > now() - interval '30 days' AND state->>'workflow' IS NOT NULL ${extra}`, [tenantId, ...args])).rows[0].n as number;
+    `SELECT count(*)::int AS n FROM workflow_runs r WHERE r.tenant_id = $1 AND r.kind IN ('live', 'test') AND r.started_at > now() - interval '30 days'
+        AND ($2::uuid IS NULL OR r.workflow_id = $2) ${extra}`, [tenantId, workflowId, ...args])).rows[0].n as number;
+  const escalated = `(r.state ? 'escalation' OR r.outcome = 'handoff_human')`;
   return {
-    atNodeLast30d: node ? await q(`AND state->'escalation'->>'node' = $2`, [node]) : 0,
-    allLast30d: await q(`AND state ? 'escalation'`, []),
+    atNodeLast30d: node ? await q(`AND ${escalated} AND (r.state->'escalation'->>'node' = $3 OR EXISTS (SELECT 1 FROM workflow_run_steps s WHERE s.run_id = r.id AND s.type = 'handoff_human' AND s.node = $3))`, [node]) : 0,
+    allLast30d: await q(`AND ${escalated}`, []),
     callsLast30d: await q('', []),
   };
 }
@@ -42,11 +53,11 @@ export async function ticketForEscalation(c: pg.PoolClient, actorId: string | nu
   const handoff = g.state.outcome === 'handoff_human' ? [...g.steps].reverse().find((s) => s.type === 'handoff_human') : undefined;
   const esc = g.state.escalation ?? (handoff ? { trigger: 'workflow_handoff', detail: String((handoff.payload as Record<string, Json>).reason ?? 'The workflow handed the call to a person.'), node: handoff.node as string } : undefined);
   if (!esc) return null;
-  const adherence = checkAdherence(g.steps, g.defs, g.state.workflow ?? Object.keys(g.defs)[0]!);
+  const adherence = checkAdherence(g.steps, g.defs, g.run.entry as string);
   const draft = draftTicket({
     kind: 'escalation', workflow: g.state.workflow, version: g.run.version, node: esc.node, trigger: esc.trigger, detail: esc.detail,
     steps: g.steps.map((s) => ({ type: s.type, node: s.node, payload: s.payload as Record<string, Json> })),
-    adherence, similar: await similar(c, g.run.tenant_id, esc.node),
+    adherence, similar: await similar(c, g.run.tenant_id, esc.node, g.run.workflow_id, 'escalation'),
   });
   return insertTicket(c, actorId, g.run.tenant_id, g.run.call_id, runId, draft);
 }
@@ -60,8 +71,8 @@ export async function ticketForFault(c: pg.PoolClient, actorId: string | null, c
   const draft = draftTicket({
     kind: 'fault', workflow: g?.state.workflow ?? 'none', version: g?.run.version ?? null, node: call.ended_node ?? null, trigger: 'system_drop', detail,
     steps: (g?.steps ?? []).map((s) => ({ type: s.type, node: s.node, payload: s.payload as Record<string, Json> })),
-    adherence: g ? checkAdherence(g.steps, g.defs, g.state.workflow) : { score: null, followed: 0, checked: 0, deviations: [] },
-    similar: g ? await similar(c, call.tenant_id, call.ended_node ?? null) : { atNodeLast30d: 0, allLast30d: 0, callsLast30d: 0 },
+    adherence: g ? checkAdherence(g.steps, g.defs, g.run.entry as string) : { score: null, followed: 0, checked: 0, deviations: [] },
+    similar: g ? await similar(c, call.tenant_id, call.ended_node ?? null, g.run.workflow_id, 'fault') : { atNodeLast30d: 0, allLast30d: 0, callsLast30d: 0 },
   });
   return insertTicket(c, actorId, call.tenant_id, callId, runId ?? null, draft);
 }

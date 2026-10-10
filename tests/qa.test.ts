@@ -208,4 +208,27 @@ describe('scoring finished calls in batches', () => {
     void one; void two;
     expect(await scoreBatch({ pool: env.pool, judges: { haiku: flaky } }, null, { tenantId })).toMatchObject({ scored: 1, failed: 0 });
   });
+  it('stores no score at all when nothing could be scored, and scores the call once a model is connected', async () => {
+    await must(post(`/internal/tenants/${tenantId}/qa-criteria`, { useCase: 'qa_flow', criteria: [{ id: 'tone', label: 'Polite tone', type: 'judge', question: 'Was the agent polite?', weight: 1 }] }));
+    const run = await finished(['yes thanks']);
+    const { scoreBatch } = await import('../src/store/qa.js');
+    const none = await scoreBatch({ pool: env.pool, judges: {} }, null, { tenantId });
+    expect(none.waiting).toBeGreaterThanOrEqual(1);
+    expect((await get(`/internal/qa/scores?runId=${run}`)).json()).toEqual([]);          // not a 0
+    const ok: Judge = { tier: 'haiku', model: 'h', judge: async () => ({ passed: true, confidence: 1, reason: 'ok', inputTokens: 1, outputTokens: 1 }) };
+    await scoreBatch({ pool: env.pool, judges: { haiku: ok } }, null, { tenantId });
+    expect(Number((await get(`/internal/qa/scores?runId=${run}`)).json()[0].score)).toBe(100);
+  });
+
+  it('lets only one batch for a client run at a time, so model time is not spent twice on the same calls', async () => {
+    await finished(['yes thanks']);
+    const { scoreBatch } = await import('../src/store/qa.js');
+    let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+    const slow: Judge = { tier: 'haiku', model: 'h', judge: async () => { await gate; return { passed: true, confidence: 1, reason: 'ok', inputTokens: 1, outputTokens: 1 }; } };
+    const first = scoreBatch({ pool: env.pool, judges: { haiku: slow } }, null, { tenantId });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await scoreBatch({ pool: env.pool, judges: { haiku: slow } }, null, { tenantId })).toMatchObject({ busy: true, scored: 0 });
+    release();
+    expect((await first).busy).toBe(false);
+  });
 });

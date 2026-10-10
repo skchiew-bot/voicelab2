@@ -23,7 +23,7 @@ export const DEFAULT_LEXICON: Lexicon = {
   request: ['please send', 'please call', 'i want', 'i need', 'i would like', 'can you', 'could you', 'tolong', 'minta', 'saya nak', 'saya mahu', 'hantar'],
   inquiry: ['how much', 'how many', 'what', 'when', 'why', 'who', 'where', 'which', 'berapa', 'bila', 'kenapa', 'siapa', 'di mana', 'bagaimana', 'apa'],
   positive: ['thanks', 'thank you', 'great', 'good', 'happy', 'okay', 'ok', 'fine', 'sure', 'terima kasih', 'baik', 'bagus', 'okey', 'boleh'],
-  negative: ['bad', 'angry', 'annoyed', 'upset', 'frustrated', 'disappointed', 'waste', 'useless', 'stop calling', 'again', 'no', 'marah', 'kecewa', 'menyampah', 'tak boleh', 'tidak boleh', 'jangan'],
+  negative: ['bad', 'angry', 'annoyed', 'upset', 'frustrated', 'disappointed', 'waste', 'useless', 'stop calling', 'marah', 'kecewa', 'menyampah', 'tak boleh', 'tidak boleh', 'jangan'],
   severe: ['lawyer', 'sue', 'police', 'report you', 'harass', 'harassment', 'terrible', 'furious', 'hate', 'peguam', 'polis', 'saman', 'ganggu', 'bodoh', 'kurang ajar'],
   negators: ['not', 'never', 'no', 'tidak', 'tak', 'bukan', 'belum'],
   topics: {
@@ -51,8 +51,8 @@ function find(text: string, phrase: string): [number, number][] {
 export function mergeLexicon(extra: Partial<Lexicon> | undefined): Lexicon {
   if (!extra) return DEFAULT_LEXICON;
   const add = (a: string[], b?: string[]) => [...new Set([...a, ...(b ?? [])])];
-  const topics: Record<string, string[]> = { ...DEFAULT_LEXICON.topics };
-  for (const [k, v] of Object.entries(extra.topics ?? {})) topics[k] = add(topics[k] ?? [], v);
+  const topics: Record<string, string[]> = Object.assign(Object.create(null), DEFAULT_LEXICON.topics);
+  for (const [k, v] of Object.entries(extra.topics ?? {})) topics[k] = add(Object.hasOwn(topics, k) ? topics[k]! : [], v);
   return {
     complaint: add(DEFAULT_LEXICON.complaint, extra.complaint), request: add(DEFAULT_LEXICON.request, extra.request), inquiry: add(DEFAULT_LEXICON.inquiry, extra.inquiry),
     positive: add(DEFAULT_LEXICON.positive, extra.positive), negative: add(DEFAULT_LEXICON.negative, extra.negative), severe: add(DEFAULT_LEXICON.severe, extra.severe),
@@ -65,8 +65,9 @@ export const SEVERE_BELOW = -0.75;
 export function analyseTurn(text: string, lex: Lexicon = DEFAULT_LEXICON, severeBelow = SEVERE_BELOW): TurnAnalysis {
   const signals: string[] = [];
   const negatedAt = (index: number) => {
-    // A negator in the two words before a phrase turns it round ("not happy").
-    const before = tokens(norm(text).slice(0, index)).slice(-2);
+    // A negator in the two words before a phrase turns it round ("not happy"), but not across a pause ("no, thank you").
+    const clause = norm(text).slice(0, index).split(/[,.;:!?]/).pop() ?? '';
+    const before = tokens(clause).slice(-2);
     return before.some((t) => lex.negators.includes(t));
   };
 

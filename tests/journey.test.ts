@@ -259,12 +259,13 @@ describe('who ended the call, and system drops', () => {
 });
 
 describe('the watchdog on a stalled workflow', () => {
-  it('flags a call whose workflow stopped mid-step, but only once it has been stuck longer than the agreed latency', async () => {
+  it('flags a call whose workflow stopped mid-step only once it has been stuck longer than the agreed latency and the time a reply may take', async () => {
     const { callId, pcid } = await liveCall();
-    await env.pool.query(`UPDATE workflow_runs SET status = 'processing', updated_at = now() - interval '30 seconds' WHERE call_id = $1`, [callId]);
+    await env.pool.query(`UPDATE workflow_runs SET status = 'processing', updated_at = now() - interval '100 seconds' WHERE call_id = $1`, [callId]);
     const sweep = (secondsFromNow: number) => withActor(env.pool, { kind: 'internal' }, (c) => sweepFaults(c, new Date(Date.now() + secondsFromNow * 1000)));
-    expect((await sweep(0)).flagged).not.toContain(callId);                       // stuck 30 s of the 60 allowed
-    expect((await sweep(45)).flagged).toContain(callId);                          // stuck 75 s
+    expect((await sweep(0)).flagged).not.toContain(callId);                       // 100 s: past the agreed 60 s, but a slow reply is not a drop
+    expect((await sweep(60)).flagged).not.toContain(callId);                      // 160 s: still inside the time a reply may take
+    expect((await sweep(100)).flagged).toContain(callId);                         // 200 s
     expect((await callRow(pcid)).fault_reason).toContain('stopped responding');
   });
 });
@@ -376,5 +377,29 @@ describe('the audit trail of what an AI decided', () => {
     expect(JSON.stringify(rej)).not.toContain('345 6789');
     await expect(env.pool.query('DELETE FROM ai_decisions')).rejects.toThrow(/append-only/);
     expect((await get(`/internal/ai-usage?tenantId=${tenantId}`)).json().find((u: { task: string }) => u.task === 'speak_dynamic')).toMatchObject({ rejected: 1, reworked: 1, decisions: 3 });
+  });
+});
+
+describe('how a call ended', () => {
+  it('keeps a fault the watchdog found, with the time it was first seen, when the call then ends in a way that looks fine', async () => {
+    const { callId, pcid } = await liveCall();
+    await env.pool.query(`UPDATE workflow_runs SET status = 'processing', updated_at = now() - interval '600 seconds' WHERE call_id = $1`, [callId]);
+    expect((await withActor(env.pool, { kind: 'internal' }, (c) => sweepFaults(c))).flagged).toContain(callId);
+    const first = await callRow(pcid);
+    expect(first.fault).toBe(true);
+    await env.pool.query(`UPDATE workflow_runs SET status = 'awaiting_reply', updated_at = now() WHERE call_id = $1`, [callId]);   // the reply finished after all
+    await send(ev('ended', pcid, { endReason: 'completed' }));
+    const after = await callRow(pcid);
+    expect(after).toMatchObject({ fault: true, fault_reason: first.fault_reason });
+    expect(new Date(after.fault_at).getTime()).toBe(new Date(first.fault_at).getTime());
+  });
+
+  it('does not call a call that was never answered a hang-up or a drop', async () => {
+    const pcid = `jc${++n}`;
+    await send(ev('initiated', pcid));
+    const call = await callRow(pcid);
+    await must(post(`/internal/workflows/${workflowId}/runs`, { environment: 'staging', kind: 'test', variables: { name: 'Aisha' }, callId: call.id }));
+    await send(ev('ended', pcid, { endReason: 'no_answer' }));
+    expect(await callRow(pcid)).toMatchObject({ status: 'unanswered', ended_by: null, fault: false });
   });
 });

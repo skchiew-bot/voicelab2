@@ -14,7 +14,7 @@ import { ticketForFault } from './tickets.js';
 export async function recordCallEnd(
   c: pg.PoolClient,
   call: { id: string; tenant_id: string; project_id: string | null; answered_at: Date | null },
-  ev: { endReason?: string; occurredAt: Date },
+  ev: { endReason?: string; occurredAt: Date; answered?: boolean },
 ) {
   const run = (await c.query(
     `SELECT id, status, outcome, error, state FROM workflow_runs WHERE call_id = $1 ORDER BY started_at DESC LIMIT 1`, [call.id])).rows[0];
@@ -22,11 +22,16 @@ export async function recordCallEnd(
   // Where the workflow was: the node it was waiting at, else the last node it did anything at.
   const lastNode = run ? ((await c.query('SELECT node FROM workflow_run_steps WHERE run_id = $1 AND node IS NOT NULL ORDER BY seq DESC LIMIT 1', [run.id])).rows[0]?.node as string | undefined) : undefined;
   const end = classifyEnd({
-    endReason: ev.endReason, answered: call.answered_at !== null,
+    endReason: ev.endReason, answered: ev.answered ?? call.answered_at !== null,
     run: run ? { status: run.status, outcome: run.outcome, error: run.error, node: state?.awaiting?.node ?? state?.node ?? lastNode ?? null } : undefined,
   });
   await c.query(
-    `UPDATE calls SET ended_by = $2, ended_node = $3, fault = $4, fault_reason = $5, fault_at = CASE WHEN $4 THEN now() END WHERE id = $1`,
+    // A fault already flagged (by the watchdog) stays flagged, with its reason and the time it was first seen.
+    `UPDATE calls SET ended_by = $2, ended_node = $3,
+            fault_reason = CASE WHEN $4 AND NOT fault THEN $5 ELSE fault_reason END,
+            fault_at = CASE WHEN $4 AND NOT fault THEN now() ELSE fault_at END,
+            fault = fault OR $4
+      WHERE id = $1`,
     [call.id, end.endedBy, end.node, end.fault, end.fault ? end.reason : null]);
   // A call no workflow ran on has nothing to say about who ended it, unless the system dropped it.
   if (run || end.fault) {
@@ -44,17 +49,27 @@ export async function recordCallEnd(
  * open. Run on a schedule; a fault is flagged once the failure is older than the agreed latency, so a drop is never
  * unflagged for longer than that plus the interval between runs.
  */
+/** A reply may take this long to work out before the watchdog calls the call dropped, whatever latency was agreed. */
+export const WORKING_FLOOR_SECONDS = 180;
+
 export async function sweepFaults(c: pg.PoolClient, now = new Date()) {
   const latency = await dropLatencySeconds(c);
   const cutoff = new Date(now.getTime() - latency * 1000);
+  // A reply being worked on can legitimately take a while (a slow integration or model): it is judged against a floor.
+  const workingCutoff = new Date(now.getTime() - Math.max(latency, WORKING_FLOOR_SECONDS) * 1000);
   const rows = (await c.query(
-    `WITH locked AS (SELECT id FROM calls WHERE status IN ('in_progress', 'ringing') AND ended_at IS NULL AND NOT fault FOR UPDATE SKIP LOCKED)
+    `WITH locked AS (
+       SELECT id FROM calls k WHERE k.status IN ('in_progress', 'ringing') AND k.ended_at IS NULL AND NOT k.fault
+          AND EXISTS (SELECT 1 FROM workflow_runs q WHERE q.call_id = k.id
+                       AND ((q.status = 'ended' AND q.outcome IN ('error', 'integration_failed') AND q.ended_at < $1)
+                         OR (q.status IN ('running', 'processing') AND q.updated_at < $2)))
+          FOR UPDATE OF k SKIP LOCKED)
      SELECT DISTINCT ON (c.id) c.id, c.tenant_id, c.project_id, r.status, r.outcome, r.error, r.state
        FROM calls c JOIN locked l ON l.id = c.id JOIN workflow_runs r ON r.call_id = c.id
       WHERE c.status IN ('in_progress', 'ringing') AND c.ended_at IS NULL AND NOT c.fault
         AND ((r.status = 'ended' AND r.outcome IN ('error', 'integration_failed') AND r.ended_at < $1)
-          OR (r.status IN ('running', 'processing') AND r.updated_at < $1))
-      ORDER BY c.id, r.started_at DESC`, [cutoff])).rows;
+          OR (r.status IN ('running', 'processing') AND r.updated_at < $2))
+      ORDER BY c.id, r.started_at DESC`, [cutoff, workingCutoff])).rows;
   const flagged: string[] = [];
   for (const r of rows) {
     const reason = r.status === 'ended' ? `The workflow failed (${r.error ?? r.outcome}) but the call was left open.` : 'The workflow stopped responding mid-step and the call was left open.';

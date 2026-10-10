@@ -12,6 +12,7 @@ import { recordCallCost } from './costs.js';
 import { getEntitlement, inboundAdmission, isFull, promoteQueued, providerLoad } from './concurrency.js';
 import { chooseDid, didLockedFor } from './dids.js';
 import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.js';
+import { recordCallEnd } from './call-end.js';
 import { recordEvent } from './events.js';
 import { healthMap, logFailover, recordSample } from './resilience.js';
 
@@ -363,6 +364,7 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
       );
       call.status = status;
       await log('call.ended', { status, reason: ev.endReason ?? 'completed', durationSeconds: seconds });
+      await recordCallEnd(c, call, { endReason: ev.endReason, occurredAt: ev.occurredAt });
       await costCall(c, null, call.id);
       // A channel has freed: whoever has waited longest moves up.
       if (call.direction === 'inbound') await promoteQueued(c, call.tenant_id);

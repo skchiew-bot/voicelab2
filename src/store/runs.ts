@@ -13,7 +13,9 @@ import { chargingAt } from './charging.js';
 import { perUsd } from './costs.js';
 import { evaluateScenario, gateProblems, MAX_REPLIES, MAX_SCENARIOS, type Scenario, type ScenarioResult } from '../workflows/simulate.js';
 import { audit } from './audit.js';
+import { getJourneyConfig } from './journey.js';
 import { recordingIndex } from './recordings.js';
+import { ticketForEscalation } from './tickets.js';
 import { getWorkflow, liveVersionId, type Environment } from './workflows.js';
 
 export interface RunDeps { pool: pg.Pool; key: Buffer; integrationHttp?: HttpDeps; speaker?: Deps['speaker'] }
@@ -92,7 +94,7 @@ const cannedIntegrations = (canned: Record<string, Json> = {}): NonNullable<Deps
 async function persistSteps(c: pg.PoolClient, runId: string, from: number, records: StepRecord[]) {
   let seq = from;
   for (const r of records) {
-    await c.query('INSERT INTO workflow_run_steps (run_id, seq, type, workflow, node, payload) VALUES ($1,$2,$3,$4,$5,$6)', [runId, seq++, r.type, r.workflow, r.node ?? null, JSON.stringify(r.payload)]);
+    await c.query('INSERT INTO workflow_run_steps (run_id, seq, type, workflow, node, payload, occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7)', [runId, seq++, r.type, r.workflow, r.node ?? null, JSON.stringify(r.payload), r.at ?? null]);
   }
 }
 
@@ -122,15 +124,19 @@ const view = (id: string, state: RunState, records: StepRecord[], version = 0) =
 });
 
 /** Start a call through a workflow. It runs until it needs the caller or finishes. */
-export async function startRun(d: RunDeps, actorId: string | null, e: { workflowId: string; environment: Environment; kind: RunKind; variables: Record<string, Json> }) {
+export async function startRun(d: RunDeps, actorId: string | null, e: { workflowId: string; environment: Environment; kind: RunKind; variables: Record<string, Json>; callId?: string }) {
   if (e.kind === 'simulation') throw new AppError(400, 'Use the simulation endpoint for simulations.');
   if (e.kind === 'live' && e.environment !== 'production') throw new AppError(400, 'Live calls run in production only.');
   const ctx = await asInternal(d, async (c) => {
     const wf = await getWorkflow(c, e.workflowId);
     const resolved = await resolvePins(c, wf, e.environment);
-    return { wf, resolved, integrations: await integrationsFor(c, wf.tenant_id, d.key, e.environment, d.integrationHttp), recordings: await recordingIndex(c, wf.tenant_id) };
+    if (e.callId) {
+      const call = (await c.query('SELECT tenant_id FROM calls WHERE id = $1', [e.callId])).rows[0];
+      if (!call || call.tenant_id !== wf.tenant_id) throw new AppError(404, 'That call does not belong to this workflow\'s client.');
+    }
+    return { wf, resolved, integrations: await integrationsFor(c, wf.tenant_id, d.key, e.environment, d.integrationHttp), recordings: await recordingIndex(c, wf.tenant_id), journey: await getJourneyConfig(c, wf.tenant_id) };
   });
-  const deps: Deps = { load: (n) => ctx.resolved.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings };
+  const deps: Deps = { load: (n) => ctx.resolved.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings, journey: ctx.journey };
   let out: { state: RunState; records: StepRecord[] };
   try { out = await engineStart(ctx.resolved.entryName, e.variables, deps); }
   catch (err) { if (err instanceof PhoneInVariable) throw new AppError(400, err.message); throw err; }
@@ -139,10 +145,10 @@ export async function startRun(d: RunDeps, actorId: string | null, e: { workflow
     const id = randomUUID();
     const held = seal(out.state, d.key, id);
     await c.query(
-      `INSERT INTO workflow_runs (id, tenant_id, workflow_id, version_id, environment, kind, pins, state, sealed, status, outcome, error, ended_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, CASE WHEN $10 = 'ended' THEN now() END)`,
+      `INSERT INTO workflow_runs (id, tenant_id, workflow_id, version_id, environment, kind, pins, state, sealed, status, outcome, error, ended_at, call_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, CASE WHEN $10 = 'ended' THEN now() END, $13)`,
       [id, ctx.wf.tenant_id, ctx.wf.id, ctx.resolved.entryVersionId, e.environment, e.kind, JSON.stringify(ctx.resolved.pins), JSON.stringify(held.state), held.sealed,
-        out.state.status, out.state.outcome ?? null, out.state.error ?? null]);
+        out.state.status, out.state.outcome ?? null, out.state.error ?? null, e.callId ?? null]);
     await persistSteps(c, id, 1, out.records);
     await audit(c, actorId, 'workflow.run', 'workflow', ctx.wf.id, { run: id, kind: e.kind, environment: e.environment });
     return view(id, out.state, out.records);
@@ -166,9 +172,9 @@ export async function replyRun(d: RunDeps, runId: string, text: string, expected
         WHERE id = $1 AND status = 'awaiting_reply' AND state_version = $2`, [runId, run.state_version]);
     if (claim.rowCount === 0) throw new AppError(409, 'This call moved on while your reply was arriving. Nothing was changed.');
     const defs = await loadPinned(c, run.pins);
-    return { run, defs, integrations: await integrationsFor(c, run.tenant_id, d.key, run.environment, d.integrationHttp), recordings: await recordingIndex(c, run.tenant_id) };
+    return { run, defs, integrations: await integrationsFor(c, run.tenant_id, d.key, run.environment, d.integrationHttp), recordings: await recordingIndex(c, run.tenant_id), journey: await getJourneyConfig(c, run.tenant_id) };
   });
-  const deps: Deps = { load: (n) => ctx.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings };
+  const deps: Deps = { load: (n) => ctx.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings, journey: ctx.journey };
   let out: { state: RunState; records: StepRecord[] };
   try { out = await engineReply(unseal(ctx.run.state as RunState, ctx.run.sealed, d.key, runId), text, deps); }
   catch (err) {
@@ -187,6 +193,8 @@ export async function replyRun(d: RunDeps, runId: string, text: string, expected
     if (upd.rowCount === 0) throw new AppError(409, 'This call was closed while your reply was being processed. Nothing was changed.');
     const last = (await c.query('SELECT coalesce(max(seq), 0) AS n FROM workflow_run_steps WHERE run_id = $1', [runId])).rows[0].n as number;
     await persistSteps(c, runId, last + 1, out.records);
+    // A call passed to a person gets its ticket in the same step that passed it, so none can be missed.
+    if (out.state.escalation) await ticketForEscalation(c, null, runId);
     return view(runId, out.state, out.records, ctx.run.state_version + 1);
   });
 }
@@ -220,7 +228,7 @@ export async function getRun(c: pg.PoolClient, runId: string) {
     `SELECT id, tenant_id, workflow_id, version_id, environment, kind, batch_id, pins, status, outcome, error, started_at, ended_at, state
        FROM workflow_runs WHERE id = $1`, [runId])).rows[0];
   if (!run) throw new AppError(404, 'Run not found.');
-  const steps = (await c.query('SELECT seq, type, workflow, node, payload, created_at FROM workflow_run_steps WHERE run_id = $1 ORDER BY seq', [runId])).rows;
+  const steps = (await c.query('SELECT seq, type, workflow, node, payload, created_at, occurred_at FROM workflow_run_steps WHERE run_id = $1 ORDER BY seq', [runId])).rows;
   return { ...run, variables: (run.state as RunState).vars, state: undefined, speech: speechOf(steps), steps };
 }
 
@@ -232,8 +240,9 @@ export const listRuns = async (c: pg.PoolClient, workflowId: string, limit = 50)
 interface Played { scenario: Scenario; state: RunState; records: StepRecord[]; unused: number }
 
 /** Play one scripted caller through the pinned workflows. Nothing is stored and no real system is touched. */
-async function playScenario(resolved: Resolved, s: Scenario, speaker: Deps['speaker'], recordings: Deps['recordings']): Promise<Played> {
-  const deps: Deps = { load: (n) => resolved.defs[n], integrations: cannedIntegrations(s.integrations), speaker, recordings };
+async function playScenario(resolved: Resolved, s: Scenario, speaker: Deps['speaker'], recordings: Deps['recordings'], journey?: Deps['journey']): Promise<Played> {
+  // Rehearsals read the caller the way live calls do, so a scenario that angers the caller escalates in staging too.
+  const deps: Deps = { load: (n) => resolved.defs[n], integrations: cannedIntegrations(s.integrations), speaker, recordings, journey };
   try {
     let { state, records } = await engineStart(resolved.entryName, s.variables, deps);
     const all = [...records]; const replies = [...(s.replies ?? [])];
@@ -261,11 +270,11 @@ export async function simulate(d: RunDeps, actorId: string | null, e: { workflow
 
   const ctx = await asInternal(d, async (c) => {
     const wf = await getWorkflow(c, e.workflowId);
-    return { wf, resolved: await resolvePins(c, wf, 'staging', e.versionId), recordings: await recordingIndex(c, wf.tenant_id) };
+    return { wf, resolved: await resolvePins(c, wf, 'staging', e.versionId), recordings: await recordingIndex(c, wf.tenant_id), journey: await getJourneyConfig(c, wf.tenant_id) };
   });
 
   const runs: Played[] = [];
-  for (const s of e.scenarios) runs.push(await playScenario(ctx.resolved, s, d.speaker, ctx.recordings));
+  for (const s of e.scenarios) runs.push(await playScenario(ctx.resolved, s, d.speaker, ctx.recordings, ctx.journey));
 
   return asInternal(d, async (c) => {
     const results: ScenarioResult[] = runs.map((r) => evaluateScenario(r.scenario, { state: r.state, records: r.records, unusedReplies: r.unused }));
@@ -314,13 +323,13 @@ export async function measureStitching(d: RunDeps, e: { workflowId: string; vers
     const confirmed = Boolean(version.confirmed);
     const perUsds = new Map<string, bigint>();
     for (const k of lines) perUsds.set(k.currency, await perUsd(c, k.currency, at));
-    return { wf, resolved: await resolvePins(c, wf, 'staging', e.versionId), recordings: await recordingIndex(c, wf.tenant_id), lines, perUsds, confirmed };
+    return { wf, resolved: await resolvePins(c, wf, 'staging', e.versionId), recordings: await recordingIndex(c, wf.tenant_id), journey: await getJourneyConfig(c, wf.tenant_id), lines, perUsds, confirmed };
   });
   // One at a time, and with no model writing lines: a model's wording varies, and would colour the difference being measured
   // (a dynamic line speaks its fallback text here, and is live in both runs).
   const play = async (recordings: Deps['recordings']) => {
     const played: Played[] = [];
-    for (const s of e.scenarios) played.push(await playScenario(ctx.resolved, s, undefined, recordings));
+    for (const s of e.scenarios) played.push(await playScenario(ctx.resolved, s, undefined, recordings, ctx.journey));
     return sumSpeech(played);
   };
   const stitched = await play(ctx.recordings);

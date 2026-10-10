@@ -175,7 +175,7 @@ describe('simulations', () => {
     // Each scenario is stored as a run, with its steps, for replay.
     const run = (await get(`/internal/workflow-runs/${by.agrees.runId}`)).json();
     expect(run).toMatchObject({ kind: 'simulation', environment: 'staging', outcome: 'agreed' });
-    expect(run.steps.map((s: { type: string }) => s.type)).toEqual(['start', 'say', 'heard', 'reached_end', 'end']);
+    expect(run.steps.map((s: { type: string }) => s.type)).toEqual(['start', 'say', 'heard', 'route', 'reached_end', 'end']);
     const batch = (await get(`/internal/simulations/${out.batchId}`)).json();
     expect(batch.results).toHaveLength(7);
     expect(batch.results[0].runId).toBe(by.agrees.runId);

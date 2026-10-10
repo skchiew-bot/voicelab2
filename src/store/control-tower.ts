@@ -133,6 +133,9 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
     if (f.level === 'critical') add('high', 'funding_critical', `${f.provider}: the funding balance (${Number(f.balance)} ${f.currency}) is below its critical level.`, `#/providers/${f.providerId}`);
     else if (f.level === 'warn') add('medium', 'funding_low', `${f.provider}: the funding balance (${Number(f.balance)} ${f.currency}) is below its warning level.`, `#/providers/${f.providerId}`);
   }
+  // A call the system dropped is loud: it is an alert the moment it is flagged, until someone has acknowledged it.
+  const faults = (await c.query(`SELECT count(*)::int AS n FROM calls c WHERE c.fault AND c.fault_at > now() - interval '24 hours' AND NOT EXISTS (SELECT 1 FROM fault_acks a WHERE a.call_id = c.id)`)).rows[0].n as number;
+  if (faults > 0) add('high', 'system_drop', `${faults} call${faults === 1 ? ' was' : 's were'} dropped by the system in the last 24 hours and ${faults === 1 ? 'has' : 'have'} not been looked at.`, '#/faults');
   const queued = (await c.query(`SELECT count(*)::int AS n FROM calls WHERE status = 'queued'`)).rows[0].n as number;
   if (queued > 0) add('medium', 'calls_queued', `${queued} inbound call${queued === 1 ? ' is' : 's are'} waiting for a free channel.`, '#/calls');
   const deferred = (await c.query(`SELECT count(*)::int AS n FROM failover_events WHERE scope = 'telephony' AND trigger = 'capacity' AND at > now() - interval '1 hour'`)).rows[0].n as number;

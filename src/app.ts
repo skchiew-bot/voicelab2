@@ -17,6 +17,7 @@ import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from 
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
 import { addNumber, callKnown, callQueued, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
+import { registerJourneyRoutes } from './routes/journey.js';
 import { registerResilienceRoutes } from './routes/resilience.js';
 import { registerStitchingRoutes } from './routes/stitching.js';
 import { registerWorkflowRoutes } from './routes/workflows.js';
@@ -355,6 +356,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   });
 
   registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerJourneyRoutes(app, { pool, internal });
   registerResilienceRoutes(app, { pool, internal, callDeps });
   registerStitchingRoutes(app, { pool, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
 

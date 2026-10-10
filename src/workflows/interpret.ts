@@ -19,9 +19,13 @@ function spansOf(reply: string, intent: string, phrase: string): Span[] {
   return [...reply.matchAll(re)].map((m) => ({ intent, start: m.index!, end: m.index! + m[0].length }));
 }
 
-export function interpretReply(reply: string, intents: Record<string, string[]>): Intent {
+/** The intent, and the words in the reply that decided it, so a review can see why. */
+export function interpretDetail(reply: string, intents: Record<string, string[]>): { intent: Intent; matched: { intent: string; phrase: string }[] } {
   const spans = Object.entries(intents).flatMap(([intent, phrases]) => phrases.flatMap((p) => spansOf(reply, intent, p)));
   const kept = spans.filter((a) => !spans.some((b) => b.intent !== a.intent && b.start <= a.start && b.end >= a.end && (b.end - b.start) > (a.end - a.start)));
   const hits = [...new Set(kept.map((s) => s.intent))];
-  return hits.length === 1 ? hits[0]! : hits.length === 0 ? 'unknown' : 'ambiguous';
+  const intent = hits.length === 1 ? hits[0]! : hits.length === 0 ? 'unknown' : 'ambiguous';
+  return { intent, matched: kept.map((s) => ({ intent: s.intent, phrase: reply.slice(s.start, s.end).toLowerCase() })) };
 }
+
+export const interpretReply = (reply: string, intents: Record<string, string[]>): Intent => interpretDetail(reply, intents).intent;

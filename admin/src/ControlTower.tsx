@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { api, type Panels, type PhaseProgress, type Progress, type Tower } from './api';
 import { TowerPanels } from './TowerPanels';
+import { TowerActions } from './TowerActions';
 import { Errors, fmtDate, fmtDecimal, useLoad } from './ui';
 
 const SEVERITY = { high: 'badge bad', medium: 'badge warn', low: 'badge' } as const;
@@ -80,6 +81,8 @@ export function ControlTower() {
             ))}</ul>)}
         <p className="muted">Alerts appear in this console only for now.</p>
       </section>
+
+      <TowerActions onDone={() => { tower.reload(); panels.reload(); }} />
 
       <section className="card" aria-label="Project progress">
         <h2>Project progress</h2>

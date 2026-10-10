@@ -20,7 +20,7 @@ const ACTIVITY = new Set(['call.outbound', 'workflow.run', 'workflow.runs_abando
 const PREFIX: [string, Category][] = [
   ['workflow.', 'workflows'], ['change.', 'workflows'], ['approval.', 'workflows'], ['integration.', 'workflows'],
   ['charging.', 'money'], ['rate_card.', 'money'], ['fx.', 'money'], ['credits.', 'money'], ['channels.', 'money'], ['funding.', 'money'], ['call_cost.', 'money'],
-  ['provider.', 'providers'], ['number.', 'providers'], ['did.', 'providers'], ['routes.', 'providers'], ['fallback.', 'providers'], ['resilience.', 'providers'], ['entitlement.', 'providers'], ['model.', 'providers'],
+  ['provider.', 'providers'], ['control.', 'providers'], ['number.', 'providers'], ['did.', 'providers'], ['routes.', 'providers'], ['fallback.', 'providers'], ['resilience.', 'providers'], ['entitlement.', 'providers'], ['model.', 'providers'],
   ['dnc.', 'compliance'],
   ['policy.', 'policy'], ['knowledge.', 'policy'],
   ['learning.', 'learning'], ['recording.', 'learning'],

@@ -9,7 +9,7 @@ export const DID_FAILURE_REASONS = ['spam_flagged', 'carrier_blocked', 'rejected
 export type DidFailureReason = (typeof DID_FAILURE_REASONS)[number];
 
 /** USD per minute a provider charges for the outbound telephony leg now, or null if no rate is captured. */
-async function outboundPerMinuteUsd(c: pg.PoolClient, providerId: string, at: Date): Promise<bigint | null> {
+export async function outboundPerMinuteUsd(c: pg.PoolClient, providerId: string, at: Date): Promise<bigint | null> {
   const version = (await c.query(
     `SELECT id FROM charging_versions WHERE provider_id = $1 AND effective_from <= $2 ORDER BY effective_from DESC LIMIT 1`, [providerId, at])).rows[0];
   if (!version) return null;
@@ -50,6 +50,7 @@ export async function chooseDid(
   await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`did:${e.tenantId}:${e.country}`]);
   const pool = (await c.query(
     `SELECT n.id, n.e164, n.provider_id, n.last_used_at, n.use_count,
+            coalesce((SELECT k.preferred FROM provider_controls k WHERE k.provider_id = n.provider_id), false) AS preferred,
             -- locked by the number the contact sees: the same number at another provider is the same caller ID
             EXISTS (SELECT 1 FROM did_failures f JOIN phone_numbers fn ON fn.id = f.phone_number_id
                      WHERE f.tenant_id = n.tenant_id AND fn.e164 = n.e164 AND f.contact_hash = $4) AS locked
@@ -57,7 +58,7 @@ export async function chooseDid(
       WHERE n.tenant_id = $1 AND n.country = $2 AND n.status = 'active' AND p.kind = 'telephony' AND p.status = 'active'
         AND ($3::uuid IS NULL OR n.provider_id = $3)`,
     [e.tenantId, e.country, e.providerId ?? null, e.contactHash])).rows as
-    { id: string; e164: string; provider_id: string; last_used_at: Date | null; use_count: number; locked: boolean }[];
+    { id: string; e164: string; provider_id: string; last_used_at: Date | null; use_count: number; preferred: boolean; locked: boolean }[];
   const notLocked = pool.filter((n) => !n.locked);
   const healthy = notLocked.filter((n) => !e.unhealthy?.has(n.provider_id));
   const eligible = healthy.filter((n) => !e.full?.has(n.provider_id));
@@ -78,9 +79,13 @@ export async function chooseDid(
 
   const price = new Map<string, bigint | null>();
   for (const pid of new Set(eligible.map((n) => n.provider_id))) price.set(pid, await outboundPerMinuteUsd(c, pid, at));
-  // Providers with a known price come first, cheapest first; a provider with no captured rate is used only if no priced one is eligible.
+  // A provider an operator preferred comes first; then providers with a known price, cheapest first; a provider with no
+  // captured rate is used only if no priced one is eligible.
   const rank = (pid: string) => price.get(pid) ?? null;
+  // A preference never puts an unpriced provider ahead of a priced one: a call that cannot be priced is refused, not guessed.
+  const preferred = new Set(eligible.filter((n) => n.preferred && price.get(n.provider_id) != null).map((n) => n.provider_id));
   const cheapest = [...new Set(eligible.map((n) => n.provider_id))].sort((a, b) => {
+    if (preferred.has(a) !== preferred.has(b)) return preferred.has(a) ? -1 : 1;
     const x = rank(a); const y = rank(b);
     if (x === null && y === null) return a < b ? -1 : 1;
     if (x === null) return 1;

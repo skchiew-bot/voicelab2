@@ -132,7 +132,7 @@ export async function recordDidFailure(c: pg.PoolClient, actorId: string | null,
 /** The pool as the console shows it: use, failures, and how many contacts each number is locked from. */
 export const listPool = async (c: pg.PoolClient, tenantId?: string) =>
   (await c.query(
-    `SELECT n.id, n.e164, n.provider_id, n.tenant_id, n.country, n.label, n.status, n.use_count, n.last_used_at,
+    `SELECT n.id, n.e164, n.provider_id, n.tenant_id, n.country, n.label, n.status, n.use_count, n.last_used_at, n.inbound_workflow_id,
             (SELECT count(*)::int FROM did_failures f WHERE f.phone_number_id = n.id) AS failures,
             (SELECT count(DISTINCT f.contact_hash)::int FROM did_failures f WHERE f.phone_number_id = n.id) AS contacts_locked
        FROM phone_numbers n WHERE ($1::uuid IS NULL OR n.tenant_id = $1) ORDER BY n.country, n.provider_id, n.e164`, [tenantId ?? null])).rows;

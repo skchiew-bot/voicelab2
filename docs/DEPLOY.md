@@ -28,7 +28,10 @@ Sources: [AWS Malaysia region launch](https://aws.amazon.com/blogs/aws/now-open-
 - **Database**: RDS for PostgreSQL 16, Multi-AZ, encrypted, automated backups kept in the region. The app connects as
   the owner role; per-request roles (`voicelab_internal`, `voicelab_client`) are created by the first migration.
 - **Public address**: an Application Load Balancer with an ACM certificate for a domain you own (for example
-  `voice.example.my`). This is `PUBLIC_BASE_URL`; Twilio and Telnyx send call events to it. HTTPS only.
+  `voice.example.my`). This is `PUBLIC_BASE_URL`; Twilio and Telnyx send call events to it. HTTPS only. The live call
+  voice link is a WebSocket on the same address (`wss://…/relay/twilio/<provider id>`): the load balancer passes
+  WebSockets through as they are, but set its idle timeout above the longest pause on a call (for example 300 s).
+  Recordings are fetched by Twilio from `/media/recordings/…` through links Voice Lab signs for ten minutes.
 - **Secrets**: AWS Secrets Manager holds `VOICELAB_SECRET_KEY` and `DATABASE_URL`, injected into the task. Provider
   credentials stay encrypted in the database (never in environment variables on the server).
 - **Logs**: CloudWatch Logs in the region. The app never logs phone numbers, secrets or provider error text unscrubbed.
@@ -80,6 +83,12 @@ Each is a `POST` to the app with the scheduler's staff token. Suggested cadence;
     Twilio number, set its voice webhook to Voice Lab, declare the do-not-call position for Malaysia, add rates and the
     FX rate, then place one outbound test call from the console to a phone you hold. Proven when the call's events
     arrive signed, the call is priced once, and reconciliation matches Twilio's own figure.
+11. **Twilio, step 3: a live conversation**: on the Twilio provider, set the live call language (for example `ms-MY`)
+    and, if wanted, the voice service, voice and speech recognition; add Twilio's speech relay charge to its rates.
+    Deploy a workflow to production, then on the Numbers screen choose it to answer a number (or name it when
+    placing an outbound call). Proven when a phone you hold hears the workflow's first lines (recorded ones played,
+    the rest spoken), the run's answers move it on, and the call ends with the workflow's outcome. Capture the relay's
+    first messages (setup, a prompt) to replace `tests/fixtures/twilio-relay.json`, which is not yet from a live call.
 
 ## Decisions this needs from the owner
 

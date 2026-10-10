@@ -157,3 +157,17 @@ export interface Showcase {
   why: string; changes: ChangeFull['diff']; financial: ChangeFull['financial']; approvals: ChangeFull['progress'];
   audio: { node: string; language: string; text: string; recordingId: string | null }[]; audioNote: string;
 }
+
+export interface LearningCluster { workflow: string; node: string; language: string; context: string; script: string; support: number; variants: number; ready: boolean; percentOfThreshold: number }
+export interface LearningOverview {
+  config: { minSupport: number; similarity: number; minConfidence: number; driftMinSamples: number; voiceProviderId: string | null };
+  summary: { inReview: number; approved: number; promoted: number; demoted: number; rejected: number };
+  threshold: number; clusters: LearningCluster[];
+}
+export interface Promotion { id: string; workflow: string; node: string; language: string; context_kind: string; context_topic: string; script: string; support: number; variants: number; status: 'in_review' | 'approved' | 'promoted' | 'demoted' | 'rejected'; distilled_by: string; created_at: string }
+export interface PromotionEvent { id: number; kind: string; reason: string; created_at: string; detail: Record<string, unknown> }
+export interface PromotionFinancial {
+  direction: 'promote' | 'demote';
+  perUse: { liveBefore: { chars: number; costUsd: string | null }; afterPromotion: { chars: number; costUsd: string | null }; saved: { chars: number; costUsd: string | null } };
+  oneTime: { chars: number; costUsd: string | null; note: string }; breakEvenUses: number | null; usesWhilePromoted: number; realisedSavingUsd: string | null; ratesConfirmed: boolean | null; note: string;
+}

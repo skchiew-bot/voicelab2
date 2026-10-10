@@ -18,6 +18,7 @@ import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRa
 import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
 import { addNumber, callKnown, callQueued, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
 import { registerJourneyRoutes } from './routes/journey.js';
+import { registerLearningRoutes } from './routes/learning.js';
 import { registerResilienceRoutes } from './routes/resilience.js';
 import { registerStitchingRoutes } from './routes/stitching.js';
 import { registerWorkflowRoutes } from './routes/workflows.js';
@@ -46,6 +47,8 @@ export interface Deps {
   integrationHttp?: HttpDeps;
   /** Models that judge QA criteria, by tier. None by default: only the rules are applied. */
   judges?: import('./store/qa.js').QaDeps['judges'];
+  /** The models and recorder behind the learning loop. None is connected to a live provider yet. */
+  learning?: Omit<import('./store/learning.js').LearnDeps, 'pool'>;
 }
 
 export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): FastifyInstance {
@@ -358,6 +361,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   });
 
   registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerLearningRoutes(app, { internal, learn: { pool, ...deps.learning } });
   registerJourneyRoutes(app, { pool, internal, judges: deps.judges, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
   registerResilienceRoutes(app, { pool, internal, callDeps });
   registerStitchingRoutes(app, { pool, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });

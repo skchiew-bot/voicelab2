@@ -14,6 +14,7 @@ import { perUsd } from './costs.js';
 import { evaluateScenario, gateProblems, MAX_REPLIES, MAX_SCENARIOS, type Scenario, type ScenarioResult } from '../workflows/simulate.js';
 import { audit } from './audit.js';
 import { recordStepDecisions } from './ai-decisions.js';
+import { activePromotions, logLearningTurns } from './learning.js';
 import { getJourneyConfig } from './journey.js';
 import { recordingIndex } from './recordings.js';
 import { ticketForEscalation } from './tickets.js';
@@ -116,6 +117,8 @@ function unseal(state: RunState, sealed: Buffer | null, key: Buffer, runId: stri
   return { ...state, vars: { ...state.vars, ...Object.fromEntries(Object.entries(held).map(([k, v]) => [k, JSON.parse(v) as Json])) } };
 }
 
+/** The kind and topic of the caller's latest turn: the journey context a line was spoken in. */
+const contextOf = (state: RunState) => { const t = state.journey?.turns.at(-1); return { kind: t?.kind ?? 'start', topic: t?.topic ?? null }; };
 const saidIn = (records: StepRecord[]) => records.filter((r) => r.type === 'say').map((r) => String(r.payload.text));
 const speechOf = (records: { type: string; payload: Record<string, Json> }[]) => records.filter((r) => r.type === 'say').reduce(
   (t, r) => ({ synthChars: t.synthChars + Number(r.payload.synthChars ?? 0), recordedChars: t.recordedChars + Number(r.payload.recordedChars ?? 0) }), { synthChars: 0, recordedChars: 0 });
@@ -135,9 +138,9 @@ export async function startRun(d: RunDeps, actorId: string | null, e: { workflow
       const call = (await c.query('SELECT tenant_id FROM calls WHERE id = $1', [e.callId])).rows[0];
       if (!call || call.tenant_id !== wf.tenant_id) throw new AppError(404, 'That call does not belong to this workflow\'s client.');
     }
-    return { wf, resolved, integrations: await integrationsFor(c, wf.tenant_id, d.key, e.environment, d.integrationHttp), recordings: await recordingIndex(c, wf.tenant_id), journey: await getJourneyConfig(c, wf.tenant_id) };
+    return { wf, resolved, integrations: await integrationsFor(c, wf.tenant_id, d.key, e.environment, d.integrationHttp), recordings: await recordingIndex(c, wf.tenant_id), journey: await getJourneyConfig(c, wf.tenant_id), promoted: await activePromotions(c, wf.tenant_id) };
   });
-  const deps: Deps = { load: (n) => ctx.resolved.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings, journey: ctx.journey };
+  const deps: Deps = { load: (n) => ctx.resolved.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings, journey: ctx.journey, promoted: ctx.promoted };
   let out: { state: RunState; records: StepRecord[] };
   try { out = await engineStart(ctx.resolved.entryName, e.variables, deps); }
   catch (err) { if (err instanceof PhoneInVariable) throw new AppError(400, err.message); throw err; }
@@ -152,6 +155,7 @@ export async function startRun(d: RunDeps, actorId: string | null, e: { workflow
         out.state.status, out.state.outcome ?? null, out.state.error ?? null, e.callId ?? null]);
     await persistSteps(c, id, 1, out.records);
     await recordStepDecisions(c, { tenantId: ctx.wf.tenant_id, callId: e.callId ?? null, runId: id, records: out.records });
+    await logLearningTurns(c, { tenantId: ctx.wf.tenant_id, runId: id, callId: e.callId ?? null, kind: e.kind, records: out.records, vars: out.state.vars, sensitive: out.state.sensitive, context: contextOf(out.state) });
     if (out.state.escalation || out.state.outcome === 'handoff_human') await ticketForEscalation(c, actorId, id);
     await audit(c, actorId, 'workflow.run', 'workflow', ctx.wf.id, { run: id, kind: e.kind, environment: e.environment });
     return view(id, out.state, out.records);
@@ -175,9 +179,9 @@ export async function replyRun(d: RunDeps, runId: string, text: string, expected
         WHERE id = $1 AND status = 'awaiting_reply' AND state_version = $2`, [runId, run.state_version]);
     if (claim.rowCount === 0) throw new AppError(409, 'This call moved on while your reply was arriving. Nothing was changed.');
     const defs = await loadPinned(c, run.pins);
-    return { run, defs, integrations: await integrationsFor(c, run.tenant_id, d.key, run.environment, d.integrationHttp), recordings: await recordingIndex(c, run.tenant_id), journey: await getJourneyConfig(c, run.tenant_id) };
+    return { run, defs, integrations: await integrationsFor(c, run.tenant_id, d.key, run.environment, d.integrationHttp), recordings: await recordingIndex(c, run.tenant_id), journey: await getJourneyConfig(c, run.tenant_id), promoted: await activePromotions(c, run.tenant_id) };
   });
-  const deps: Deps = { load: (n) => ctx.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings, journey: ctx.journey };
+  const deps: Deps = { load: (n) => ctx.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings, journey: ctx.journey, promoted: ctx.promoted };
   let out: { state: RunState; records: StepRecord[] };
   try { out = await engineReply(unseal(ctx.run.state as RunState, ctx.run.sealed, d.key, runId), text, deps); }
   catch (err) {
@@ -198,6 +202,7 @@ export async function replyRun(d: RunDeps, runId: string, text: string, expected
     await persistSteps(c, runId, last + 1, out.records);
     // A call passed to a person gets its ticket in the same step that passed it, so none can be missed.
     await recordStepDecisions(c, { tenantId: ctx.run.tenant_id, callId: ctx.run.call_id ?? null, runId, records: out.records });
+    await logLearningTurns(c, { tenantId: ctx.run.tenant_id, runId, callId: ctx.run.call_id ?? null, kind: ctx.run.kind, records: out.records, vars: out.state.vars, sensitive: out.state.sensitive, context: contextOf(out.state) });
     if (out.state.escalation || out.state.outcome === 'handoff_human') await ticketForEscalation(c, null, runId);
     return view(runId, out.state, out.records, ctx.run.state_version + 1);
   });
@@ -376,6 +381,23 @@ export async function handoverPacket(c: pg.PoolClient, runId: string): Promise<H
     .map((s) => ({ role: s.type === 'say' ? 'assistant' as const : 'caller' as const, text: String(s.payload.text ?? '') }));
   const lastLine = [...transcript].reverse().find((t) => t.role === 'assistant')?.text ?? null;
   return { workflow: state.workflow, node: state.node ?? state.awaiting?.node ?? null, status: state.status, variables: state.vars, transcript, lastLine };
+}
+
+/** What a voice provider charges for speech at a time, as a function from characters to USD (exact). */
+export async function ttsPricing(c: pg.PoolClient, voiceProviderId: string, at: Date) {
+  const provider = (await c.query('SELECT id, kind, name FROM providers WHERE id = $1', [voiceProviderId])).rows[0];
+  if (!provider || provider.kind !== 'voice') throw new AppError(400, 'Pick a voice provider: its character rate prices the speech.');
+  const version = await chargingAt(c, voiceProviderId, at);
+  if (!version) throw new AppError(409, `${provider.name} has no charging version in force. Capture its rates first.`);
+  const lines: { unit: Unit; rate: string; currency: string; billing_line: string }[] = version.components.filter((k: { component: string; unit: string }) => k.component === 'tts' && ['per_character', 'per_1k_characters'].includes(k.unit));
+  if (lines.length === 0) throw new AppError(409, `${provider.name} has no per-character speech rate, so the speech cannot be priced.`);
+  const perUsds = new Map<string, bigint>();
+  for (const k of lines) perUsds.set(k.currency, await perUsd(c, k.currency, at));
+  const price = (chars: number): bigint => lines.reduce((sum, k) => {
+    const q = quantityFor(k.unit, k.billing_line, { characters: chars }, null);
+    return q ? sum + mulDiv(lineAmount(k.rate, q), SCALE, perUsds.get(k.currency)!) : sum;
+  }, 0n);
+  return { price, confirmed: Boolean(version.confirmed) };
 }
 
 export interface VersionMeasure { versionId: string; synthChars: number; recordedChars: number; says: number; steps: number; escalations: number; outcomes: Record<string, number>; costUsd: string | null }

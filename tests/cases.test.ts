@@ -515,8 +515,9 @@ describe('what the independent review found', () => {
     await setPolicy({ quietStart: h(0), quietEnd: h(1) });                                                          // quiet right now
     const gate = (to: string) => post('/internal/dial/check', { tenantId, country: 'MY', to });
     expect((await gate(newPhone())).json()).toEqual({ allowed: false, reason: 'quiet_hours' });
-    await setPolicy({});
+    await setPolicy({ quietStart: h(2), quietEnd: h(3) });                                                          // quiet later, not now: whatever the time of day the suite runs
     expect((await gate(newPhone())).json()).toEqual({ allowed: true });
+    await setPolicy({});
   });
 
   it('counts only a real failure to reach someone as an alert, not a plain no-answer', async () => {

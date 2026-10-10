@@ -305,10 +305,10 @@ const spoolLines = (dir: string) => {
 };
 
 /** A transcript in Claude Code's real shape: one line per content block, the same message id and usage on each. */
-type Entry = { id: string; model: string; ts: string; usage: Record<string, unknown>; blocks?: number } | { checkpoint: number; models: Record<string, number> };
+type Entry = { id: string; model: string; ts: string; usage: Record<string, unknown>; blocks?: number } | { checkpoint: number; models: Record<string, number>; start?: string };
 function transcript(dir: string, entries: Entry[], sub?: Entry[], opts: { folder?: string } = {}) {
   const lines = (list: Entry[]) => list.flatMap((e) => ('checkpoint' in e
-    ? [JSON.stringify({ type: 'cost-state', totalCostUSD: e.checkpoint, modelUsage: Object.fromEntries(Object.entries(e.models).map(([m, c]) => [m, { inputTokens: 1, outputTokens: 1, costUSD: c }])) })]
+    ? [JSON.stringify({ type: 'cost-state', totalCostUSD: e.checkpoint, startTime: new Date(e.start ?? '2026-10-09T23:00:00Z').getTime(), modelUsage: Object.fromEntries(Object.entries(e.models).map(([m, c]) => [m, { inputTokens: 1, outputTokens: 1, costUSD: c }])) })]
     : Array.from({ length: e.blocks ?? 2 }, () => JSON.stringify({ type: 'assistant', timestamp: e.ts, requestId: `req_${e.id}`, message: { id: e.id, model: e.model, usage: e.usage } })))).join('\n') + '\n';
   // Claude Code's layout: <projects>/<project folder>/<session id>.jsonl, subagents beside it.
   const name = `t${dirs++}`;
@@ -336,31 +336,38 @@ describe('usage and cost', () => {
     // After the checkpoint: Opus 1M output $20 + 1M cache read $0.20 + 1M 5m write $5 + 1M 1h write $8; Haiku 1M input $0.10.
     expect(u.costBasis).toBe('checkpoint+since');
     expect(u.costUSD).toBe('34.80000000'); // 1.5 + 33.20 + 0.10
-    expect(u.checkpoint.costUSD).toBe('1.500000');
+    expect(u.checkpoint.costUSD).toBe('1.50000000');
   });
 
-  it('counts a session resumed in another folder once: copied messages once, the largest checkpoint, then what came after', () => {
-    const { dir } = makeRepo();
-    const first: Entry[] = [
-      { id: 'm1', model: 'claude-opus-5-5', ts: '2026-10-10T00:00:00Z', usage: U(0, 1_000_000) },
-      { checkpoint: 30, models: { 'claude-opus-5-5': 30 } },
-    ];
-    const a = transcript(dir, first, undefined, { folder: '-repo' });
-    // The resumed transcript has the same name in another folder, copies m1, and has no checkpoint.
-    const b = path.join(path.dirname(path.dirname(a)), '-home', path.basename(a));
-    mkdirSync(path.dirname(b), { recursive: true });
-    // Its own later checkpoint restarted from a smaller figure: the larger, earlier one is used.
-    writeFileSync(b, readFileSync(a, 'utf8').split('\n').filter((l) => !l.includes('cost-state')).join('\n')
-      + JSON.stringify({ type: 'assistant', timestamp: '2026-10-10T00:30:00Z', message: { id: 'm0', model: 'claude-opus-5-5', usage: U(0, 0) } }) + '\n'
-      + JSON.stringify({ type: 'cost-state', totalCostUSD: 2, modelUsage: {} }) + '\n'
-      + JSON.stringify({ type: 'assistant', timestamp: '2026-10-10T01:00:00Z', message: { id: 'm2', model: 'claude-opus-5-5', usage: U(0, 1_000_000) } }) + '\n');
-    // The same answer whichever transcript the hook is given, so file order cannot decide it.
-    for (const tp of [b, a]) run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'Stop', session_id: 's', transcript_path: tp }));
-    const usages = spoolLines(dir).filter((l) => l.event === 'Usage');
-    expect(usages).toHaveLength(2);
-    for (const u of usages) {
-      expect(u.tokens['claude-opus-5-5'].messages).toBe(3);
-      expect(u.costUSD).toBe('50.00000000'); // $30 checkpoint + m2's 1M output at $20; m1 is inside the checkpoint
+  it('counts a session resumed in another folder once: copied messages once, each run\'s checkpoint added, then what came after', () => {
+    // Claude Code keeps one running total per run. A resume starts a new run from zero, in a new
+    // transcript that copies the earlier messages. Checked against real transcripts (lesson L-016).
+    const runTwo = (dir: string, secondRunTotal: number) => {
+      const a = transcript(dir, [
+        { id: 'm1', model: 'claude-opus-5-5', ts: '2026-10-10T00:00:00Z', usage: U(0, 1_000_000) },
+        { checkpoint: 30, models: { 'claude-opus-5-5': 30 }, start: '2026-10-09T23:59:00Z' },
+      ], undefined, { folder: '-repo' });
+      const b = path.join(path.dirname(path.dirname(a)), '-home', path.basename(a));
+      mkdirSync(path.dirname(b), { recursive: true });
+      writeFileSync(b, readFileSync(a, 'utf8').split('\n').filter((l) => !l.includes('cost-state')).join('\n')
+        + JSON.stringify({ type: 'assistant', timestamp: '2026-10-10T00:30:00Z', message: { id: 'm0', model: 'claude-opus-5-5', usage: U(0, 0) } }) + '\n'
+        + JSON.stringify({ type: 'cost-state', totalCostUSD: secondRunTotal, startTime: Date.parse('2026-10-10T00:20:00Z'), modelUsage: {} }) + '\n'
+        + JSON.stringify({ type: 'assistant', timestamp: '2026-10-10T01:00:00Z', message: { id: 'm2', model: 'claude-opus-5-5', usage: U(0, 1_000_000) } }) + '\n');
+      return { a, b };
+    };
+    // A second run below the first, and one above it (the case that once dropped the first run).
+    for (const [second, expected] of [[2, '52.00000000'], [40, '90.00000000']] as const) {
+      const { dir } = makeRepo();
+      const { a, b } = runTwo(dir, second);
+      // The same answer whichever transcript the hook is given, so file order cannot decide it.
+      for (const tp of [b, a]) run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'Stop', session_id: 's', transcript_path: tp }));
+      const usages = spoolLines(dir).filter((l) => l.event === 'Usage');
+      expect(usages).toHaveLength(2);
+      for (const u of usages) {
+        expect(u.tokens['claude-opus-5-5'].messages).toBe(3);
+        expect(u.runs).toBe(2);
+        expect(u.costUSD, `second run ${second}`).toBe(expected); // $30 + the second run + m2's 1M output at $20
+      }
     }
   });
 

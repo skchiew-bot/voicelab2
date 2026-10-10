@@ -146,22 +146,27 @@ function sessionFiles(transcriptPath) {
  *   session resumed in another folder starts a new transcript holding copies of the earlier
  *   messages, so each message id is counted once across every file.
  * - Background calls (such as the permission classifier) are not in any transcript. Claude Code's
- *   "cost-state" checkpoints include them and only ever grow, so the session's spend is the
- *   largest checkpoint plus the messages written after it (`since`).
+ *   "cost-state" checkpoints include them. Each run of Claude Code (its `startTime`) keeps its own
+ *   running total: a resumed session starts a new run from zero, so totals from different runs
+ *   are added, never compared. A message is priced only when it came after the last checkpoint of
+ *   the run it belongs to (`since`).
  */
 export function tokenUsage(transcriptPath) {
   const all = {}; const since = {};
-  if (!transcriptPath) return { all, since, checkpoint: null, checkpointAt: null };
+  if (!transcriptPath) return { all, since, runs: [] };
   const { mains, subs } = sessionFiles(transcriptPath);
-  const seen = new Set(); const messages = []; let checkpoint = null; let checkpointAt = null;
+  const seen = new Set(); const messages = []; const runs = new Map();
   for (const f of [...mains, ...subs]) {
     let text; try { text = readFileSync(f, 'utf8'); } catch { continue; }
     let lastTs = null;
     for (const raw of text.split('\n')) {
       if (raw.includes('"cost-state"')) {
         let o; try { o = JSON.parse(raw); } catch { continue; }
-        if (o?.type === 'cost-state' && Number.isFinite(o.totalCostUSD)
-          && (!checkpoint || decimalAtLeast(usd(o.totalCostUSD), usd(checkpoint.totalCostUSD)))) { checkpoint = o; checkpointAt = lastTs; }
+        if (o?.type !== 'cost-state' || !Number.isFinite(o.totalCostUSD)) continue;
+        const key = Number.isFinite(o.startTime) ? o.startTime : 'unknown';
+        const run = runs.get(key);
+        // Within a run the total only grows: keep the latest (largest) checkpoint.
+        if (!run || decimalAtLeast(usd(o.totalCostUSD), usd(run.cs.totalCostUSD))) runs.set(key, { start: key, cs: o, at: lastTs });
         continue;
       }
       if (!raw.includes('"timestamp"') && !raw.includes('"usage"')) continue;
@@ -185,12 +190,16 @@ export function tokenUsage(transcriptPath) {
     t.cacheWrite1h += w1h;
     t.cacheWrite5m += Math.max(0, count(u.cache_creation_input_tokens) - w1h);
   };
-  const after = checkpointAt ? new Date(checkpointAt).getTime() : null;
+  // Each message belongs to the latest run that had started by its time.
+  const ordered = [...runs.values()].sort((a, b) => (a.start === 'unknown' ? -Infinity : a.start) - (b.start === 'unknown' ? -Infinity : b.start));
+  const runOf = (t) => ordered.filter((r) => r.start === 'unknown' || r.start <= t).at(-1) ?? null;
   for (const msg of messages) {
     add(all, msg);
-    if (after !== null && new Date(msg.ts).getTime() > after) add(since, msg);
+    const t = new Date(msg.ts).getTime();
+    const run = runOf(t);
+    if (ordered.length && (!run || !run.at || t > new Date(run.at).getTime())) add(since, msg);
   }
-  return { all, since, checkpoint, checkpointAt };
+  return { all, since, runs: ordered };
 }
 
 // Exact money in 1e-8 USD units, as in src/money.ts (lesson L-004).
@@ -234,6 +243,22 @@ export function usageFrom(cs) {
     durationMs: count(Math.round(cs?.totalDuration ?? 0)), apiMs: count(Math.round(cs?.totalAPIDuration ?? 0)),
     linesAdded: count(cs?.totalLinesAdded), linesRemoved: count(cs?.totalLinesRemoved),
   };
+}
+
+/** Add up the checkpoints of several runs, exactly. */
+export function sumCheckpoints(list) {
+  const out = { costUSD: '0', models: {}, durationMs: 0, apiMs: 0, linesAdded: 0, linesRemoved: 0 };
+  const plus = (a, b) => fromUnits(toUnits(a) + toUnits(b));
+  for (const c of list) {
+    out.costUSD = plus(out.costUSD, c.costUSD);
+    for (const k of ['durationMs', 'apiMs', 'linesAdded', 'linesRemoved']) out[k] += c[k];
+    for (const [m, u] of Object.entries(c.models)) {
+      const acc = out.models[m] ??= { input: 0, output: 0, thinking: 0, cacheRead: 0, cacheWrite: 0, costUSD: '0' };
+      for (const k of ['input', 'output', 'thinking', 'cacheRead', 'cacheWrite']) acc[k] += u[k];
+      acc.costUSD = plus(acc.costUSD, u.costUSD);
+    }
+  }
+  return out;
 }
 
 const spoolDir = (dir = root) => path.join(dir, 'devlog', '.spool');
@@ -336,8 +361,8 @@ function main() {
     if (!line.ok) line.failure = failureKind(ev.tool_name, ev.error, ev.is_interrupt);
   } else if (event === 'Stop' || event === 'SessionEnd') {
     if (event === 'SessionEnd') line.reason = scrub(ev.reason, 40);
-    const { all, since, checkpoint, checkpointAt } = tokenUsage(ev.transcript_path);
-    if (Object.keys(all).length === 0 && !checkpoint && event === 'Stop') return 0; // nothing to record yet
+    const { all, since, runs } = tokenUsage(ev.transcript_path);
+    if (Object.keys(all).length === 0 && runs.length === 0 && event === 'Stop') return 0; // nothing to record yet
     if (event === 'SessionEnd') appendLine({ ts: line.ts, session: line.session, event: 'SessionEnd', reason: line.reason });
     const pricing = readConfig().pricing;
     const unpriced = new Set();
@@ -351,12 +376,13 @@ function main() {
     };
     const visible = priceAll(all);
     const after = priceAll(since);
-    // One record covers the whole session (every transcript); the report keeps the latest.
+    // One record covers the whole session (every transcript and every run); the report keeps the latest.
     Object.assign(line, { event: 'Usage', at: event, tokens: all });
-    if (checkpoint) {
-      // Claude Code's own figure (complete, background calls included) plus what came after it.
-      line.checkpoint = usageFrom(checkpoint);
-      line.checkpointAt = checkpointAt;
+    if (runs.length) {
+      // Claude Code's own figures (complete, background calls included), one per run, plus what came after.
+      line.checkpoint = sumCheckpoints(runs.map((r) => usageFrom(r.cs)));
+      line.checkpointAt = runs.at(-1).at;
+      line.runs = runs.length;
       line.costUSD = fromUnits(toUnits(line.checkpoint.costUSD) + after);
       line.costBasis = 'checkpoint+since';
     } else {

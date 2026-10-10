@@ -91,6 +91,7 @@ export function clean(raw) {
     set('costUSD', decimal(raw.costUSD));
     set('costBasis', raw.costBasis === 'checkpoint+since' || raw.costBasis === 'transcript-only' ? raw.costBasis : undefined);
     set('checkpoint', checkpointOf(raw.checkpoint));
+    set('runs', nat(raw.runs, 10_000));
     if (typeof raw.checkpointAt === 'string' && !Number.isNaN(new Date(raw.checkpointAt).getTime())) out.checkpointAt = new Date(raw.checkpointAt).toISOString();
     if (Array.isArray(raw.unpriced)) out.unpriced = raw.unpriced.filter((m) => typeof m === 'string' && model(m)).slice(0, 10);
   }

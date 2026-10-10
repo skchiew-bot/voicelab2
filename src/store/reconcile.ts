@@ -85,7 +85,9 @@ export async function reconcileCall(d: CallDeps, actorId: string | null, callId:
       reportedUsd = fromScaled((await toUsd(reportedCost, currency)) + (leg ? await toUsd(leg.cost, leg.currency) : 0n));
     }
     // Our side counts both legs when the provider's does: the caller's call and the agent's.
-    const ourSeconds = Number(call.duration_seconds ?? 0) + (leg ? Number(call.transfer_seconds ?? 0) : 0);
+    // Our side always counts the agent's leg when one was kept; the provider's side counts it when looked up, and a figure
+    // entered by hand is the total for both legs.
+    const ourSeconds = Number(call.duration_seconds ?? 0) + (call.transfer_leg_sid ? Number(call.transfer_seconds ?? 0) : 0);
     const theirSeconds = reportedSeconds === undefined ? undefined : reportedSeconds + (leg?.seconds ?? 0);
     const verdict = compare({ ourSeconds, reportedSeconds: theirSeconds, ourCostUsd, reportedCostUsd: reportedUsd, tolerancePct });
     const outcome = verdict.matched ? 'matched' : 'variance';

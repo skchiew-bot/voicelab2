@@ -195,14 +195,25 @@ async function scheduleNext(c: pg.PoolClient, cs: { id: string; tenant_id: strin
 }
 
 /**
- * A caller on a case asked for a person and hung up before reaching one: they are called back, at `from` or, inside the
- * contact's quiet hours, at the first moment after them. Placed like any other callback (through the gate, within its
- * lateness or not at all). Once per call. Null when the case is not open, so nothing can be scheduled on it.
+ * A caller on a case asked for a person and hung up before reaching one: they are called back. The time is locked to
+ * the first moment the dispatcher may really place it, so it is not missed by our own rules: no sooner than `from`, not
+ * before the contact's minimum gap since their last call has passed (the call they just hung up counts), and outside
+ * their quiet hours. Placed like any other callback (through the gate, within its lateness or not at all). Once per call.
+ * Null when it cannot be scheduled: the case is not open, or the contact has had as many calls as the day or week
+ * allows, so a callback now would only be held back and missed. The caller of this then leaves a note for the client.
  */
-export async function scheduleTransferCallback(c: pg.PoolClient, caseId: string, callId: string, from: Date): Promise<Date | null> {
-  const cs = (await c.query('SELECT id, tenant_id, time_zone, status FROM cases WHERE id = $1', [caseId])).rows[0];
+export async function scheduleTransferCallback(c: pg.PoolClient, caseId: string, callId: string, from: Date, now = new Date()): Promise<Date | null> {
+  await lockCase(c, caseId);
+  const cs = (await c.query('SELECT id, tenant_id, time_zone, status, contact_hash FROM cases WHERE id = $1', [caseId])).rows[0];
   if (!cs || cs.status !== 'open') return null;
-  return scheduleNext(c, cs, from, { kind: 'callback', channel: 'voice', dedupeKey: `transfer-callback:${callId}`, note: 'The caller asked for a person and hung up before reaching one.' });
+  const pol = await getContactPolicy(c, cs.tenant_id);
+  let at = from;
+  if (pol) {
+    const w = await contactWindow(c, cs.tenant_id, cs.contact_hash, now);
+    if (w.dayCount >= pol.maxPerDay || w.weekCount >= pol.maxPerWeek) return null;
+    if (w.lastAt && pol.minGapMinutes > 0) at = new Date(Math.max(at.getTime(), new Date(w.lastAt).getTime() + pol.minGapMinutes * 60_000));
+  }
+  return scheduleNext(c, cs, at, { kind: 'callback', channel: 'voice', dedupeKey: `transfer-callback:${callId}`, note: 'The caller asked for a person and hung up before reaching one.' });
 }
 
 const cancelActions = (c: pg.PoolClient, caseId: string, why: string, keepThanks = false) =>

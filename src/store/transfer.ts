@@ -257,13 +257,20 @@ export async function afterDial(d: TransferDeps, providerId: string, callId: str
     const dialled = dialOutcome(params.DialCallStatus);
     const outcome = dialled === 'answered' && call.transfer_screened !== false && !call.transfer_accepted_at ? 'unanswered' : dialled;
     const present = !GONE.includes(params.CallStatus ?? '');
+    // The agent's leg is a call of its own at Twilio, billed whenever it connected, whoever or whatever picked up (a
+    // voicemail too): its id (never a number) and length are kept so it is costed and checked with the caller's call.
+    // Kept once, and only with both, so a leg is never costed without an id to check it by.
+    const legSid = /^[A-Za-z0-9_]{2,64}$/.test(params.DialCallSid ?? '') ? params.DialCallSid! : null;
+    const legSecs = /^\d{1,6}$/.test(params.DialCallDuration ?? '') ? Number(params.DialCallDuration) : 0;
+    if (legSid && legSecs > 0) {
+      const kept = await c.query('UPDATE calls SET transfer_leg_sid = $2, transfer_seconds = $3 WHERE id = $1 AND transfer_leg_sid IS NULL', [callId, legSid, legSecs]);
+      // Reported after the call had already ended and been priced: the leg is not in the estimate, so the check against
+      // Twilio's figures will flag the difference for a person rather than lose it.
+      if (kept.rowCount && call.transfer_status === 'unknown') await event(c, call, 'transfer.leg_reported_late', { seconds: legSecs });
+    }
     if (call.transfer_status === 'dialing') {
       const next = outcome === 'answered' ? 'answered' : present ? outcome : 'abandoned';
-      // The agent's leg is a call of its own at Twilio: its id and length are kept so it is costed and checked with the
-      // caller's (an id, never a number).
-      const leg = next === 'answered' && /^[A-Za-z0-9_]{2,64}$/.test(params.DialCallSid ?? '') ? params.DialCallSid! : null;
-      const secs = next === 'answered' && /^\d{1,6}$/.test(params.DialCallDuration ?? '') ? Number(params.DialCallDuration) : null;
-      await c.query('UPDATE calls SET transfer_status = $2, transfer_leg_sid = $3, transfer_seconds = $4 WHERE id = $1', [callId, next, leg, secs]);
+      await c.query('UPDATE calls SET transfer_status = $2 WHERE id = $1', [callId, next]);
       await event(c, call, `transfer.${next}`, {});
       if (next === 'unanswered' || next === 'failed') return ladder(c, call, 'the caller asked for a person and no one answered', true);
       if (next === 'abandoned') await callerHungUp(c, call);

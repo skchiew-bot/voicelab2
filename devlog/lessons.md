@@ -79,13 +79,14 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/learning.test.ts` › "does not stop the sweep when one script's audio fails, and names what it could not judge"
 
 ### L-007: Bill only for what was served
-- **Seen:** 2 times. A caller who hung up in the queue was charged credits, and a served caller was billed for their time on hold. A promoted caller lost their agreed premium ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). The new scheduler ran extra channel charges every day, billing a past month at today's entitlement, so a client added or upgraded mid-month would have paid for the whole month (Phase 0 scheduler independent review, 2026-10-10).
+- **Seen:** 3 times. A caller who hung up in the queue was charged credits, and a served caller was billed for their time on hold. A promoted caller lost their agreed premium ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). The new scheduler ran extra channel charges every day, billing a past month at today's entitlement, so a client added or upgraded mid-month would have paid for the whole month (Phase 0 scheduler independent review, 2026-10-10). The agent's leg of a transfer was costed only when the agent took the call, though Twilio bills it whenever it connects, a voicemail included (human transfer follow-up review, 2026-10-10).
 - **Rule:** Credits start when service starts. Provider time is still costed internally. Carry agreed terms through every state change.
 - **Guards:**
   - `tests/concurrency.test.ts` › "costs the provider time of a caller who gave up in the queue, and draws no credits for it"
   - `tests/concurrency.test.ts` › "bills a caller who waited and was then served only from the moment they were served"
   - `tests/concurrency.test.ts` › "keeps the agreed premium when a waiting caller is promoted beyond the channels"
   - `tests/scheduler.test.ts` › "does not schedule extra channel charges, which would bill a past month at today's entitlement"
+  - `tests/transfer.test.ts` › "costs a leg that a voicemail answered, and checks it by hand against the total for both legs"
 
 ### L-008: Key a rule on the real-world thing, not the database row
 - **Seen:** 2 times. The DID lock was keyed by row, so the same number registered at a second provider could be shown again to a contact it had failed for ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). Every overdue scheduled job shared one alert key, so a second job going wrong raised no new alert and no email (Phase 0 scheduler independent review, 2026-10-10).
@@ -240,18 +241,20 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/learning.test.ts` › "leaves a low-confidence pass for a person, who can approve it; it stays approved, still live, until its audio exists"
 
 ### L-028: Measure a promised time from the promise, not from the last time it was moved
-- **Seen:** 2 times. A callback held back by a quiet hour or a call limit had its time overwritten, so the lateness limit was measured from the new time and a callback locked for 11:00 could be placed days later (Phase 7 independent review, 2026-10-10). The case dispatcher, now a scheduled job, placed at most twenty callbacks a minute, so a backlog locked to one time would have been missed (Phase 0 scheduler independent review, 2026-10-10).
+- **Seen:** 3 times. A callback held back by a quiet hour or a call limit had its time overwritten, so the lateness limit was measured from the new time and a callback locked for 11:00 could be placed days later (Phase 7 independent review, 2026-10-10). The case dispatcher, now a scheduled job, placed at most twenty callbacks a minute, so a backlog locked to one time would have been missed (Phase 0 scheduler independent review, 2026-10-10). A callback for a case caller who hung up waiting for a person was locked fifteen minutes ahead, inside the contact's hour-long minimum gap, so the dispatcher would have held it back past its lateness and marked it missed (human transfer follow-up review, 2026-10-10).
 - **Rule:** Keep the time something was promised for separate from when it is next tried. Deferring changes the second, never the first, and anything past its allowed lateness is missed, however many times it was held back.
 - **Guards:**
   - `tests/cases.test.ts` › "measures lateness from the time a callback was locked to, however long it was held back"
   - `tests/scheduler.test.ts` › "works through a backlog in batches while each batch is full, and stops at its bound"
+  - `tests/transfer.test.ts` › "locks a case callback to when it can really be placed: after the minimum gap since the call just ended, or leaves a note when the calls allowed today are used"
 
 ### L-029: An event can arrive before the record that expects it
-- **Seen:** 2 times. A provider's end-of-call report was processed before the dispatcher had recorded the call against its case, so the outcome was dropped and the retry chain stopped for good (Phase 7 independent review, 2026-10-10). A relay connection that arrived while another was still starting the call stood by and never looked again, so if the starter died the caller heard silence; and a start that finished after the call had already fallen back still wrote a run (live call voice link re-check, 2026-10-10).
+- **Seen:** 3 times. A provider's end-of-call report was processed before the dispatcher had recorded the call against its case, so the outcome was dropped and the retry chain stopped for good (Phase 7 independent review, 2026-10-10). A relay connection that arrived while another was still starting the call stood by and never looked again, so if the starter died the caller heard silence; and a start that finished after the call had already fallen back still wrote a run (live call voice link re-check, 2026-10-10). Twilio's end-of-call report could arrive before the end of the dial to the agent; the agent's leg was then never recorded or costed (human transfer follow-up review, 2026-10-10).
 - **Rule:** When a record is written after a call to an outside system, look at whether the outside system has already reported by the time it is written, and settle it then. Never rely on the order in which two requests commit. Anything waiting for another request's record looks again on a timer, and a decision already given (a fallback) is checked again when the late record is written.
 - **Guards:**
   - `tests/cases.test.ts` › "does not lose the outcome of a call the provider reported over before it was recorded"
   - `tests/relay.test.ts` › "does not leave a standing-by connection silent when the one starting the call dies, and a late start then writes nothing"
+  - `tests/transfer.test.ts` › "keeps a leg Twilio reports after the call has ended and been priced, and the check against Twilio then flags it, never loses it"
 
 ### L-030: A request that needs several locks takes them all first, in one fixed order
 - **Seen:** A move into a group diary held the old diary's lock and then waited for the group's members, while a group booking held a member and waited for the other: Postgres broke the deadlock with an error, and half the requests failed with a 500 (Phase 7 appointments independent review, 2026-10-10).
@@ -266,13 +269,14 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/appointments.test.ts` › "never charges a customer for a time the business broke"
 
 ### L-032: A rule that cannot be judged is a refusal, not a pass
-- **Seen:** A policy "deny when over 1000" let an action through when the amount was missing or unreadable, because the workflow condition language reads an unknown variable as false, so the deny was skipped and a plain allow won; banned phrases slipped past a curly apostrophe; an approved policy nobody could withdraw blocked every later change (Phase 7 knowledge independent review, 2026-10-10). A telephony provider an operator forced to fail over could never come back, because nothing probes telephony providers (Control Tower actions independent review, 2026-10-10).
+- **Seen:** 2 times. A policy "deny when over 1000" let an action through when the amount was missing or unreadable, because the workflow condition language reads an unknown variable as false, so the deny was skipped and a plain allow won; banned phrases slipped past a curly apostrophe; an approved policy nobody could withdraw blocked every later change (Phase 7 knowledge independent review, 2026-10-10). A telephony provider an operator forced to fail over could never come back, because nothing probes telephony providers (Control Tower actions independent review, 2026-10-10). The agent-number country check took any +1 number it could not place as the United States or Canada, premium-rate codes included (human transfer follow-up review, 2026-10-10).
 - **Rule:** Where a check guards something (a policy, a gate), judge conditions three-valued: unknown on a deny counts as deny, unknown on an allow counts as not allowed. Normalise text before matching it, and give every stuck state a recorded way out.
 - **Guards:**
   - `tests/knowledge-policy.test.ts` › "denies when the variable a deny rule depends on is missing or unreadable, and does not allow on a condition it cannot judge"
   - `tests/knowledge-policy.test.ts` › "catches a banned phrase written with a curly apostrophe or zero-width marks, and refuses a phrase with no words"
   - `tests/knowledge.test.ts` › "lets a wrong proposal be withdrawn, with a reason, so it never blocks every later change; and a refused number is free again"
   - `tests/control-actions.test.ts` › "fails the provider over at once, logs it as an operator's failover, and lets it earn its way back like any other"
+  - `tests/transfer.test.ts` › "places a number in its country by calling code, telling apart the countries that share +1 and +7, and knows nothing it was not told"
 
 ### L-033: One figure, one definition: reuse the code that already counts it
 - **Seen:** The Control Tower's deliverability panel counted contacts again instead of reusing the Outbound screen's count, so it counted every outcome row instead of each call's latest, mixed two time windows, and could show a different contact rate from the screen it linked to; its stitching total was summed from only the twenty busiest workflows (Control Tower panels independent review, 2026-10-10).

@@ -36,6 +36,12 @@ const NANP_AREAS: Record<string, string> = {
   '767': 'DM', '784': 'VC', '787': 'PR', '939': 'PR', '809': 'DO', '829': 'DO', '849': 'DO', '868': 'TT', '869': 'KN',
 };
 
+/**
+ * Premium-rate service codes in the North American plan. Any other +1 area code not listed above is taken as the United
+ * States or Canada: a Caribbean code missing from the list would wrongly pass, so the list is unverified (L-016).
+ */
+const PREMIUM_NANP = ['900', '976'];
+
 /** One name for a place a number can be told to be in: 'US/CA' for the two that share +1 numbers. */
 const zone = (country: string) => (country === 'US' || country === 'CA' ? 'US/CA' : country);
 
@@ -43,7 +49,11 @@ const zone = (country: string) => (country === 'US' || country === 'CA' ? 'US/CA
 export function numberZone(e164: string): string | null {
   if (!/^\+[1-9][0-9]{7,14}$/.test(e164)) return null;
   const d = e164.slice(1);
-  if (d.startsWith('1')) return Object.prototype.hasOwnProperty.call(NANP_AREAS, d.slice(1, 4)) ? NANP_AREAS[d.slice(1, 4)]! : 'US/CA';
+  if (d.startsWith('1')) {
+    const area = d.slice(1, 4);
+    if (PREMIUM_NANP.includes(area)) return null;   // premium-rate services: never an agent line
+    return Object.prototype.hasOwnProperty.call(NANP_AREAS, area) ? NANP_AREAS[area]! : 'US/CA';
+  }
   if (d.startsWith('7')) return d.startsWith('76') || d.startsWith('77') ? 'KZ' : 'RU';
   for (const len of [3, 2, 1]) {
     const code = d.slice(0, len);

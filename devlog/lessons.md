@@ -78,8 +78,8 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/workflow-hardening.test.ts` › "are refused in what an integration returns, nested or not"
 
 ### L-010: A test that cannot fail proves nothing
-- **Seen:** 3 times. The Control Tower drift test passed with wrong data ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The Phase 2 production gate accepted scenarios that asserted nothing ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). The guard for L-015 pointed at a code comment, not a test, so it could never fail (independent review, 2026-10-10).
-- **Rule:** Before trusting a new test, break the code it protects and watch the test fail. Match exactly, not loosely.
+- **Seen:** 5 times. The Control Tower drift test passed with wrong data ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The Phase 2 production gate accepted scenarios that asserted nothing ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). The guard for L-015 pointed at a code comment, not a test, so it could never fail (independent review, 2026-10-10). A report test asserted the sum of two transcripts' costs and so locked in a double count; three new tests passed with the code they protect broken (independent review and mutation checks, 2026-10-10).
+- **Rule:** Before trusting a new test, break the code it protects and watch the test fail. Match exactly, not loosely. A test that asserts today's output can lock in today's bug: assert what is true, worked out by hand.
 - **Guards:**
   - `tests/control-tower.test.ts` › "matches the plan's Control Tower criteria exactly"
   - `tests/devlog.test.ts` › "guards a code lesson with a test title, not a comment"
@@ -117,10 +117,12 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "no tracked file holds a token in a real provider's key format"
 
 ### L-016: Check an integration against a real payload, not an assumed one
-- **Seen:** 2 times. Twilio and Telnyx request formats were written from memory and are still unverified against the live services ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)). The dev Control Tower hook assumed the hook's `session_id` was the claude.ai session id; in a cloud session it is a local id, so links broke and one session counted twice (session on 2026-10-10).
+- **Seen:** 4 times. Twilio and Telnyx request formats were written from memory and are still unverified against the live services ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)). The dev Control Tower hook assumed the hook's `session_id` was the claude.ai session id; in a cloud session it is a local id, so links broke and one session counted twice (session on 2026-10-10). Session cost was nearly built on the transcript alone; a real transcript showed each message repeated per content block and background calls (the permission classifier) missing, so cost is now Claude Code's own checkpoint plus priced messages after it (session on 2026-10-10). A session resumed in another folder starts a new transcript that copies the earlier messages; summing transcripts double counted (independent review, 2026-10-10).
 - **Rule:** Before building on an outside payload or format, capture one real example and test against its actual shape. Where that is impossible, say so as unverified, in the PR and in `src/progress.ts`.
 - **Guards:**
   - `tests/devlog.test.ts` › "records the claude.ai session id in a cloud session, and the local id elsewhere"
+  - `tests/devlog.test.ts` › "counts each message once, prices tokens exactly, and adds them to Claude Code's own checkpoint"
+  - `tests/devlog.test.ts` › "counts a session resumed in another folder once"
 
 ### L-017: Record logs by allowlist; anything logged may be published
 - **Seen:** The dev Control Tower hook scrubbed by blocklist and still let through credentials in URLs, `key=value` secrets, tokens split by digit runs, emails, and other tools' raw error text with a customer's name and email, all bound for git (independent review, 2026-10-10).
@@ -141,3 +143,24 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** Hooks and background tools write only to ignored files. Anything meant for git is written by an explicit step (here, `scripts/devlog-flush.mjs`) into new files that never conflict across branches.
 - **Guards:**
   - `tests/devlog.test.ts` › "writes to the spool, which git ignores, so the working tree stays clean"
+
+### L-020: Check that monitoring is running, not just installed
+- **Seen:** After a restart, Claude Code reopened a session with `/home/user` as its project folder, outside the repository, so the repository's hooks never loaded and nothing was logged for half an hour, silently (session on 2026-10-10).
+- **Rule:** A monitor must report its own gaps. The dev Control Tower flags any session that commits while not being logged; when you see that warning, say so and record what ran by hand instead of leaving the gap. Usage can be recorded by running the hook with a Stop event for the session's transcript; it gathers every transcript of the session and counts each message once.
+- **Guards:**
+  - `tests/devlog.test.ts` › "folds the board, splits a session's cost between its tasks exactly, links incidents to guarded lessons, and finds logging gaps"
+
+### L-021: A guardrail that fires on normal work is worse than none
+- **Seen:** The first stop-loss rules told Claude to stop after three unrelated commands that shared a description, a `grep` that mentioned `vitest`, a large file read in chunks, and test runs broken on purpose to prove a test can fail (independent review, 2026-10-10).
+- **Rule:** Before a guardrail can stop work, test it against normal work as well as the failure it targets: count consecutive failures of the same thing, reset on success, and give deliberate exceptions a way through (`DEVLOG_EXPECT_RED=1`).
+- **Guards:**
+  - `tests/devlog.test.ts` › "does not count test runs expected to fail, or commands that only mention a test runner"
+  - `tests/devlog.test.ts` › "counts the same command failing, not different commands that share a description"
+  - `tests/devlog.test.ts` › "but not about reading it in chunks"
+  - `tests/devlog.test.ts` › "counts only successful edits since the last passing check"
+
+### L-022: Compare times as times, not as text
+- **Seen:** The report compared git commit dates written with a +08:00 offset against UTC log timestamps as strings, so logging gaps, audit completeness and session times were wrong for anyone outside UTC (independent review, 2026-10-10).
+- **Rule:** Turn every timestamp into one form (`new Date(x).toISOString()`, or milliseconds) at the edge, before comparing or sorting.
+- **Guards:**
+  - `tests/devlog.test.ts` › "finds logging gaps"

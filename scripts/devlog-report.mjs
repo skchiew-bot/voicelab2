@@ -1,6 +1,9 @@
 #!/usr/bin/env node
-// Dev Control Tower report: gathers how Voice Lab is being built (commits, sessions, PRs and
-// their review findings, lessons and their guards, failed tool calls) and renders the dashboard.
+// Dev Control Tower report, modelled on skchiew-bot/d3ngineering: the six control-tower areas
+// (section 34: workload, agent operations, quality, performance, AI economics, governance), the
+// development control board (44) with task progress (12), the incident register (45), the model
+// performance registry (17), stop-loss and wasted-effort alerts (18, 19) and the learning loop
+// (20: incident, lesson, guard). Built from git, devlog/ and the spool; no model is called.
 //
 //   node scripts/devlog-report.mjs [--prs prs.json] [--html out.html] [--json out.json]
 //
@@ -11,6 +14,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fromUnits, priceTokens, readConfig, toUnits } from '../.claude/hooks/devlog.mjs';
+import { clean } from './devlog-flush.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
@@ -26,7 +31,7 @@ function commits() {
     const [sha, date, subject, trailer, parents] = r.split('\x1f');
     const session = /session_[\w]+/.exec(trailer ?? '')?.[0] ?? null;
     const pr = /\(#(\d+)\)$|pull request #(\d+)/.exec(subject ?? '');
-    return { sha, date, subject, session, merge: (parents ?? '').trim().includes(' '), pr: pr ? Number(pr[1] ?? pr[2]) : null };
+    return { sha, date: new Date(date).toISOString(), subject, session, merge: (parents ?? '').trim().includes(' '), pr: pr ? Number(pr[1] ?? pr[2]) : null };
   });
 }
 
@@ -53,17 +58,19 @@ export function parseLessons(md) {
 
 // ---------------------------------------------------------------- activity
 // Committed lines (devlog/activity) plus this machine's unflushed spool, each line counted once.
-function activity() {
+// Every line goes through the flush allowlist: the dashboard is published too (lesson L-017).
+export function activity(dir = root) {
   const seen = new Set();
-  return [path.join(root, 'devlog', 'activity'), path.join(root, 'devlog', '.spool')].flatMap((dir) =>
-    existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.jsonl')).flatMap((f) =>
-      readFileSync(path.join(dir, f), 'utf8').split('\n').filter(Boolean).flatMap((l) => {
-        let e; try { e = JSON.parse(l); } catch { return []; }
-        const key = [e.ts, e.session, e.event, e.tool, e.target].join('|');
+  return [path.join(dir, 'devlog', 'activity'), path.join(dir, 'devlog', '.spool')].flatMap((d) =>
+    existsSync(d) ? readdirSync(d).filter((f) => f.endsWith('.jsonl')).sort().flatMap((f) =>
+      readFileSync(path.join(d, f), 'utf8').split('\n').filter(Boolean).flatMap((l) => {
+        let e; try { e = clean(JSON.parse(l)); } catch { return []; }
+        if (!e) return [];
+        const key = [e.ts, e.session, e.event, e.tool, e.target, e.id, e.action, e.rule, e.key, e.transcript].join('|');
         if (seen.has(key)) return [];
         seen.add(key);
         return [e];
-      })) : []);
+      })) : []).sort((a, b) => a.ts.localeCompare(b.ts));
 }
 
 // --------------------------------------------------------------- PR reviews
@@ -79,71 +86,291 @@ export function reviewFindings(body = '') {
   });
 }
 
-function build() {
+const sum = (xs) => xs.reduce((a, b) => a + b, 0n);
+const pct = (n, d) => (d > 0 ? Math.round((n / d) * 1000) / 10 : null); // a ratio of counts, for display only
+const tierOf = (model, tiers = {}) => Object.entries(tiers).find(([k, v]) => !k.startsWith('_') && Array.isArray(v) && v.some((w) => model.includes(w)))?.[0] ?? 'other';
+const minutesBetween = (a, b) => (a && b ? Math.max(0, Math.round((new Date(b) - new Date(a)) / 60000)) : null);
+
+/** Money as exact decimal strings, with RM when a rate is configured. */
+function money(units, cfg) {
+  const out = { usd: fromUnits(units) };
+  const rate = cfg.currency?.myrPerUsd;
+  if (rate) out.myr = fromUnits((units * toUnits(rate) + 50_000_000n) / 100_000_000n);
+  return out;
+}
+
+/** Fold Task events into the board, newest values winning. Exported for the task CLI. */
+export function buildBoard(events = activity(), now = new Date()) {
+  const tasks = new Map();
+  for (const e of events.filter((x) => x.event === 'Task')) {
+    const t = tasks.get(e.id) ?? { id: e.id, status: 'planned', sessions: [], events: 0, started: e.ts, attempt: 1 };
+    for (const k of ['title', 'epic', 'workstream', 'phase', 'owner', 'status', 'progress', 'attempt', 'tests', 'blocker', 'next', 'pr']) {
+      if (e[k] !== undefined) t[k] = e[k];
+    }
+    if (e.action === 'done') { t.finished = e.ts; t.blocker = ''; }
+    else if (e.status && !['done', 'abandoned'].includes(e.status)) delete t.finished; // reopened
+    if (!t.sessions.includes(e.session)) t.sessions.push(e.session);
+    t.events++; t.updated = e.ts;
+    tasks.set(e.id, t);
+  }
+  return [...tasks.values()].map((t) => ({
+    ...t, blocker: t.blocker || undefined,
+    elapsedMinutes: minutesBetween(t.started, t.finished ?? now.toISOString()),
+  })).sort((a, b) => (a.status === 'done') - (b.status === 'done') || b.updated.localeCompare(a.updated));
+}
+
+export function build(opts = {}) {
+  const cfg = readConfig(root);
+  const now = opts.now ?? new Date();
   const all = commits();
   const lessons = parseLessons(readFileSync(path.join(root, 'devlog', 'lessons.md'), 'utf8'));
   const events = activity();
-  const prsFile = arg('--prs');
+  const prsFile = opts.prs ?? arg('--prs');
   const prs = (prsFile ? JSON.parse(readFileSync(prsFile, 'utf8')) : []).map((p) => {
     const findings = p.findings ?? reviewFindings(p.body);
     return {
       number: p.number, title: p.title, url: p.html_url, state: p.merged_at ? 'merged' : p.state,
-      created: p.created_at, merged: p.merged_at ?? null, findings,
+      created: p.created_at, merged: p.merged_at ?? null, findings, reviewed: findings.length > 0,
       lessons: lessons.filter((l) => l.prs.includes(p.number)).map((l) => l.id),
     };
   }).sort((a, b) => a.number - b.number);
+  const highRisk = (cfg.highRiskPaths?.patterns ?? []).map((r) => new RegExp(r));
 
+  // ---------------------------------------------------------------- sessions
   const sessions = new Map();
   const touch = (id) => {
-    if (!sessions.has(id)) sessions.set(id, { id, url: sessionUrl(id), first: null, last: null, commits: 0, prompts: 0, tools: 0, failures: 0, files: new Set() });
+    if (!sessions.has(id)) {
+      sessions.set(id, {
+        id, url: sessionUrl(id), first: null, last: null, commits: 0, prompts: 0, tools: 0, failures: 0,
+        tests: 0, testsFailed: 0, edits: {}, highRiskFiles: new Set(), subagents: {}, usage: new Map(), alerts: 0, tasks: new Set(),
+      });
+    }
     return sessions.get(id);
   };
   const stamp = (s, t) => { if (!s.first || t < s.first) s.first = t; if (!s.last || t > s.last) s.last = t; };
   for (const c of all) if (c.session && !c.merge) { const s = touch(c.session); s.commits++; stamp(s, c.date); }
   for (const e of events) {
     const s = touch(e.session);
-    stamp(s, e.ts);
+    if (e.event !== 'Task' && e.event !== 'Incident') stamp(s, e.ts);
     if (e.event === 'UserPromptSubmit') s.prompts++;
-    if (e.tool) { s.tools++; if (!e.ok) s.failures++; if (/^(Edit|Write|NotebookEdit)$/.test(e.tool) && e.target) s.files.add(e.target); }
+    if (e.tool) {
+      s.tools++;
+      if (!e.ok) s.failures++;
+      if (e.kind === 'test') { s.tests++; if (!e.ok) s.testsFailed++; }
+      if (/^(Edit|Write|NotebookEdit)$/.test(e.tool) && e.target && e.target !== '(outside project)') {
+        s.edits[e.target] = (s.edits[e.target] ?? 0) + 1;
+        if (highRisk.some((r) => r.test(e.target))) s.highRiskFiles.add(e.target);
+      }
+    }
+    if (e.event === 'SubagentStart') s.subagents[e.agentId ?? e.ts] = { type: e.agentType, started: e.ts, active: true };
+    if (e.event === 'SubagentStop' && s.subagents[e.agentId]) s.subagents[e.agentId].active = false;
+    if (e.event === 'Usage') s.usage.set('session', e); // each record covers the whole session; keep the latest
+    if (e.event === 'Alert') s.alerts++;
+    if (e.event === 'Task') s.tasks.add(e.id);
+  }
+  const sessionRows = [...sessions.values()].map((s) => {
+    const usages = [...s.usage.values()];
+    const cost = sum(usages.map((u) => (u.costUSD ? toUnits(u.costUSD) : 0n)));
+    const models = {};
+    for (const u of usages) {
+      for (const [m, t] of Object.entries(u.tokens ?? {})) {
+        const acc = models[m] ??= { messages: 0, input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 };
+        for (const k of Object.keys(acc)) acc[k] += t[k] ?? 0;
+      }
+    }
+    const reworked = Object.entries(s.edits).filter(([, n]) => n >= 3).length;
+    const last = s.last;
+    return {
+      id: s.id, url: s.url, first: s.first, last, commits: s.commits, prompts: s.prompts, tools: s.tools, failures: s.failures,
+      tests: s.tests, testsFailed: s.testsFailed, filesEdited: Object.keys(s.edits).length, reworkedFiles: reworked,
+      highRisk: [...s.highRiskFiles], alerts: s.alerts, tasks: [...s.tasks],
+      subagents: Object.values(s.subagents), activeSubagents: Object.values(s.subagents).filter((a) => a.active).length,
+      models, costUnits: cost, cost: money(cost, cfg), metered: usages.length > 0,
+      costBasis: usages.some((u) => u.costBasis === 'transcript-only') ? 'partial' : usages.length ? 'checkpoint' : 'none',
+      touchMinutes: minutesBetween(s.first, last),
+      active: last ? (now - new Date(last)) / 60000 <= (cfg.activeWithinMinutes ?? 30) : false,
+    };
+  }).sort((a, b) => (b.last ?? '').localeCompare(a.last ?? ''));
+
+  // -------------------------------------------------------------- the board
+  const board = buildBoard(events, now);
+  // A session's spend is shared evenly between the tasks it worked on.
+  const taskCost = new Map();
+  for (const s of sessionRows) {
+    if (!s.tasks.length) continue;
+    const n = BigInt(s.tasks.length);
+    const share = s.costUnits / n;
+    s.tasks.forEach((id, i) => taskCost.set(id, (taskCost.get(id) ?? 0n) + share + (i === 0 ? s.costUnits - share * n : 0n))); // the remainder goes to the first task, so nothing is lost
+  }
+  const sessionsById = new Map(sessionRows.map((s) => [s.id, s]));
+  for (const t of board) {
+    t.cost = money(taskCost.get(t.id) ?? 0n, cfg);
+    t.models = [...new Set(t.sessions.flatMap((id) => Object.keys(sessionsById.get(id)?.models ?? {})))];
+    t.tokens = t.sessions.reduce((n, id) => n + Object.values(sessionsById.get(id)?.models ?? {}).reduce((a, m) => a + m.input + m.output + m.cacheRead + m.cacheWrite5m + m.cacheWrite1h, 0), 0);
   }
 
-  const failures = events.filter((e) => e.event === 'PostToolUseFailure').sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, 50);
-  const starts = events.filter((e) => e.event === 'SessionStart').sort((a, b) => b.ts.localeCompare(a.ts));
-  const behind = Number(git('rev-list', '--count', 'HEAD..origin/main').trim() || 0);
+  // ----------------------------------------------------- incidents and alerts
+  const lessonById = new Map(lessons.map((l) => [l.id, l]));
+  const incidents = events.filter((e) => e.event === 'Incident').map((i) => {
+    const l = i.lesson ? lessonById.get(i.lesson) : null;
+    return { ...i, lessonTitle: l?.title ?? null, guarded: l ? l.guards.length > 0 && l.guards.every((g) => g.ok) : null };
+  }).sort((a, b) => b.ts.localeCompare(a.ts));
+  const alerts = events.filter((e) => e.event === 'Alert').sort((a, b) => b.ts.localeCompare(a.ts));
 
+  // ------------------------------------------------------------ AI economics
+  const byModel = {};
+  for (const s of sessionRows) {
+    for (const [m, t] of Object.entries(s.models)) {
+      const acc = byModel[m] ??= { model: m, tier: tierOf(m, cfg.modelTiers), sessions: 0, messages: 0, input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, tools: 0, failures: 0, tests: 0, testsFailed: 0 };
+      acc.sessions++;
+      for (const k of ['messages', 'input', 'output', 'cacheRead', 'cacheWrite5m', 'cacheWrite1h']) acc[k] += t[k];
+      // Tool calls and test runs belong to the model that led the session (the most output), not to
+      // a subagent's model that happened to be used alongside it.
+      const lead = Object.entries(s.models).sort((a, b) => b[1].output - a[1].output)[0]?.[0];
+      if (m === lead) { acc.ledSessions = (acc.ledSessions ?? 0) + 1; acc.tools += s.tools; acc.failures += s.failures; acc.tests += s.tests; acc.testsFailed += s.testsFailed; }
+    }
+  }
+  let cacheSaved = 0n;
+  const registry = Object.values(byModel).map((m) => {
+    const cost = priceTokens(m.model, m, cfg.pricing);
+    const p = cfg.pricing?.perMTokUSD?.[m.model];
+    if (p) cacheSaved += (BigInt(m.cacheRead) * (toUnits(p.input) - toUnits(p.cacheRead)) + 500_000n) / 1_000_000n;
+    return {
+      ...m, priced: cost !== null, costUnits: cost ?? 0n, cost: money(cost ?? 0n, cfg),
+      costPerSession: money(cost !== null && m.sessions ? cost / BigInt(m.sessions) : 0n, cfg),
+      toolFailureRate: pct(m.failures, m.tools), testPassRate: m.tests ? pct(m.tests - m.testsFailed, m.tests) : null,
+    };
+  }).sort((a, b) => (b.costUnits > a.costUnits ? 1 : b.costUnits < a.costUnits ? -1 : 0));
+  const spend = sum(sessionRows.map((s) => s.costUnits));
+  const tierSpend = {};
+  for (const m of registry) tierSpend[m.tier] = (tierSpend[m.tier] ?? 0n) + m.costUnits;
+  const pricedTotal = sum(registry.map((m) => m.costUnits));
+  const merged = prs.filter((p) => p.state === 'merged');
+  const done = board.filter((t) => t.status === 'done');
+  const metered = sessionRows.filter((s) => s.metered);
+  const economics = {
+    spend: money(spend, cfg),
+    byTier: Object.fromEntries(Object.entries(tierSpend).map(([k, v]) => [k, { ...money(v, cfg), share: pricedTotal > 0n ? Number((v * 10000n) / pricedTotal) / 100 : null }])),
+    premiumSessions: metered.filter((s) => Object.keys(s.models).some((m) => tierOf(m, cfg.modelTiers) === 'high')).length,
+    meteredSessions: metered.length,
+    cacheSaved: money(cacheSaved, cfg),
+    cacheReadShare: (() => { const t = registry.reduce((a, m) => ({ r: a.r + m.cacheRead, all: a.all + m.input + m.cacheRead + m.cacheWrite5m + m.cacheWrite1h }), { r: 0, all: 0 }); return pct(t.r, t.all); })(),
+    perDoneTask: done.length ? money(sum(done.map((t) => taskCost.get(t.id) ?? 0n)) / BigInt(done.length), cfg) : null,
+    wasteAlerts: alerts.filter((a) => a.kind === 'waste').length,
+    stopLossAlerts: alerts.filter((a) => a.kind === 'stop-loss').length,
+    failedTestRuns: sessionRows.reduce((n, s) => n + s.testsFailed, 0),
+    unpriced: [...new Set(events.filter((e) => e.event === 'Usage').flatMap((e) => e.unpriced ?? []))],
+    partial: sessionRows.some((s) => s.costBasis === 'partial'),
+    unmetered: sessionRows.filter((s) => !s.metered && s.tools > 0).length, // logged activity but no usage record
+    unassignedSpend: money(spend - sum([...taskCost.values()]), cfg), // spend in sessions that recorded no task
+    pricing: { source: cfg.pricing?.source ?? null, asOf: cfg.pricing?.asOf ?? null },
+    currency: cfg.currency?.myrPerUsd ? { myrPerUsd: cfg.currency.myrPerUsd, asOf: cfg.currency.asOf, source: cfg.currency.source } : null,
+  };
+
+  // ------------------------------------------------------- the six areas (34)
+  const since = (days) => new Date(now - days * 864e5).toISOString();
+  const findings = prs.flatMap((p) => p.findings);
+  const closedUnmerged = prs.filter((p) => p.state === 'closed' && !p.merged).length;
+  const reverts = all.filter((c) => !c.merge && /^Revert\b/.test(c.subject)).length;
+  const realCommits = all.filter((c) => !c.merge);
+  const commitSessions = new Set(realCommits.map((c) => c.session).filter(Boolean));
+  const loggedSessions = new Set(events.map((e) => e.session));
+  const activitySince = events.find((e) => e.event !== 'Task' && e.event !== 'Incident')?.ts ?? null;
+  const loggableCommitSessions = [...commitSessions].filter((id) => (sessionsById.get(id)?.last ?? '') >= (activitySince ?? '~'));
+  // Logging gaps: a session that committed well after its last logged event was not being
+  // logged (for example, Claude Code opened it outside the repository, so the hooks never loaded).
+  const lastLogged = new Map();
+  // Only what the hooks record on their own counts; usage, tasks or incidents recorded by hand do not.
+  for (const e of events) if (['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure'].includes(e.event)) lastLogged.set(e.session, e.ts);
+  const gaps = [];
+  for (const id of commitSessions) {
+    const logged = lastLogged.get(id);
+    const late = realCommits.filter((c) => c.session === id && activitySince && c.date >= activitySince
+      && (!logged || new Date(c.date) - new Date(logged) > 30 * 60000));
+    if (late.length) gaps.push({ session: id, url: sessionUrl(id), commits: late.length, lastLogged: logged ?? null });
+  }
+  const tests = sessionRows.reduce((a, s) => ({ runs: a.runs + s.tests, failed: a.failed + s.testsFailed }), { runs: 0, failed: 0 });
+
+  const areas = {
+    workload: {
+      openPrs: prs.filter((p) => p.state === 'open').length,
+      openTasks: board.filter((t) => !['done', 'abandoned'].includes(t.status)).length,
+      blockedTasks: board.filter((t) => !['done', 'abandoned'].includes(t.status) && (t.status === 'blocked' || t.blocker)).length,
+      incidents7d: incidents.filter((i) => i.ts >= since(7)).length,
+      securityIncidents: incidents.filter((i) => i.type === 'security').length,
+      failedTestRuns7d: events.filter((e) => e.kind === 'test' && e.ok === false && e.ts >= since(7)).length,
+    },
+    agents: sessionRows.filter((s) => s.active).map((s) => {
+      const task = board.find((t) => t.sessions.includes(s.id) && t.status !== 'done');
+      return { session: s.id, url: s.url, task: task?.id ?? null, title: task?.title ?? null, phase: task?.phase ?? null, progress: task?.progress ?? null,
+        models: Object.keys(s.models), tokens: Object.values(s.models).reduce((n, m) => n + m.input + m.output + m.cacheRead + m.cacheWrite5m + m.cacheWrite1h, 0),
+        cost: s.cost, errors: s.failures, subagents: s.activeSubagents, last: s.last };
+    }),
+    quality: {
+      firstPassRate: pct(done.filter((t) => (t.attempt ?? 1) === 1).length, done.length),
+      testPassRate: tests.runs ? pct(tests.runs - tests.failed, tests.runs) : null,
+      testRuns: tests.runs,
+      repeatedLessons: lessons.filter((l) => l.times >= 2).length,
+      regressions: incidents.filter((i) => i.type === 'agent_regression').length,
+      rollbackRate: pct(reverts, realCommits.length),
+      rejectionRate: pct(closedUnmerged, prs.filter((p) => p.state !== 'open').length),
+      findingsPerPr: merged.filter((p) => p.reviewed).length ? Math.round((findings.length / merged.filter((p) => p.reviewed).length) * 10) / 10 : null,
+      overEngineering: null, // not measurable from these sources yet
+    },
+    performance: sessionRows.filter((s) => s.commits || s.tools).slice(0, 25).map((s) => ({
+      session: s.id, url: s.url, last: s.last, outcomes: s.commits, tasksDone: board.filter((t) => t.status === 'done' && t.sessions.includes(s.id)).length,
+      touchMinutes: s.touchMinutes, rework: s.reworkedFiles, failures: s.failures, tests: s.tests, testsFailed: s.testsFailed, cost: s.cost,
+    })),
+    aiShare: pct(realCommits.filter((c) => c.session).length, realCommits.length),
+    governance: {
+      approvals: merged.length,
+      unreviewedMerged: merged.filter((p) => !p.reviewed).map((p) => p.number),
+      stopLossTriggers: alerts.filter((a) => a.kind === 'stop-loss').length,
+      policyUpdates: incidents.filter((i) => i.policyUpdated).length,
+      policyViolations: lessons.reduce((n, l) => n + l.guards.filter((g) => !g.ok).length, 0),
+      highRiskSessions: sessionRows.filter((s) => s.highRisk.length).map((s) => ({ session: s.id, url: s.url, files: s.highRisk })),
+      auditCompleteness: pct(loggableCommitSessions.filter((id) => loggedSessions.has(id) && !gaps.some((g) => g.session === id)).length, loggableCommitSessions.length),
+      loggingGaps: gaps,
+      loggingSince: activitySince,
+    },
+  };
+
+  // ------------------------------------------------------------- attention
+  const behind = Number(git('rev-list', '--count', 'HEAD..origin/main').trim() || 0);
+  const starts = events.filter((e) => e.event === 'SessionStart').sort((a, b) => b.ts.localeCompare(a.ts));
   const attention = [];
   for (const l of lessons) for (const g of l.guards) if (!g.ok) attention.push({ level: 'critical', text: `${l.id} lost its guard: "${g.text}" is no longer in ${g.file}.` });
+  for (const a of alerts.filter((x) => x.kind === 'stop-loss' && x.ts >= since(2))) attention.push({ level: 'critical', text: `Stop-loss in ${a.session.slice(-8)}: ${a.rule} (${a.key}).` });
+  for (const t of board.filter((x) => x.blocker && x.status !== 'done')) attention.push({ level: 'warning', text: `${t.id} is blocked: ${t.blocker}` });
+  for (const t of board.filter((x) => (x.attempt ?? 1) > (cfg.stopLoss?.maxTaskAttempts ?? 99) && x.status !== 'done')) attention.push({ level: 'warning', text: `${t.id} is on attempt ${t.attempt}.` });
   for (const l of lessons.filter((x) => x.times >= 2)) attention.push({ level: 'warning', text: `${l.id} has happened ${l.times} times: ${l.title}.` });
   if (behind > 0) attention.push({ level: 'warning', text: `This branch is ${behind} commits behind main (lesson L-013).` });
+  for (const n of areas.governance.unreviewedMerged) attention.push({ level: 'info', text: `PR #${n} was merged with no independent review recorded.` });
   for (const p of prs.filter((x) => x.state === 'open')) attention.push({ level: 'info', text: `PR #${p.number} is open: ${p.title}.` });
   for (const s of starts.filter((x) => x.behind_main > 0).slice(0, 5)) attention.push({ level: 'info', text: `A session started ${s.behind_main} commits behind main on ${s.ts.slice(0, 10)}.` });
+  for (const g of areas.governance.loggingGaps) attention.push({ level: 'warning', text: `Session ${g.session.slice(-8)} made ${g.commits} commit(s) while not being logged${g.lastLogged ? ` (last logged ${g.lastLogged.slice(0, 16).replace('T', ' ')} UTC)` : ''}. Its hooks were not running.` });
+  if (economics.unpriced.length) attention.push({ level: 'warning', text: `No price configured for ${economics.unpriced.join(', ')}; its cost is not counted.` });
+  for (const a of alerts.filter((x) => x.kind === 'waste' && x.ts >= since(2))) attention.push({ level: 'info', text: `Wasted effort in ${a.session.slice(-8)}: ${a.rule} (${a.key}).` });
 
-  const findings = prs.flatMap((p) => p.findings);
   return {
-    generatedAt: new Date().toISOString(),
+    generatedAt: now.toISOString(),
     repo: 'skchiew-bot/voicelab2',
     head: git('rev-parse', '--short', 'HEAD').trim(),
     branch: git('rev-parse', '--abbrev-ref', 'HEAD').trim(),
     totals: {
-      commits: all.filter((c) => !c.merge).length,
-      prsMerged: prs.filter((p) => p.state === 'merged').length,
-      findings: findings.length,
-      findingsFixed: findings.filter((f) => f.fixed).length,
-      highFindings: findings.filter((f) => /^high/i.test(f.severity)).length,
-      lessons: lessons.length,
-      guards: lessons.reduce((n, l) => n + l.guards.length, 0),
-      guardsOk: lessons.reduce((n, l) => n + l.guards.filter((g) => g.ok).length, 0),
-      repeats: lessons.filter((l) => l.times >= 2).length,
-      sessions: sessions.size,
-      toolCalls: events.filter((e) => e.tool).length,
-      failures: events.filter((e) => e.event === 'PostToolUseFailure').length,
+      commits: realCommits.length, prsMerged: merged.length, findings: findings.length,
+      findingsFixed: findings.filter((f) => f.fixed).length, highFindings: findings.filter((f) => /^high/i.test(f.severity)).length,
+      lessons: lessons.length, guards: lessons.reduce((n, l) => n + l.guards.length, 0),
+      guardsOk: lessons.reduce((n, l) => n + l.guards.filter((g) => g.ok).length, 0), repeats: lessons.filter((l) => l.times >= 2).length,
+      sessions: sessionRows.length, toolCalls: events.filter((e) => e.tool).length, failures: events.filter((e) => e.event === 'PostToolUseFailure').length,
+      incidents: incidents.length, openTasks: areas.workload.openTasks,
     },
-    attention,
-    prs,
-    lessons,
-    sessions: [...sessions.values()].map((s) => ({ ...s, files: s.files.size })).sort((a, b) => (b.last ?? '').localeCompare(a.last ?? '')),
-    commits: all.filter((c) => !c.merge).slice(0, 60),
-    failures,
+    attention, areas, economics, board, incidents, alerts: alerts.slice(0, 50), registry: registry.map(({ costUnits, ...r }) => r),
+    prs, lessons,
+    sessions: sessionRows.map(({ costUnits, ...s }) => s),
+    commits: realCommits.slice(0, 60),
+    failures: events.filter((e) => e.event === 'PostToolUseFailure').sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, 50),
+    budgets: cfg.stopLoss ?? {},
   };
 }
 
@@ -158,7 +385,7 @@ export function renderHtml(template, report) {
 const invoked = (() => { try { return pathToFileURL(realpathSync(process.argv[1] ?? '')).href; } catch { return ''; } })();
 if (invoked && invoked === pathToFileURL(realpathSync(fileURLToPath(import.meta.url))).href) {
   const report = build();
-  const json = JSON.stringify(report, null, 2);
+  const json = JSON.stringify(report, (k, v) => (typeof v === 'bigint' ? v.toString() : v), 2);
   if (arg('--json')) writeFileSync(arg('--json'), json);
   if (arg('--html')) {
     const templatePath = path.join(root, 'devlog', 'dashboard.html');

@@ -249,7 +249,7 @@ export async function abandonStaleRuns(d: RunDeps, actorId: string | null, e: { 
 }
 
 /** End a run nobody will come back to, wiping what it held sensitive. The row must be locked by the caller. */
-async function abandonRow(c: pg.PoolClient, r: { id: string; state: RunState }) {
+export async function abandonRow(c: pg.PoolClient, r: { id: string; state: RunState }) {
   const state = r.state;
   const ended: RunState = { ...state, status: 'ended', outcome: 'abandoned', node: null, awaiting: undefined, vars: Object.fromEntries(Object.entries(state.vars).filter(([k]) => !state.sensitive.includes(k))) };
   await c.query(

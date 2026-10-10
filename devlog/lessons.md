@@ -9,7 +9,7 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:** one or more lines `` `path` › "exact text" ``. The text must appear in that file, usually a test title. The test fails if a guard's file or text is removed, so a lesson cannot quietly lose its protection.
 
 ### L-001: Check-then-act needs a lock or an atomic claim
-- **Seen:** 8 times. Racing final callbacks ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)); two reconciliation checks at once ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)); two replies both firing an integration write ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)); the dial retry bypassing the capacity lock, and inbound capacity decided without it ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)); concurrent rate changes (Phase 0). Two approved changes to one flow could both go live, the older silently undoing the newer; the drop watchdog could flag a call twice (Phase 5 independent review, 2026-10-10). Two audio finishes at once recorded every phrase twice and spent the voice provider twice (Phase 6 independent review, 2026-10-10). Contact limits were read without a lock, so three simultaneous dials to one person all passed; a case closed while its number was being looked up was still dialled (Phase 7 independent review, 2026-10-10).
+- **Seen:** 9 times. Racing final callbacks ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)); two reconciliation checks at once ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)); two replies both firing an integration write ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)); the dial retry bypassing the capacity lock, and inbound capacity decided without it ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)); concurrent rate changes (Phase 0). Two approved changes to one flow could both go live, the older silently undoing the newer; the drop watchdog could flag a call twice (Phase 5 independent review, 2026-10-10). Two audio finishes at once recorded every phrase twice and spent the voice provider twice (Phase 6 independent review, 2026-10-10). Contact limits were read without a lock, so three simultaneous dials to one person all passed; a case closed while its number was being looked up was still dialled (Phase 7 independent review, 2026-10-10). A relay connection closing ended the call's run even when a newer connection had taken the call over, hanging up on the caller mid-conversation (live call voice link independent review, 2026-10-10).
 - **Rule:** Any "read state, decide, write" path that two requests can reach at once takes a lock (`pg_advisory_xact_lock`, `SELECT … FOR UPDATE`) or claims the work atomically, and re-checks inside the lock. Write the simultaneous-requests test first.
 - **Guards:**
   - `tests/telephony.test.ts` › "survives the same final callback arriving three times at once"
@@ -23,6 +23,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/cases.test.ts` › "does not call a case that was closed while its number was being looked up"
   - `tests/knowledge.test.ts` › "approves each level once and in order when three people approve at the same moment, and publishes a draft once"
   - `tests/control-actions.test.ts` › "holds dials back once the minute's quota is used, even when they arrive at the same moment, and lifts when cleared"
+  - `tests/relay.test.ts` › "keeps serving the call on a new connection when the old one closes after it"
 
 ### L-002: Never repeat an action whose outcome is unknown
 - **Seen:** The dial retry re-dialled after a timeout, risking two calls to one person ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)).
@@ -301,7 +302,20 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/helpers.test.ts` › "drops a test database even when the server's own worker is still in it, and stops on any other error"
 
 ### L-039: Judge a failure by what happened, not by one name for it
-- **Seen:** The live call voice link first treated only the outcome `error` as a broken workflow. A client's system failing ends a run as `integration_failed`, so the caller would have been left in silence and the call hung up, with no callback recorded (found by the relay's own failure test, 2026-10-10).
+- **Seen:** The live call voice link first treated only the outcome `error` as a broken workflow. A client's system failing ends a run as `integration_failed`, so the caller would have been left in silence and the call hung up, with no callback recorded (found by the relay's own failure test, 2026-10-10). The relay then read every "refused" answer from a run as harmless, so a reply left half-applied by a stopped server left the caller in silence on every turn (live call voice link independent review, 2026-10-10).
 - **Rule:** Decide that something failed from the record of the failure (here, an error was recorded on the run), not from a list of outcome names that a new kind of failure can miss. Test the path with a failure of a different kind from the one you had in mind.
 - **Guards:**
   - `tests/relay.test.ts` › "never leaves the caller in silence when the workflow fails: records a callback first, says the holding message, and ends"
+  - `tests/relay.test.ts` › "falls back, once, when a reply was left half-applied by a server that stopped"
+
+### L-040: Never hold a pooled connection while waiting for another from the same pool
+- **Seen:** The live call voice link took a lock on its own pooled connection and then needed more connections to start the call, so ten calls answered at once took every connection and all waited for ever; every route of the server hung, and the pool had no time limit to break it (live call voice link independent review, 2026-10-10).
+- **Rule:** Take a lock inside the transaction that does the work (`pg_advisory_xact_lock`, `FOR UPDATE`), or claim the work in one short transaction and do it after; never keep a connection while another is fetched. The pool gives up after a time limit instead of waiting for ever. Test with more simultaneous requests than the pool has connections.
+- **Guards:**
+  - `tests/relay.test.ts` › "does not hang the server when more calls are answered at once than it has database connections"
+
+### L-041: A signature shared by every request proves who sent it, not what it may touch
+- **Seen:** Twilio signs the relay's bare address, so every relay connection to a provider carries the same signature; anyone who saw it once could open connections at will and attach to a call whose ids they knew (live call voice link independent review, 2026-10-10).
+- **Rule:** When a provider's signature does not cover the thing being acted on, add a key of your own for that thing (here, one made for each call and handed to the provider in the TwiML), and refuse anything without it.
+- **Guards:**
+  - `tests/relay.test.ts` › "serves no call it is not: the id of another call, the wrong Twilio call, a malformed id, or a missing or wrong call key ends the line and starts nothing"

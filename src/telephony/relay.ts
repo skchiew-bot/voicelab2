@@ -24,16 +24,17 @@ export function relaySettings(params: Record<string, unknown>): RelaySettings {
 const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 
 /**
- * Hand an answered call to the relay. The call is named by a parameter, not in the address, so the address Twilio signs
- * is the bare WebSocket URL. Nothing is said until the workflow says it: there is no welcome greeting.
+ * Hand an answered call to the relay. The call is named by a parameter, with a key made for that call, not in the
+ * address, so the address Twilio signs is the bare WebSocket URL. Nothing is said until the workflow says it: there is
+ * no welcome greeting.
  */
-export function twimlRelay(wsUrl: string, callId: string, s: RelaySettings): string {
+export function twimlRelay(wsUrl: string, callId: string, token: string, s: RelaySettings): string {
   const attrs: [string, string | undefined][] = [
     ['url', wsUrl], ['language', s.language], ['ttsProvider', s.ttsProvider], ['voice', s.voice],
     ['transcriptionProvider', s.transcriptionProvider], ['interruptible', 'speech'], ['dtmfDetection', 'false'],
   ];
   const a = attrs.filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => `${k}="${xml(v!)}"`).join(' ');
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><ConversationRelay ${a}><Parameter name="callId" value="${xml(callId)}"/></ConversationRelay></Connect></Response>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><ConversationRelay ${a}><Parameter name="callId" value="${xml(callId)}"/><Parameter name="token" value="${xml(token)}"/></ConversationRelay></Connect></Response>`;
 }
 
 /** What Twilio sends. Anything else (or anything malformed) is ignored, never trusted. */

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { parseKey } from '../src/secrets.js';
-import { mediaLink, mediaLinkValid, MEDIA_LINK_SECONDS, openRelay } from '../src/store/relay.js';
+import { failed, mediaLink, mediaLinkValid, MEDIA_LINK_SECONDS, openRelay, relayCallToken, STUCK_REPLY_MS } from '../src/store/relay.js';
 import { parseRelay, relaySettings, sayMessages, twimlRelay } from '../src/telephony/relay.js';
 import type { WorkflowDefinition } from '../src/workflows/definition.js';
 
@@ -36,9 +36,9 @@ describe('the speech relay messages', () => {
     const s = relaySettings({ relayLanguage: 'ms-MY', relayVoice: 'Aoede "x"><Hangup/>', relayTtsProvider: 'Google' });
     expect(s).toEqual({ language: 'ms-MY', ttsProvider: 'Google', voice: undefined, transcriptionProvider: undefined });
     expect(relaySettings({}).language).toBe('en-US');
-    const x = twimlRelay('wss://v.test/relay/twilio/p', 'c-1"/><Hangup/>', s);
+    const x = twimlRelay('wss://v.test/relay/twilio/p', 'c-1"/><Hangup/>', 'k1', s);
     expect(x).toContain('<Connect><ConversationRelay url="wss://v.test/relay/twilio/p" language="ms-MY" ttsProvider="Google" interruptible="speech" dtmfDetection="false">');
-    expect(x).toContain('<Parameter name="callId" value="c-1&quot;/&gt;&lt;Hangup/&gt;"/>');
+    expect(x).toContain('<Parameter name="callId" value="c-1&quot;/&gt;&lt;Hangup/&gt;"/><Parameter name="token" value="k1"/>');
     expect(x).not.toContain('welcomeGreeting');
   });
 
@@ -141,7 +141,9 @@ async function connect(sig: string | null = wsSig(), path?: string): Promise<Lin
     async until(count) { for (let i = 0; i < 200 && got.length < count; i++) await new Promise((r) => setTimeout(r, 10)); return got; },
   };
 }
-const setup = (callSid: string, callId: string) => ({ ...fixture.inbound.setup, callSid, customParameters: { callId } });
+const setup = (callSid: string, callId: string, token?: string) => ({ ...fixture.inbound.setup, callSid, customParameters: { callId, token: token ?? relayCallToken(parseKey(env.config.VOICELAB_SECRET_KEY), callId) } });
+const relayDeps = () => ({ runs: { pool: env.pool, key: parseKey(env.config.VOICELAB_SECRET_KEY) }, baseUrl: BASE });
+const callbacks = async (callId: string) => (await env.pool.query('SELECT count(*)::int AS n FROM callback_requests WHERE call_id = $1', [callId])).rows[0].n as number;
 const prompt = (voicePrompt: string, last = true) => ({ type: 'prompt', voicePrompt, lang: 'en-US', last });
 const runOf = async (callId: string) => (await env.pool.query(`SELECT id, status, outcome, state, sealed, kind FROM workflow_runs WHERE call_id = $1`, [callId])).rows;
 const settle = () => new Promise((r) => setTimeout(r, 50));
@@ -154,7 +156,7 @@ describe('a live call through the speech relay', () => {
     await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
     const call = await ring();
     expect(call.twiml).toContain(`<ConversationRelay url="wss://voicelab.test/relay/twilio/${twilioId}" language="en-GB" ttsProvider="ElevenLabs"`);
-    expect(call.twiml).toContain(`<Parameter name="callId" value="${call.callId}"/>`);
+    expect(call.twiml).toContain(`<Parameter name="callId" value="${call.callId}"/><Parameter name="token" value="${relayCallToken(parseKey(env.config.VOICELAB_SECRET_KEY), call.callId)}"/>`);
   });
 
   it('will not let a number answer with another client\'s workflow, and only an admin sets it', async () => {
@@ -239,7 +241,7 @@ describe('a live call through the speech relay', () => {
   it('starts the workflow once, says its first lines once, and fails nobody when five connections for one call arrive at the same moment', async () => {
     await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
     const { callSid, callId } = await ring();
-    const d = { runs: { pool: env.pool, key: parseKey(env.config.VOICELAB_SECRET_KEY) }, baseUrl: BASE };
+    const d = relayDeps();
     const opened = await Promise.all(Array.from({ length: 5 }, () => openRelay(d, twilioId, setup(callSid, callId))));
     expect(await runOf(callId)).toHaveLength(1);
     expect(opened.map((o) => o.send.length).sort()).toEqual([0, 0, 0, 0, 2]);
@@ -247,9 +249,11 @@ describe('a live call through the speech relay', () => {
     expect((await env.pool.query('SELECT count(*)::int AS n FROM callback_requests WHERE call_id = $1', [callId])).rows[0].n).toBe(0);
   });
 
-  it('serves no call it is not: another call\'s id, the wrong Twilio call, or a malformed id ends the line and starts nothing', async () => {
+  it('serves no call it is not: the id of another call, the wrong Twilio call, a malformed id, or a missing or wrong call key ends the line and starts nothing', async () => {
     const mine = await ring(); const theirs = await ring();
-    for (const s of [setup(theirs.callSid, mine.callId), setup('CA_nope', mine.callId), setup(mine.callSid, 'not-a-uuid')]) {
+    const key = parseKey(env.config.VOICELAB_SECRET_KEY);
+    for (const s of [setup(theirs.callSid, mine.callId), setup('CA_nope', mine.callId), setup(mine.callSid, 'not-a-uuid'),
+      setup(mine.callSid, mine.callId, relayCallToken(key, theirs.callId)), setup(mine.callSid, mine.callId, 'f'.repeat(64)), { ...setup(mine.callSid, mine.callId), customParameters: { callId: mine.callId } }]) {
       const line = await connect();
       line.send(s);
       expect(await line.until(1)).toEqual([{ type: 'end' }]);
@@ -257,6 +261,56 @@ describe('a live call through the speech relay', () => {
     }
     expect(await runOf(mine.callId)).toHaveLength(0);
     expect(await runOf(theirs.callId)).toHaveLength(0);
+  });
+
+  it('does not hang the server when more calls are answered at once than it has database connections', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    const calls = []; for (let i = 0; i < 14; i++) calls.push(await ring());
+    const d = relayDeps();
+    const all = Promise.all(calls.map((c) => openRelay(d, twilioId, setup(c.callSid, c.callId))));
+    const r = await Promise.race([all, new Promise<'hung'>((ok) => setTimeout(() => ok('hung'), 20_000))]);
+    expect(r).not.toBe('hung');
+    expect((r as { send: unknown[] }[]).every((o) => o.send.length === 2)).toBe(true);
+  }, 30_000);
+
+  it('keeps serving the call on a new connection when the old one closes after it', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    const { callSid, callId } = await ring();
+    const old = await connect();
+    old.send(setup(callSid, callId)); await old.until(2);
+    const fresh = await connect();
+    fresh.send(setup(callSid, callId)); await settle(); await settle();
+    old.ws.close(); await old.closed; await settle();
+    expect((await runOf(callId))[0].status).toBe('awaiting_reply');                       // the stale line closing did not end it
+    fresh.send(prompt('yes'));
+    expect((await fresh.until(1))[0]).toEqual({ type: 'text', token: 'Please say your secret word.', last: true });
+    fresh.ws.close(); await fresh.closed; await settle();
+    expect((await runOf(callId))[0]).toMatchObject({ status: 'ended', outcome: 'abandoned' });  // the line that held it did
+  });
+
+  it('falls back, once, when a reply was left half-applied by a server that stopped', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    const { callSid, callId } = await ring();
+    const line = await connect();
+    line.send(setup(callSid, callId)); await line.until(2);
+    const [run] = await runOf(callId);
+    await env.pool.query(`UPDATE workflow_runs SET status = 'processing', claimed_at = now() - make_interval(secs => $2) WHERE id = $1`, [run.id, STUCK_REPLY_MS / 1000 + 5]);
+    line.send(prompt('yes'));                                                                   // refused as "being applied", but nothing is
+    const got = await line.until(4);
+    expect(got.slice(2).map((m) => m.type)).toEqual(['text', 'end']);
+    expect(await callbacks(callId)).toBe(1);
+    line.ws.close(); await line.closed;
+    // a reconnect after the fallback ends the line and records nothing more
+    const again = await connect();
+    again.send(setup(callSid, callId));
+    expect(await again.until(1)).toEqual([{ type: 'end' }]);
+    again.ws.close(); await again.closed;
+    expect(await callbacks(callId)).toBe(1);
+    // two failures landing on one call (the server's last-resort handler and the relay's own) record one callback
+    const tenant = (await env.pool.query('SELECT tenant_id FROM calls WHERE id = $1', [callId])).rows[0].tenant_id;
+    const session = { providerId: twilioId, callId, tenantId: tenant, projectId: null, runId: null, version: 0, ended: false, owner: 'x' };
+    await Promise.all([failed(relayDeps(), { ...session }), failed(relayDeps(), { ...session })]);
+    expect(await callbacks(callId)).toBe(1);
   });
 
   it('ends a run the caller hung up on, wiping what it held sensitive', async () => {

@@ -18,7 +18,7 @@ import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from 
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, gateOutbound, normalizeE164, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
 import { addNumber, callKnown, callQueued, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
-import { closeRelay, mediaLinkValid, onRelayMessage, openRelay, type RelayDeps, type RelaySession } from './store/relay.js';
+import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, type RelayDeps, type RelaySession } from './store/relay.js';
 import { recordingAudio } from './store/recordings.js';
 import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
 import { DEFAULT_FALLBACK } from './resilience/fallback.js';
@@ -570,7 +570,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const queued = known && ev ? await callQueued(callDeps, provider.id, ev.providerCallId) : false;
     // A call with a workflow to run is handed to the speech relay; one without hears the test message.
     const relayed = known && !queued && ev ? await relayTarget(callDeps, provider.id, ev.providerCallId) : null;
-    if (relayed) return reply.type('text/xml').send(twimlRelay(relayUrl(provider.id), relayed, relaySettings(provider.params)));
+    if (relayed) return reply.type('text/xml').send(twimlRelay(relayUrl(provider.id), relayed, relayCallToken(key, relayed), relaySettings(provider.params)));
     return reply.type('text/xml').send(known ? (queued ? twimlHold(`${callDeps.baseUrl}/webhooks/twilio/${provider.id}/voice${callId ? `?callId=${callId}` : ''}`) : twimlTestCall()) : twimlReject());
   };
   app.post('/webhooks/twilio/:providerId/status', twilioHook(false));
@@ -607,7 +607,8 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
       socket.on('message', (data: Buffer) => {
         const m = parseRelay(data.toString('utf8'));
         if (!m) return;
-        const askedAt = session?.version ?? 0;
+        // The question the call was on when these words arrived (before setup has finished, worked out once it has).
+        const askedAt = session ? session.version : undefined;
         // One message at a time, in order: a turn finishes before the next is looked at.
         queue = queue.then(async () => {
           if (m.type === 'setup') {
@@ -620,8 +621,13 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
             return;
           }
           if (session) send(await onRelayMessage(relayDeps, session, m, askedAt));
-        // Something below failed outright (the database, say): the caller still hears a holding line, never silence.
-        }).catch(() => { send([{ type: 'text', token: DEFAULT_FALLBACK.holdingMessage, last: true }, { type: 'end' }]); });
+        // Something below failed outright (the database, say): the callback is still attempted and the caller still hears a
+        // holding line, never silence; then the line is closed.
+        }).catch(async () => {
+          const out = session ? await relayFailed(relayDeps, session).then((r) => r.send).catch(() => null) : null;
+          send(out ?? [{ type: 'text', token: DEFAULT_FALLBACK.holdingMessage, last: true }, { type: 'end' }]);
+          socket.close();
+        });
       });
       socket.on('close', () => {
         clearTimeout(setupTimer);

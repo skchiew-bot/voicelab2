@@ -171,7 +171,9 @@ describe('activity hook', () => {
     const leaks = ['0123456789abcdef', 'abcDEF1', 'abcdefABCDEF', 's3cr3t', 'hunter2', 'abcdEFGH', '1a2b3c', 'eyJ', 'ops@', '5551234', '345', '０１２'];
     for (const s of shapes) hook(dir, { hook_event_name: 'PostToolUse', session_id: 's1', tool_name: 'Bash', tool_input: { description: `Use ${s}` } });
     expect(lines(dir)).toHaveLength(shapes.length);
-    for (const leak of leaks) expect(spooled(dir), leak).not.toContain(leak);
+    // The hook's own timestamps are left out: '345' can be the milliseconds of the moment it ran (lesson L-037).
+    const recorded = spooled(dir).replace(/"ts":"[^"]*"/g, '"ts":""');
+    for (const leak of leaks) expect(recorded, leak).not.toContain(leak);
     hook(dir, { hook_event_name: 'PostToolUse', session_id: 's1', tool_name: 'Bash', tool_input: { description: 'Run the billing tests' } });
     expect(lines(dir).at(-1)!.target).toBe('Run the billing tests');
   });

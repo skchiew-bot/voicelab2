@@ -5,6 +5,7 @@ import { withActor, type Actor } from '../db.js';
 import { hangUpCalls, type CallDeps } from '../store/calls.js';
 import { chargeExtraChannels, expireQueued, getEntitlement, providerLoad, setEntitlement } from '../store/concurrency.js';
 import { fundingStatus, setThresholds } from '../store/funding-monitor.js';
+import { clearTransferSettings, getTransferSettings, setTransferSettings } from '../store/transfer.js';
 import { getFallbackPlan, getPolicy, getRoutes, listFailovers, providerHealthViews, recordSample, setFallbackPlan, setPolicy, setRoutes } from '../store/resilience.js';
 
 interface Ctx { pool: pg.Pool; callDeps: CallDeps; internal(req: FastifyRequest): Promise<{ userId: string; actor: Actor }> }
@@ -56,6 +57,21 @@ export function registerResilienceRoutes(app: FastifyInstance, ctx: Ctx): void {
   app.get('/internal/tenants/:tenantId/fallback', async (req) => {
     const { tenantId } = z.object({ tenantId: id }).parse(req.params);
     return run(req, (c) => getFallbackPlan(c, tenantId));
+  });
+
+  // Where a client's calls go when a workflow passes the caller to a person: the client's agent phone.
+  app.put('/internal/tenants/:tenantId/transfer', async (req) => {
+    const { tenantId } = z.object({ tenantId: id }).parse(req.params);
+    const b = z.object({ agentNumber: z.string().min(1).max(40), ringSeconds: z.number().int().min(5).max(60).default(25), whisper: z.boolean().default(true) }).strict().parse(req.body);
+    return run(req, (c, u) => setTransferSettings(c, u, tenantId, b));
+  });
+  app.get('/internal/tenants/:tenantId/transfer', async (req) => {
+    const { tenantId } = z.object({ tenantId: id }).parse(req.params);
+    return run(req, (c) => getTransferSettings(c, tenantId));
+  });
+  app.delete('/internal/tenants/:tenantId/transfer', async (req) => {
+    const { tenantId } = z.object({ tenantId: id }).parse(req.params);
+    return run(req, (c, u) => clearTransferSettings(c, u, tenantId));
   });
 
   // ---- concurrency

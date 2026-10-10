@@ -14,6 +14,14 @@ const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 const E164 = /^\+[1-9][0-9]{7,14}$/;
 const DOC = '<?xml version="1.0" encoding="UTF-8"?>';
 
+/**
+ * Where an agent phone may be. For now only Malaysian numbers (+60), so a changed setting cannot send the agent's leg,
+ * which we pay for, to an expensive destination abroad (toll fraud). Checked when the number is set and again at dial
+ * time. It can be widened per client later.
+ */
+const AGENT_NUMBER = /^\+60[1-9][0-9]{7,9}$/;
+export const agentNumberAllowed = (e164: string) => AGENT_NUMBER.test(e164);
+
 export interface DialPlan { agent: string; callerId: string; ringSeconds: number; actionUrl: string; whisperUrl: string | null }
 
 /**
@@ -22,6 +30,7 @@ export interface DialPlan { agent: string; callerId: string; ringSeconds: number
  */
 export function twimlDialAgent(p: DialPlan): string {
   if (!E164.test(p.agent) || !E164.test(p.callerId)) throw new Error('A transfer needs an agent number and one of our own numbers.');
+  if (!agentNumberAllowed(p.agent)) throw new Error('An agent number must be Malaysian (+60).');
   const ring = Math.min(60, Math.max(5, Math.trunc(p.ringSeconds)));
   const number = p.whisperUrl ? `<Number url="${xml(p.whisperUrl)}" method="POST">${p.agent}</Number>` : `<Number>${p.agent}</Number>`;
   return `${DOC}<Response><Dial action="${xml(p.actionUrl)}" method="POST" timeout="${ring}" callerId="${p.callerId}">${number}</Dial></Response>`;
@@ -60,6 +69,11 @@ export const twimlWhisper = (text: string, acceptUrl: string) =>
  * How the dial to the agent ended. Only a dial that was answered put the caller through to a person; anything else,
  * including a value we have never seen, means no one was reached.
  */
+/** How long the agent's leg lasted, from `DialCallDuration`: whole seconds, or null when it is missing or unreadable. */
+export function dialSeconds(v: string | undefined): number | null {
+  return v !== undefined && /^[0-9]{1,7}$/.test(v) ? Number(v) : null;
+}
+
 export function dialOutcome(dialCallStatus: string | undefined): 'answered' | 'unanswered' | 'failed' {
   if (dialCallStatus === 'completed' || dialCallStatus === 'answered') return 'answered';
   if (dialCallStatus === 'busy' || dialCallStatus === 'no-answer' || dialCallStatus === 'canceled') return 'unanswered';

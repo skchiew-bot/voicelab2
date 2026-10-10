@@ -5,7 +5,7 @@ import WebSocket from 'ws';
 import { parseKey } from '../src/secrets.js';
 import { relayCallToken } from '../src/store/relay.js';
 import { twimlRelay } from '../src/telephony/relay.js';
-import { dialOutcome, twimlDialAgent, twimlWhisper, whisperText } from '../src/telephony/transfer.js';
+import { agentNumberAllowed, dialOutcome, dialSeconds, twimlDialAgent, twimlWhisper, whisperText } from '../src/telephony/transfer.js';
 import type { WorkflowDefinition } from '../src/workflows/definition.js';
 
 const relayFixture = JSON.parse(readFileSync(new URL('./fixtures/twilio-relay.json', import.meta.url), 'utf8'));
@@ -23,6 +23,17 @@ describe('the TwiML that puts a caller through to a person', () => {
     expect(twimlDialAgent({ ...plan, whisperUrl: null, ringSeconds: 600 })).toContain('timeout="60" callerId="+60300000888"><Number>+60312345678</Number>');
     expect(() => twimlDialAgent({ ...plan, agent: '+6031"/><Hangup/>' })).toThrow();
     expect(() => twimlDialAgent({ ...plan, callerId: '' })).toThrow();
+    // only a Malaysian agent number is ever rung, even if one from elsewhere reached this far (toll fraud)
+    expect(() => twimlDialAgent({ ...plan, agent: '+6512345678' })).toThrow(/Malaysian/);
+    expect(() => twimlDialAgent({ ...plan, agent: '+14155550100' })).toThrow(/Malaysian/);
+  });
+
+  it('allows only a Malaysian agent number, and reads the length of the agent leg strictly', () => {
+    for (const ok of ['+60312345678', '+601123456789', '+6082123456']) expect(agentNumberAllowed(ok)).toBe(true);
+    for (const no of ['+6512345678', '+14155550100', '+44207946000', '+600312345678', '+60123', '+6031234567890', '60312345678', '+60 312345678']) expect(agentNumberAllowed(no)).toBe(false);
+    expect(dialSeconds('61')).toBe(61);
+    expect(dialSeconds('0')).toBe(0);
+    for (const bad of [undefined, '', '-1', '1.5', '1e3', ' 61', 'abc']) expect(dialSeconds(bad)).toBeNull();
   });
 
   it('whispers the reason in fixed words and a spelt-out ticket reference, and nothing else', () => {
@@ -98,10 +109,30 @@ beforeAll(async () => {
   await must(put(`/internal/numbers/${askNumber}/workflow`, { workflowId: await liveWorkflow(tenantId, 'ask_flow', ask, ['yes'], 'promised') }));
   await must(put(`/internal/numbers/${bareNumber}/workflow`, { workflowId: await liveWorkflow(bareTenant, 'bare_flow', handoff, [], 'handoff_human') }));
   await must(put(`/internal/tenants/${tenantId}/transfer`, { agentNumber: '+60 3-8765 4321', ringSeconds: 20 }));
+  // Twilio's rates, per started minute: an inbound caller and the outbound agent leg at different rates. Room for many calls.
+  await rates(1000);
+  await must(post('/internal/fx', { currency: 'MYR', perUsd: '4.5', effectiveFrom: '2026-01-01T00:00:00Z' }));
+  await must(post('/internal/rate-card', { effectiveFrom: '2026-01-01T00:00:00Z', inboundCreditsPerMinute: '1', outboundCreditsPerMinute: '2', creditValueUsd: '0.01' }));
   await env.app.listen({ port: 0, host: '127.0.0.1' });
   port = (env.app.server.address() as { port: number }).port;
 });
 afterAll(async () => { await env?.teardown(); });
+
+/** A new charging version for the Twilio provider, in force from now, with this concurrency ceiling. */
+let rateClock = Date.parse('2026-01-01T00:00:00Z');
+async function rates(ceiling: number) {
+  // Each version is a moment later than the last (and never in the future), so the newest is the one in force.
+  rateClock = Math.min(Date.now() - 1000, Math.max(rateClock + 1000, Date.now() - 60_000));
+  await must(post(`/internal/providers/${twilioId}/charging`, {
+    effectiveFrom: new Date(rateClock).toISOString(), billingIncrementSeconds: 60, concurrencyLimit: ceiling,
+    components: [
+      { component: 'telephony_leg', unit: 'per_minute', rate: '0.0085', currency: 'USD', direction: 'inbound' },
+      { component: 'telephony_leg', unit: 'per_minute', rate: '0.0140', currency: 'USD', direction: 'outbound' },
+    ],
+  }));
+}
+/** How many channels the Twilio provider has in use, as every dial decision counts them. */
+const inUse = async () => (await must(env.call(env.staffToken, 'GET', '/internal/capacity'))).json().find((r: { providerId: string }) => r.providerId === twilioId).active as number;
 
 let n = 0;
 /** A caller rings one of our numbers; Twilio asks what to do. */
@@ -253,18 +284,184 @@ describe('a live caller passed to a person', () => {
     expect((await events(callId)).filter((e) => e.type === 'transfer.dialing')).toHaveLength(1);
   });
 
-  it('does not ring an agent, or record a callback, for a caller who has already gone', async () => {
+  it('records a callback, once, for a caller who asked for a person and hung up before the dial or while the agent phone rang', async () => {
+    // Gone before the dial started: no one is rung, but they asked for a person and did not reach one.
     const { callSid, callId } = await handedOver();
-    expect((await relayEnded(callSid, callId, { CallStatus: 'completed' })).body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
-    expect(await callRow(callId)).toMatchObject({ transfer_status: null });
-    expect(await callbacks(callId)).toEqual([]);
+    expect((await relayEnded(callSid, callId, { CallStatus: 'completed' })).body).toBe(HANGUP);
+    expect(await callRow(callId)).toMatchObject({ transfer_status: 'abandoned' });
+    expect(await callbacks(callId)).toEqual(['the caller asked for a person and hung up before they were put through']);
+    expect((await events(callId)).find((e) => e.type === 'transfer.abandoned')?.payload).toEqual({ when: 'before_dial' });
+    // asked again, and the call's end reported: still one
+    expect((await relayEnded(callSid, callId, { CallStatus: 'completed' })).body).toBe(HANGUP);
+    await twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: callSid, CallStatus: 'completed', CallDuration: '20', Direction: 'inbound', From: CUSTOMER, To: OUR });
+    expect(await callbacks(callId)).toHaveLength(1);
 
-    // hung up while the agent's phone was ringing: not a failure to reach anyone, and no callback (L-005)
+    // Hung up while the agent's phone was ringing (the owner's decision of 2026-10-10: they did not reach a person).
     const b = await handedOver();
     await relayEnded(b.callSid, b.callId);
-    expect((await dialled(b.callSid, b.callId, { CallStatus: 'completed', DialCallStatus: 'canceled' })).body).toContain('<Hangup/>');
+    expect((await dialled(b.callSid, b.callId, { CallStatus: 'completed', DialCallStatus: 'canceled', DialCallDuration: '0' })).body).toBe(HANGUP);
     expect(await callRow(b.callId)).toMatchObject({ transfer_status: 'abandoned' });
-    expect(await callbacks(b.callId)).toEqual([]);
+    expect(await callbacks(b.callId)).toEqual(['the caller asked for a person and hung up before anyone answered']);
+    expect((await dialled(b.callSid, b.callId, { CallStatus: 'completed', DialCallStatus: 'canceled' })).body).toBe(HANGUP);
+    await twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: b.callSid, CallStatus: 'completed', CallDuration: '40', Direction: 'inbound', From: CUSTOMER, To: OUR });
+    expect(await callbacks(b.callId)).toHaveLength(1);
+
+    // Hung up while the agent was hearing the whisper, before pressing 1: no person was reached either.
+    const w = await handedOver();
+    await relayEnded(w.callSid, w.callId);
+    await whisperReq(w.callSid, w.callId);
+    expect((await dialled(w.callSid, w.callId, { CallStatus: 'completed', DialCallStatus: 'completed', DialCallDuration: '6' })).body).toBe(HANGUP);
+    expect(await callRow(w.callId)).toMatchObject({ transfer_status: 'abandoned' });
+    expect(await callbacks(w.callId)).toHaveLength(1);
+
+    // Put through and then hung up: they reached a person, so no callback.
+    const p = await handedOver();
+    await relayEnded(p.callSid, p.callId);
+    await whisperReq(p.callSid, p.callId); await acceptReq(p.callSid, p.callId, '1');
+    expect((await dialled(p.callSid, p.callId, { CallStatus: 'completed', DialCallStatus: 'completed' })).body).toBe(HANGUP);
+    expect(await callRow(p.callId)).toMatchObject({ transfer_status: 'answered' });
+    expect(await callbacks(p.callId)).toEqual([]);
+  });
+
+  it('records the callback once when the call ends before Twilio asks what next, or at the same moment', async () => {
+    const end = (callSid: string) => twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: callSid, CallStatus: 'completed', CallDuration: '15', Direction: 'inbound', From: CUSTOMER, To: OUR });
+    // the end first, then Twilio's late question
+    const a = await handedOver();
+    expect((await end(a.callSid)).statusCode).toBe(204);
+    expect(await callRow(a.callId)).toMatchObject({ transfer_status: 'abandoned' });
+    expect(await callbacks(a.callId)).toEqual(['the caller asked for a person and hung up before they were put through']);
+    expect((await relayEnded(a.callSid, a.callId, { CallStatus: 'completed' })).body).toBe(HANGUP);
+    expect(await callbacks(a.callId)).toHaveLength(1);
+    // both at the same moment, twice over
+    const b = await handedOver();
+    await Promise.all([end(b.callSid), relayEnded(b.callSid, b.callId, { CallStatus: 'completed' }), end(b.callSid), relayEnded(b.callSid, b.callId, { CallStatus: 'completed' })]);
+    expect(await callbacks(b.callId)).toHaveLength(1);
+    expect((await events(b.callId)).filter((e) => e.type === 'transfer.abandoned')).toHaveLength(1);
+    // a call that never asked for a person records nothing when it ends
+    const plain = await ring(ASK);
+    await twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: plain.callSid, CallStatus: 'completed', CallDuration: '15', Direction: 'inbound', From: CUSTOMER, To: ASK });
+    expect(await callbacks(plain.callId)).toEqual([]);
+  });
+
+  it('refuses an agent number outside Malaysia when it is set, and again at dial time for one stored before the rule', async () => {
+    for (const abroad of ['+6512345678', '+14155550100', '+44 20 7946 0000']) {
+      const r = await put(`/internal/tenants/${bareTenant}/transfer`, { agentNumber: abroad });
+      expect(r.statusCode).toBe(400);
+      expect(r.json().error).toContain('Malaysian number (+60)');
+    }
+    expect((await env.call(env.staffToken, 'GET', `/internal/tenants/${bareTenant}/transfer`)).json()).toBeNull();
+    // the database refuses one too, whatever path writes it
+    await expect(env.pool.query(`INSERT INTO transfer_settings (tenant_id, agent_e164) VALUES ($1, '+6512345678')`, [bareTenant])).rejects.toThrow(/transfer_settings_agent_malaysian/);
+
+    // A setting stored before the rule existed (the check is NOT VALID, so old rows stay): it is never rung.
+    await env.pool.query('ALTER TABLE transfer_settings DROP CONSTRAINT transfer_settings_agent_malaysian');
+    await env.pool.query(`INSERT INTO transfer_settings (tenant_id, agent_e164) VALUES ($1, '+6512345678')`, [bareTenant]);
+    await env.pool.query(`ALTER TABLE transfer_settings ADD CONSTRAINT transfer_settings_agent_malaysian CHECK (agent_e164 ~ '^\\+60[1-9][0-9]{7,9}$') NOT VALID`);
+    try {
+      const { callSid, callId } = await handedOver(BARE);
+      const r = await relayEnded(callSid, callId, {}, BARE);
+      expect(r.body).not.toContain('<Dial'); expect(r.body).not.toContain('6512345678');
+      expect(r.body).toContain('<Say>');
+      expect(await callRow(callId)).toMatchObject({ transfer_status: 'unavailable' });
+      expect((await events(callId)).find((e) => e.type === 'transfer.unavailable')?.payload).toEqual({ reason: 'agent_number_not_allowed' });
+      expect(await callbacks(callId)).toEqual(['the caller asked for a person and there was no one to put them through to']);
+    } finally { await env.pool.query('DELETE FROM transfer_settings WHERE tenant_id = $1', [bareTenant]); }
+  });
+
+  it('counts the agent leg against the ceiling of the provider, and runs the ladder instead of dialling when the provider is full', async () => {
+    const a = await handedOver();
+    const before = await inUse();
+    await rates(before);                                         // every channel in use: no room for an agent leg
+    try {
+      const r = await relayEnded(a.callSid, a.callId);
+      expect(r.body).not.toContain('<Dial'); expect(r.body).toContain('<Say>');
+      expect(await callRow(a.callId)).toMatchObject({ transfer_status: 'unavailable' });
+      expect((await events(a.callId)).find((e) => e.type === 'transfer.unavailable')?.payload).toEqual({ reason: 'at_capacity' });
+      expect(await callbacks(a.callId)).toHaveLength(1);
+
+      // Room for exactly one more leg, and two calls asking at the same moment: one is put through, one gets the ladder.
+      const b = await handedOver(); const c = await handedOver();
+      await rates((await inUse()) + 1);
+      const [rb, rc] = await Promise.all([relayEnded(b.callSid, b.callId), relayEnded(c.callSid, c.callId)]);
+      expect([rb.body, rc.body].filter((x) => x.includes('<Dial ')).length).toBe(1);
+      expect([rb.body, rc.body].filter((x) => x.includes('<Say>')).length).toBe(1);
+      const dialling = rb.body.includes('<Dial ') ? b : c;
+      // the dialling leg holds a channel until the dial ends; Twilio asking again does not count it twice
+      const held = await inUse();
+      expect((await relayEnded(dialling.callSid, dialling.callId)).body).toContain('<Dial ');
+      expect(await inUse()).toBe(held);
+      await dialled(dialling.callSid, dialling.callId, { DialCallStatus: 'no-answer', DialCallDuration: '0' });
+      expect(await inUse()).toBe(held - 1);
+    } finally { await rates(1000); }
+  });
+
+  it('costs the agent leg in the one cost record of the call, exactly, with credits only for the time of the caller', async () => {
+    const lines = async (callId: string) => (await env.pool.query(
+      `SELECT l.leg, l.billed_seconds, l.amount_usd FROM call_cost_lines l JOIN call_costs k ON k.id = l.call_cost_id
+        WHERE k.call_id = $1 AND k.status = 'estimated' ORDER BY l.leg DESC, l.id`, [callId])).rows;
+    const head = async (callId: string) => (await env.pool.query(`SELECT total_usd, credits_drawn FROM call_costs WHERE call_id = $1 AND status = 'estimated'`, [callId])).rows;
+    const end = (callSid: string, seconds: string) => twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: callSid, CallStatus: 'completed', CallDuration: seconds, Direction: 'inbound', From: CUSTOMER, To: OUR });
+
+    // Put through: the dial ends (61 s of agent leg), then the call (90 s). Worked by hand: the caller's leg is 2 started
+    // minutes inbound at 0.0085 = 0.0170; the agent's leg 2 started minutes outbound at 0.0140 = 0.0280; total 0.0450 USD.
+    // Credits: 2 minutes of the caller's time at 1 a minute = 2; the agent leg draws none.
+    const a = await handedOver();
+    await relayEnded(a.callSid, a.callId); await whisperReq(a.callSid, a.callId); await acceptReq(a.callSid, a.callId, '1');
+    await dialled(a.callSid, a.callId, { DialCallDuration: '61' });
+    await end(a.callSid, '90');
+    expect(await lines(a.callId)).toEqual([
+      { leg: 'caller', billed_seconds: 120, amount_usd: '0.01700000' },
+      { leg: 'agent', billed_seconds: 120, amount_usd: '0.02800000' },
+    ]);
+    expect(await head(a.callId)).toEqual([{ total_usd: '0.04500000', credits_drawn: '2.0000' }]);
+    expect((await env.pool.query(`SELECT credits FROM credit_entries WHERE ref = $1`, [`call:${a.callId}`])).rows).toEqual([{ credits: '-2.0000' }]);
+
+    // Reconciliation checks the caller's leg against Twilio's price for the call; the agent leg is a separate call there.
+    const rec = await must(post(`/internal/calls/${a.callId}/reconcile`, { source: 'manual', reportedSeconds: 90, reportedCost: '0.0170' }));
+    expect(rec.json().outcome).toBe('matched');
+    const reconciled = (await env.pool.query(
+      `SELECT k.total_usd, array_agg(l.leg ORDER BY l.leg DESC) AS legs FROM call_costs k JOIN call_cost_lines l ON l.call_cost_id = k.id
+        WHERE k.call_id = $1 AND k.status = 'reconciled' GROUP BY k.id`, [a.callId])).rows;
+    expect(reconciled).toEqual([{ total_usd: '0.04500000', legs: ['caller', 'agent'] }]);
+
+    // No one picked up: a leg that never connected costs nothing, so only the caller's leg is priced.
+    const n = await handedOver();
+    await relayEnded(n.callSid, n.callId);
+    await dialled(n.callSid, n.callId, { DialCallStatus: 'no-answer', DialCallDuration: '0' });
+    await end(n.callSid, '50');
+    expect(await lines(n.callId)).toEqual([{ leg: 'caller', billed_seconds: 60, amount_usd: '0.00850000' }]);
+
+    // The call's end arrives before the dial's (lesson L-029): the cost waits for the agent leg, never priced without it.
+    const b = await handedOver();
+    await relayEnded(b.callSid, b.callId); await whisperReq(b.callSid, b.callId); await acceptReq(b.callSid, b.callId, '1');
+    await end(b.callSid, '90');
+    expect((await env.pool.query('SELECT cost_status FROM calls WHERE id = $1', [b.callId])).rows[0].cost_status).toBe('pending');
+    expect(await head(b.callId)).toEqual([]);
+    expect((await events(b.callId)).filter((e) => e.type === 'call.cost_waiting')).toHaveLength(1);
+    expect((await dialled(b.callSid, b.callId, { CallStatus: 'completed', DialCallDuration: '61' })).body).toBe(HANGUP);
+    expect(await head(b.callId)).toEqual([{ total_usd: '0.04500000', credits_drawn: '2.0000' }]);
+    expect(await callRow(b.callId)).toMatchObject({ transfer_status: 'unknown' });   // still unknown whether anyone took it
+    expect(await callbacks(b.callId)).toHaveLength(1);
+    await dialled(b.callSid, b.callId, { CallStatus: 'completed', DialCallDuration: '61' });   // a retry prices nothing twice
+    expect(await head(b.callId)).toHaveLength(1);
+
+    // Twilio never reports the dial: a person settles the leg from the provider's records, once, and it is audited.
+    const c = await handedOver();
+    await relayEnded(c.callSid, c.callId);
+    await end(c.callSid, '30');
+    expect((await post(`/internal/calls/${c.callId}/cost/retry`, {})).json()).toEqual({ cost_status: 'pending' });
+    expect((await post(`/internal/calls/${c.callId}/cost/retry`, { agentLegSeconds: 1.5 })).statusCode).toBe(400);
+    expect((await post(`/internal/calls/${c.callId}/cost/retry`, { agentLegSeconds: 20 })).json()).toEqual({ cost_status: 'recorded' });
+    expect(await lines(c.callId)).toEqual([
+      { leg: 'caller', billed_seconds: 60, amount_usd: '0.00850000' },
+      { leg: 'agent', billed_seconds: 60, amount_usd: '0.01400000' },
+    ]);
+    expect((await post(`/internal/calls/${c.callId}/cost/retry`, { agentLegSeconds: 40 })).statusCode).toBe(409);
+    expect((await env.pool.query(`SELECT detail FROM audit_log WHERE action = 'transfer.agent_leg_settled' AND entity_id = $1`, [c.callId])).rows).toEqual([{ detail: { seconds: 20 } }]);
+    // a call that never rang an agent has no leg to settle
+    const plain = await ring(ASK);
+    await twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: plain.callSid, CallStatus: 'completed', CallDuration: '15', Direction: 'inbound', From: CUSTOMER, To: ASK });
+    expect((await post(`/internal/calls/${plain.callId}/cost/retry`, { agentLegSeconds: 20 })).statusCode).toBe(409);
   });
 
   it('hangs up a call that finished normally, and never leaves a caller on a session that ended mid-conversation', async () => {

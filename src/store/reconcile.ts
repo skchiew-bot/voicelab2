@@ -70,7 +70,8 @@ export async function reconcileCall(d: CallDeps, actorId: string | null, callId:
       `SELECT detail FROM call_reconciliations WHERE call_id = $1 AND outcome = 'matched' ORDER BY id DESC LIMIT 1`, [callId])).rows[0];
     if (done) return { outcome: 'matched', detail: done.detail, alreadyReconciled: true };
     const lines = (await c.query(
-      `SELECT sum(amount_usd) AS usd FROM call_cost_lines WHERE call_cost_id = $1 AND provider_id = $2`, [ctx.costId, call.provider_id])).rows[0];
+      // The caller's leg only: the agent's leg of a transfer is a separate call at the provider, priced separately.
+      `SELECT sum(amount_usd) AS usd FROM call_cost_lines WHERE call_cost_id = $1 AND provider_id = $2 AND leg = 'caller'`, [ctx.costId, call.provider_id])).rows[0];
     const ourCostUsd = lines.usd ?? '0.00000000';
     let reportedUsd: string | undefined;
     if (reportedCost !== undefined) {
@@ -97,9 +98,9 @@ export async function reconcileCall(d: CallDeps, actorId: string | null, callId:
                 total_myr, credits_drawn, credit_value_usd, margin_usd FROM call_costs WHERE id = $1 RETURNING id`, [ctx.costId])).rows[0];
       await c.query(
         `INSERT INTO call_cost_lines (call_cost_id, provider_id, charging_version_id, component, billing_line, unit, quantity,
-                                      billed_seconds, rate, currency, burst_multiplier, amount, per_usd, amount_usd)
+                                      billed_seconds, rate, currency, burst_multiplier, amount, per_usd, amount_usd, leg)
          SELECT $2, provider_id, charging_version_id, component, billing_line, unit, quantity, billed_seconds, rate, currency,
-                burst_multiplier, amount, per_usd, amount_usd FROM call_cost_lines WHERE call_cost_id = $1`, [ctx.costId, n.id]);
+                burst_multiplier, amount, per_usd, amount_usd, leg FROM call_cost_lines WHERE call_cost_id = $1`, [ctx.costId, n.id]);
     }
     await c.query('UPDATE calls SET cost_status = $2 WHERE id = $1', [callId, verdict.matched ? 'reconciled' : 'variance']);
     await recordEvent(c, {

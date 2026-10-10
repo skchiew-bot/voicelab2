@@ -12,9 +12,11 @@ import type pg from 'pg';
 import { withActor } from '../db.js';
 import { AppError } from '../errors.js';
 import { DEFAULT_FALLBACK } from '../resilience/fallback.js';
-import { dialOutcome, twimlDialAgent, twimlEmpty, twimlHangup, twimlHoldingThenHangup, twimlWhisper, whisperText } from '../telephony/transfer.js';
+import { agentNumberAllowed, dialOutcome, dialSeconds, twimlDialAgent, twimlEmpty, twimlHangup, twimlHoldingThenHangup, twimlWhisper, whisperText } from '../telephony/transfer.js';
 export { twimlHangup, twimlHoldingThenHangup };
 import { audit } from './audit.js';
+import { costCall } from './calls.js';
+import { isFull, providerLoad } from './concurrency.js';
 import { normalizeE164 } from './dnc.js';
 import { recordEvent } from './events.js';
 import { addCallbackRequest, getFallbackPlan } from './resilience.js';
@@ -30,6 +32,7 @@ export interface TransferSettings { agentNumber: string; ringSeconds: number; wh
 export async function setTransferSettings(c: pg.PoolClient, actorId: string | null, tenantId: string, s: TransferSettings) {
   const agent = normalizeE164(s.agentNumber);
   if (!agent) throw new AppError(400, 'The agent number must be a full international number, such as +60312345678.');
+  if (!agentNumberAllowed(agent)) throw new AppError(400, 'For now the agent number must be a Malaysian number (+60).');
   if ((await c.query('SELECT 1 FROM phone_numbers WHERE e164 = $1', [agent])).rowCount) throw new AppError(400, 'The agent number is one of our own numbers; a transfer to it would ring back into Voice Lab.');
   if (!(await c.query('SELECT 1 FROM tenants WHERE id = $1', [tenantId])).rowCount) throw new AppError(404, 'Client not found.');
   await c.query(
@@ -43,6 +46,13 @@ export async function setTransferSettings(c: pg.PoolClient, actorId: string | nu
 export async function getTransferSettings(c: pg.PoolClient, tenantId: string): Promise<TransferSettings | null> {
   const r = (await c.query('SELECT agent_e164, ring_seconds, whisper FROM transfer_settings WHERE tenant_id = $1', [tenantId])).rows[0];
   return r ? { agentNumber: r.agent_e164, ringSeconds: r.ring_seconds, whisper: r.whisper } : null;
+}
+
+/** Every client's transfer settings, for the console. Staff only: the client's own role cannot read this table. */
+export async function listTransferSettings(c: pg.PoolClient) {
+  return (await c.query(
+    `SELECT t.id AS "tenantId", t.name AS tenant, s.agent_e164 AS "agentNumber", s.ring_seconds AS "ringSeconds", s.whisper, s.updated_at AS "updatedAt"
+       FROM transfer_settings s JOIN tenants t ON t.id = s.tenant_id ORDER BY t.name, t.id`)).rows;
 }
 
 export async function clearTransferSettings(c: pg.PoolClient, actorId: string | null, tenantId: string) {
@@ -103,10 +113,17 @@ async function ourNumber(c: pg.PoolClient, call: CallRow, params: Record<string,
   return (await c.query('SELECT e164 FROM phone_numbers WHERE e164 = $1 AND tenant_id = $2 AND provider_id = $3', [to, call.tenant_id, call.provider_id])).rows[0]?.e164 ?? null;
 }
 
-async function dialPlan(c: pg.PoolClient, d: TransferDeps, call: CallRow, params: Record<string, string>) {
+/**
+ * How to ring the agent, or why it cannot be done. The agent number is checked again here (a setting stored before the
+ * +60 rule, say). A new dial is a second leg on the call's provider, so it needs a free channel under the provider's
+ * concurrency ceiling (decided under the `capacity` lock, which the caller holds); a full provider means the ladder.
+ */
+async function dialPlan(c: pg.PoolClient, d: TransferDeps, call: CallRow, params: Record<string, string>, o: { newLeg: boolean }) {
   const s = await getTransferSettings(c, call.tenant_id);
   const callerId = await ourNumber(c, call, params);
   if (!s || !callerId) return { twiml: null, why: !s ? 'no_agent_number' : 'no_own_number' } as const;
+  if (!agentNumberAllowed(s.agentNumber)) return { twiml: null, why: 'agent_number_not_allowed' } as const;
+  if (o.newLeg && isFull((await providerLoad(c, [call.provider_id])).get(call.provider_id)!)) return { twiml: null, why: 'at_capacity' } as const;
   return {
     twiml: twimlDialAgent({
       agent: s.agentNumber, callerId, ringSeconds: s.ringSeconds,
@@ -123,12 +140,15 @@ async function dialPlan(c: pg.PoolClient, d: TransferDeps, call: CallRow, params
  */
 export async function afterRelay(d: TransferDeps, providerId: string, callId: string, params: Record<string, string>): Promise<string> {
   return asInternal(d, async (c) => {
+    // Locks in one fixed order (lesson L-030): capacity first, as every dial does, then the call.
+    await c.query(`SELECT pg_advisory_xact_lock(hashtext('capacity'))`);
     const call = await lockCall(c, providerId, callId, params.CallSid);
     const present = !GONE.includes(params.CallStatus ?? '') && OPEN.includes(call.status);
     if (call.transfer_status === 'dialing') {
       // A retried request: the first answer may never have reached Twilio, so the same dial is given again.
       if (!present) return twimlHangup();
-      const plan = await dialPlan(c, d, call, params);
+      // Its leg is already counted against the provider (a dialling transfer counts), so it is not counted again.
+      const plan = await dialPlan(c, d, call, params, { newLeg: false });
       if (plan.twiml) return plan.twiml;
       // The agent number (or our own) went away between the two requests: the caller still gets the ladder.
       await c.query(`UPDATE calls SET transfer_status = 'failed' WHERE id = $1`, [callId]);
@@ -143,11 +163,13 @@ export async function afterRelay(d: TransferDeps, providerId: string, callId: st
     // a caller told they will be called back is not then put through as well.
     if (call.relay_failed) return twimlHangup();
     if (!present) {
-      if (handoff) await event(c, call, 'transfer.not_attempted', { reason: 'caller_gone' });
+      // The caller asked for a person and hung up before anyone was rung: they did not reach one, so a callback is
+      // recorded, once (the status moves forward, so a retried request or the call's end finds it settled).
+      if (handoff) await abandonBeforeDial(c, call);
       return twimlHangup();
     }
     if (handoff) {
-      const plan = await dialPlan(c, d, call, params);
+      const plan = await dialPlan(c, d, call, params, { newLeg: true });
       if (!plan.twiml) {
         await c.query(`UPDATE calls SET transfer_status = 'unavailable' WHERE id = $1`, [callId]);
         await event(c, call, 'transfer.unavailable', { reason: plan.why });
@@ -164,6 +186,13 @@ export async function afterRelay(d: TransferDeps, providerId: string, callId: st
     await event(c, call, 'relay.fallback', { steps: ['record_callback_request', 'holding_message'], by: 'session_ended' });
     return ladder(c, call, 'the live call could not carry on', true);
   });
+}
+
+const ABANDONED_BEFORE_DIAL = 'the caller asked for a person and hung up before they were put through';
+async function abandonBeforeDial(c: pg.PoolClient, call: Pick<CallRow, 'id' | 'tenant_id' | 'project_id'>) {
+  await c.query(`UPDATE calls SET transfer_status = 'abandoned' WHERE id = $1`, [call.id]);
+  await event(c, call as CallRow, 'transfer.abandoned', { when: 'before_dial' });
+  await addCallbackRequest(c, { tenantId: call.tenant_id, callId: call.id, reason: ABANDONED_BEFORE_DIAL });
 }
 
 /**
@@ -220,17 +249,50 @@ export async function afterDial(d: TransferDeps, providerId: string, callId: str
     const dialled = dialOutcome(params.DialCallStatus);
     const outcome = dialled === 'answered' && call.transfer_screened !== false && !call.transfer_accepted_at ? 'unanswered' : dialled;
     const present = !GONE.includes(params.CallStatus ?? '');
+    // How long the agent's leg lasted, for its cost. A leg that was never picked up is not billed; one that was (a
+    // person, or a voicemail) is, so a missing duration there stays unknown and the call's cost waits for a person.
+    const seconds = dialSeconds(params.DialCallDuration) ?? (dialled === 'answered' ? null : 0);
     if (call.transfer_status === 'dialing') {
       const next = outcome === 'answered' ? 'answered' : present ? outcome : 'abandoned';
-      await c.query('UPDATE calls SET transfer_status = $2 WHERE id = $1', [callId, next]);
-      await event(c, call, `transfer.${next}`, {});
+      await c.query('UPDATE calls SET transfer_status = $2, transfer_seconds = $3 WHERE id = $1', [callId, next, seconds]);
+      await event(c, call, `transfer.${next}`, next === 'abandoned' ? { when: 'while_ringing' } : {});
+      await costIfEnded(c, callId);
       if (next === 'unanswered' || next === 'failed') return ladder(c, call, 'the caller asked for a person and no one answered', true);
+      // The caller hung up while the agent's phone rang (or before the agent took the call): they asked for a person and
+      // did not reach one, so a callback is recorded, once.
+      if (next === 'abandoned') await addCallbackRequest(c, { tenantId: call.tenant_id, callId, reason: 'the caller asked for a person and hung up before anyone answered' });
+      return twimlHangup();
+    }
+    // The call's end was reported first, while the dial was still under way (lesson L-029): its outcome stays unknown
+    // and its callback stays recorded, but the agent's leg can now be costed.
+    if (call.transfer_status === 'unknown' && seconds !== null) {
+      await c.query('UPDATE calls SET transfer_seconds = $2 WHERE id = $1 AND transfer_seconds IS NULL', [callId, seconds]);
+      await costIfEnded(c, callId);
       return twimlHangup();
     }
     // A retried request: say the same thing again, without recording the callback twice.
     if ((call.transfer_status === 'unanswered' || call.transfer_status === 'failed') && present) return ladder(c, call, '', false);
     return twimlHangup();
   });
+}
+
+/**
+ * A person settles the agent leg's duration from the provider's records, for a call whose cost is waiting because Twilio
+ * never reported the end of the dial. Only a leg that was dialled and has no duration yet can be set; it is audited.
+ */
+export async function settleAgentLeg(c: pg.PoolClient, actorId: string | null, callId: string, seconds: number) {
+  const r = (await c.query('SELECT transfer_started_at, transfer_seconds FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
+  if (!r) throw new AppError(404, 'Call not found.');
+  if (!r.transfer_started_at) throw new AppError(409, 'This call never rang an agent, so it has no agent leg to settle.');
+  if (r.transfer_seconds !== null) throw new AppError(409, 'This call\'s agent leg already has its duration.');
+  await c.query('UPDATE calls SET transfer_seconds = $2 WHERE id = $1', [callId, seconds]);
+  await audit(c, actorId, 'transfer.agent_leg_settled', 'call', callId, { seconds });
+}
+
+/** A call already over whose cost was waiting for its agent leg is costed now. */
+async function costIfEnded(c: pg.PoolClient, callId: string) {
+  const r = (await c.query('SELECT ended_at, cost_status FROM calls WHERE id = $1', [callId])).rows[0];
+  if (r?.ended_at && r.cost_status === 'pending') await costCall(c, null, callId);
 }
 
 /**
@@ -241,7 +303,17 @@ export async function afterDial(d: TransferDeps, providerId: string, callId: str
 export async function settleTransferOnEnd(c: pg.PoolClient, callId: string) {
   const call = (await c.query(
     `UPDATE calls SET transfer_status = 'unknown' WHERE id = $1 AND transfer_status = 'dialing' RETURNING id, tenant_id, project_id`, [callId])).rows[0] as CallRow | undefined;
-  if (!call) return;
+  if (!call) {
+    // The caller asked for a person and the call ended before Twilio asked what next (or that request never came):
+    // no one was rung and no one was reached, so a callback is recorded, once. A call the relay already fell back on
+    // has its callback.
+    const waiting = (await c.query(
+      `SELECT ca.id, ca.tenant_id, ca.project_id FROM calls ca JOIN workflow_runs r ON r.call_id = ca.id AND r.kind = 'live'
+        WHERE ca.id = $1 AND ca.transfer_status IS NULL AND NOT ca.relay_failed
+          AND r.status = 'ended' AND r.outcome = 'handoff_human' AND r.error IS NULL`, [callId])).rows[0] as CallRow | undefined;
+    if (waiting) await abandonBeforeDial(c, waiting);
+    return;
+  }
   await addCallbackRequest(c, { tenantId: call.tenant_id, callId, reason: 'the caller asked for a person and the transfer did not finish' });
   await event(c, call, 'transfer.unknown');
 }

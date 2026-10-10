@@ -62,12 +62,16 @@ export interface CallCostInput {
   drawCredits?: boolean;
   /** Seconds at the start of the call that are not billed to the client (time spent waiting in the queue). */
   creditSkipSeconds?: number;
-  /** One entry per provider that served part of the call. */
-  usage: { providerId: string; usage: Usage }[];
+  /**
+   * One entry per provider that served part of the call, and one for the agent's leg of a transfer to a person. That
+   * leg is a separate call at the provider (priced at its own direction's rates and rounded on its own), and draws no
+   * credits: the client pays for the caller's time, which already covers the transfer.
+   */
+  usage: { providerId: string; usage: Usage; leg?: 'caller' | 'agent'; direction?: 'inbound' | 'outbound' }[];
 }
 
 interface Line {
-  providerId: string; chargingVersionId: string; component: string; billingLine: string; unit: string;
+  leg: 'caller' | 'agent'; providerId: string; chargingVersionId: string; component: string; billingLine: string; unit: string;
   quantity: string; billedSeconds: number | null; rate: string; currency: string;
   burstMultiplier: string | null; amount: bigint; perUsd: bigint; amountUsd: bigint;
 }
@@ -104,13 +108,14 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
       minimumChargeSeconds: version.minimum_charge_seconds,
       rounding: version.rounding,
     });
-    if (provider.kind === 'telephony' && billed !== null && creditSeconds === null) creditSeconds = input.drawCredits === false ? null : Math.max(0, billed - Math.ceil(input.creditSkipSeconds ?? 0));
+    const leg = item.leg ?? 'caller';
+    if (leg === 'caller' && provider.kind === 'telephony' && billed !== null && creditSeconds === null) creditSeconds = input.drawCredits === false ? null : Math.max(0, billed - Math.ceil(input.creditSkipSeconds ?? 0));
 
     const burst = item.usage.burst && version.burst_premium_multiplier ? version.burst_premium_multiplier : null;
     const comps = (await c.query(
       `SELECT component, unit, rate, currency, billing_line FROM charging_components
         WHERE charging_version_id = $1 AND direction IN ('any', $2) ORDER BY id`,
-      [version.id, input.direction],
+      [version.id, item.direction ?? input.direction],
     )).rows;
 
     for (const comp of comps) {
@@ -120,7 +125,7 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
       if (burst) amount = mulDiv(amount, toScaled(burst), SCALE);
       const fx = await perUsd(c, comp.currency, input.occurredAt);
       lines.push({
-        providerId: item.providerId, chargingVersionId: version.id, component: comp.component,
+        leg, providerId: item.providerId, chargingVersionId: version.id, component: comp.component,
         billingLine: comp.billing_line, unit: comp.unit, quantity: q.display, billedSeconds: q.billedSeconds,
         rate: comp.rate, currency: comp.currency, burstMultiplier: burst, amount, perUsd: fx,
         amountUsd: mulDiv(amount, SCALE, fx), // currency -> USD
@@ -160,10 +165,10 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
   for (const l of lines) {
     await c.query(
       `INSERT INTO call_cost_lines (call_cost_id, provider_id, charging_version_id, component, billing_line, unit,
-         quantity, billed_seconds, rate, currency, burst_multiplier, amount, per_usd, amount_usd)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+         quantity, billed_seconds, rate, currency, burst_multiplier, amount, per_usd, amount_usd, leg)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
       [head.id, l.providerId, l.chargingVersionId, l.component, l.billingLine, l.unit, l.quantity, l.billedSeconds,
-        l.rate, l.currency, l.burstMultiplier, fromScaled(l.amount), fromScaled(l.perUsd), fromScaled(l.amountUsd)],
+        l.rate, l.currency, l.burstMultiplier, fromScaled(l.amount), fromScaled(l.perUsd), fromScaled(l.amountUsd), l.leg],
     );
   }
 

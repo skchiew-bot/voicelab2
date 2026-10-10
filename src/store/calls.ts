@@ -333,13 +333,23 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
 }
 
 /** Price a finished call and store the result. Failing to price never loses the call or fails the webhook. */
-export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'not_applicable'> {
+export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'not_applicable' | 'pending'> {
   const call = (await c.query('SELECT * FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
   if (!call) throw new AppError(404, 'Call not found.');
   if (!call.ended_at) throw new AppError(409, 'The call has not ended yet.');
   // Already priced and possibly checked: pricing again must not wipe a reconciled or variance flag.
   // A call that never connected has nothing to price, and re-pricing must not invent a cost for it.
   if (['recorded', 'reconciled', 'variance', 'not_applicable'].includes(call.cost_status)) return call.cost_status;
+  // A transfer to a person rang the agent: that leg is billed separately and is part of the call's one cost. Until Twilio
+  // says how long it lasted, the call is not priced (never with a guess); the dial's report prices it when it comes, and
+  // a call left waiting shows in the Control Tower for a person to settle from the provider's records.
+  if (call.transfer_started_at && call.transfer_seconds === null) {
+    if (!(await c.query(`SELECT 1 FROM call_events WHERE call_id = $1 AND type = 'call.cost_waiting'`, [callId])).rowCount) {
+      await recordEvent(c, { tenantId: call.tenant_id, projectId: call.project_id ?? undefined, callId, type: 'call.cost_waiting', payload: { for: 'agent_leg' } });
+    }
+    return 'pending';
+  }
+  const agentSeconds = call.transfer_seconds === null ? 0 : Number(call.transfer_seconds);
   try {
     await recordCallCost(c, actorId, {
       callId, tenantId: call.tenant_id, projectId: call.project_id ?? undefined, direction: call.direction,
@@ -348,7 +358,12 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
       // waited and was then served pays credits only from the moment they were.
       drawCredits: !call.no_credit,
       creditSkipSeconds: call.credit_from && call.answered_at ? Math.max(0, (new Date(call.credit_from).getTime() - new Date(call.answered_at).getTime()) / 1000) : 0,
-      usage: [{ providerId: call.provider_id, usage: { seconds: Number(call.duration_seconds ?? 0), burst: call.burst } }],
+      usage: [
+        { providerId: call.provider_id, usage: { seconds: Number(call.duration_seconds ?? 0), burst: call.burst } },
+        // The agent's leg: an outbound call from the provider, inside its concurrency ceiling (a full provider runs the
+        // ladder instead), so never at the burst premium.
+        ...(agentSeconds > 0 ? [{ providerId: call.provider_id, usage: { seconds: agentSeconds }, leg: 'agent' as const, direction: 'outbound' as const }] : []),
+      ],
     });
     await c.query(`UPDATE calls SET cost_status = 'recorded', cost_error = NULL WHERE id = $1`, [callId]);
     return 'recorded';

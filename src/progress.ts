@@ -43,7 +43,8 @@ export const PHASES: PhaseProgress[] = [
       'A call the workflow passes to a person ends after the ticket is raised: there is no live transfer to an agent yet',
       'Twilio\'s per-minute charge for the speech relay is not in the rate card until an operator adds it; the relay speaks in the one language set on the provider',
       'Telnyx automatic reconciliation (the reconciliation sweep now runs every hour as a scheduled job)',
-      'Voice usage (characters, tokens) is not yet fed into cost records',
+      'Voice usage (characters, tokens) is not yet fed into cost records, including lines the voice link says again when a reconnected line takes a call over (recorded on the call, not yet priced)',
+      'When the server running a call\'s start or reply dies, a reconnected line can wait up to 60 to 90 seconds with nothing to say before the caller hears the holding line; there is no interim "one moment" line yet',
     ],
   },
   {

@@ -512,6 +512,20 @@ describe('a live call through the speech relay', () => {
     expect((await runOf(callId))[0]).toMatchObject({ status: 'awaiting_reply' });
   }, 30_000);
 
+  it('a connection that takes over a call that finished meanwhile says its closing lines before the end', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    const d = relayDeps();
+    for (const how of ['standby', 'catch up'] as const) {
+      const { callSid, callId } = await ring();
+      const a = await openRelay(d, twilioId, setup(callSid, callId));
+      const b = how === 'standby' ? { ...a.session!, owner: '00000000-0000-4000-8000-000000000002', runId: null, version: 0, asking: false }
+        : (await openRelay(d, twilioId, setup(callSid, callId))).session!;
+      expect(await onRelayMessage(d, a.session!, prompt('no') as never, a.session!.version)).toEqual([{ type: 'text', token: 'Thank you. Goodbye.', last: true }, { type: 'end' }]);   // to the line that dropped
+      expect((await standbyCheck(d, b)).send, how).toEqual([{ type: 'text', token: 'Thank you. Goodbye.', last: true }, { type: 'end' }]);
+      expect(await callbacks(callId)).toBe(0);
+    }
+  });
+
   it('a reconnect that arrives while a reply is being applied says the next question once it lands, without the caller speaking first', async () => {
     await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
     const { callSid, callId } = await ring();
@@ -594,6 +608,8 @@ describe('a live call through the speech relay', () => {
       const caught = how === 'words' ? { send: await onRelayMessage(d, b, prompt('hello?') as never, b.version), again: false } : await standbyCheck(d, b);
       expect(caught, how).toEqual({ send: [{ type: 'text', token: 'Thank you.', last: true }, { type: 'text', token: 'Anything else?', last: true }], again: false });
       expect((await runOf(callId))[0]).toMatchObject({ status: 'awaiting_reply' });            // "hello?" was not taken as the answer
+      const said = (await env.pool.query(`SELECT payload FROM call_events WHERE call_id = $1 AND type = 'relay.said_again'`, [callId])).rows;
+      expect(said, how).toEqual([{ payload: { lines: 2, synthChars: 'Thank you.Anything else?'.length } }]);
       expect(await onRelayMessage(d, b, prompt('no') as never, b.version)).toEqual([{ type: 'end' }]);
       expect((await runOf(callId))[0]).toMatchObject({ status: 'ended', outcome: 'ok' });
     }

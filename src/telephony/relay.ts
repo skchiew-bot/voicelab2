@@ -26,15 +26,17 @@ const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 /**
  * Hand an answered call to the relay. The call is named by a parameter, with a key made for that call, not in the
  * address, so the address Twilio signs is the bare WebSocket URL. Nothing is said until the workflow says it: there is
- * no welcome greeting.
+ * no welcome greeting. When the relay session ends, Twilio asks `actionUrl` what to do next (put the caller through to a
+ * person, or hang up); without one the call ends with the session.
  */
-export function twimlRelay(wsUrl: string, callId: string, token: string, s: RelaySettings): string {
+export function twimlRelay(wsUrl: string, callId: string, token: string, s: RelaySettings, actionUrl?: string): string {
   const attrs: [string, string | undefined][] = [
     ['url', wsUrl], ['language', s.language], ['ttsProvider', s.ttsProvider], ['voice', s.voice],
     ['transcriptionProvider', s.transcriptionProvider], ['interruptible', 'speech'], ['dtmfDetection', 'false'],
   ];
   const a = attrs.filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => `${k}="${xml(v!)}"`).join(' ');
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><ConversationRelay ${a}><Parameter name="callId" value="${xml(callId)}"/><Parameter name="token" value="${xml(token)}"/></ConversationRelay></Connect></Response>`;
+  const connect = actionUrl ? `<Connect action="${xml(actionUrl)}" method="POST">` : '<Connect>';
+  return `<?xml version="1.0" encoding="UTF-8"?><Response>${connect}<ConversationRelay ${a}><Parameter name="callId" value="${xml(callId)}"/><Parameter name="token" value="${xml(token)}"/></ConversationRelay></Connect></Response>`;
 }
 
 /** What Twilio sends. Anything else (or anything malformed) is ignored, never trusted. */

@@ -286,3 +286,9 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** A menu-wide choice may decide what a screen shows, never what a record protects or who it belongs to. Forms that create do-not-call entries, numbers or workflows start empty and are chosen each time.
 - **Guards:**
   - `tests/admin-ui.test.ts` › "follows one chosen client across screens and reloads, and forgets a client that no longer exists"
+
+### L-037: A test must not depend on the time of day it runs
+- **Seen:** A cases test reset the contact policy to its default quiet hours (21:00 to 08:00 in Kuala Lumpur) and then expected a dial to be allowed, so it passed all day and failed every evening; it surfaced on `main` after merging #25, #26 and #28 at 21:40 Kuala Lumpur time (2026-10-10).
+- **Rule:** Build every time-based expectation from a clock the test controls, or from windows worked out relative to the current time (as the test does for the "quiet now" case). Never assume the suite runs during office hours or in one time zone.
+- **Guards:**
+  - `tests/cases.test.ts` › "applies quiet hours and limits to the gate API too, in the contact's zone"

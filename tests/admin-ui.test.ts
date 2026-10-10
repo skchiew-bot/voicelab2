@@ -1148,6 +1148,12 @@ describe.skipIf(!run)('admin UI', () => {
     await userPage.getByRole('button', { name: 'Sign in' }).click();
     await expect(userPage.getByRole('navigation')).toContainText('agent@portal.test · User');
     await expect(userPage.getByRole('link', { name: 'Users', exact: true })).toHaveCount(0);
+    await expect(userPage.getByText(/^As of /)).toBeVisible(); // the overview says when its numbers are from
+    // Disabled while signed in: the next screen goes back to sign-in, instead of failing on every screen.
+    expect((await env.call(env.staffToken, 'POST', `/internal/users/${user.id}/disable`)).statusCode).toBe(200);
+    await userPage.getByRole('link', { name: 'Calls', exact: true }).click();
+    await expect(userPage.getByLabel('API token')).toBeVisible();
+    await expect(userPage.getByText('No calls yet.')).toHaveCount(0);
     await userPage.context().close();
     await ctx.close();
   }, 60_000);

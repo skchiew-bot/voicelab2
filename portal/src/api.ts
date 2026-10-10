@@ -16,6 +16,8 @@ export async function api<T>(method: 'GET' | 'POST', path: string, body?: unknow
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => null);
+  // A token that stopped working (the user was disabled) signs the portal out, rather than leaving every screen failing.
+  if (res.status === 401 && getToken()) { setToken(null); window.dispatchEvent(new Event('portal:signed-out')); }
   if (!res.ok) throw new ApiError(res.status, data?.error ?? `Request failed (${res.status}).`);
   return data as T;
 }

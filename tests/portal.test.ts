@@ -98,7 +98,7 @@ describe('the client portal: managing a client\'s own users', () => {
     expect((await env.call(tok.userA, 'GET', '/client/users')).statusCode).toBe(403);
     expect((await env.call(tok.userA, 'POST', '/client/users', { email: 'x@acme.test', role: 'tenant_user' })).statusCode).toBe(403);
     expect((await env.call(tok.adminA, 'POST', '/client/users', { email: 'x@acme.test', role: 'internal_admin' })).statusCode).toBe(400);
-    expect((await env.call(tok.adminA, 'POST', '/client/users', { email: 'ADMIN@acme.test', role: 'tenant_user' })).statusCode).toBe(409);
+    expect((await env.call(tok.adminA, 'POST', '/client/users', { email: 'ADMIN@acme.test', role: 'tenant_user' })).statusCode).toBe(409); // already one of this client's users
     expect((await env.call(tok.adminA, 'POST', `/client/users/${users.adminB}/disable`)).statusCode).toBe(404);
     expect((await env.call(tok.adminA, 'POST', `/client/users/${users.adminA}/disable`)).statusCode).toBe(409);
     expect((await env.pool.query('SELECT disabled_at FROM users WHERE id = $1', [users.adminB])).rows[0].disabled_at).toBeNull();
@@ -112,7 +112,7 @@ describe('the client portal: managing a client\'s own users', () => {
     expect((await env.call(tok.adminA, 'POST', `/client/users/${r.id}/disable`)).statusCode).toBe(409);
   });
 
-  it('never leaves a client without an admin when two admins disable each other at the same moment', async () => {
+  it('keeps one of two client admins who disable each other at the same moment', async () => {
     const x = await must(env.call(tok.adminB, 'POST', '/client/users', { email: 'x@bolt.test', role: 'tenant_admin' }));
     const [p, q] = await Promise.all([
       env.call(tok.adminB, 'POST', `/client/users/${x.id}/disable`),
@@ -164,5 +164,63 @@ describe('the client portal in the database', () => {
       await c2.query('ROLLBACK');
     } finally { c1.release(); c2.release(); }
     expect((await env.pool.query('SELECT id FROM users WHERE id = ANY($1) AND disabled_at IS NULL', [[p, q]])).rows.map((r) => r.id)).toEqual([p]);
+  });
+
+  it('tells a client admin nothing about emails outside their own client: another client\'s user or a member of staff is a new user here', async () => {
+    for (const email of ['admin@bolt.test', 'staff@daythree.test']) {
+      const r = await env.call(tok.adminA, 'POST', '/client/users', { email, role: 'tenant_user' });
+      expect({ email, status: r.statusCode }).toEqual({ email, status: 201 });
+    }
+    // Two people, one email, apart: the staff member is untouched and still signs in to the console as staff.
+    expect((await env.call(env.staffToken, 'GET', '/me')).json()).toMatchObject({ email: 'staff@daythree.test', role: 'internal_admin' });
+    expect((await env.pool.query("SELECT count(*)::int AS n FROM users WHERE lower(email) = 'staff@daythree.test'")).rows[0].n).toBe(2);
+    // The installer finds the staff member, never the client's user of the same email.
+    const { bootstrapAdmin } = await import('../src/store/tenants.js');
+    expect(await withActor(env.pool, { kind: 'internal' }, (c) => bootstrapAdmin(c, 'staff@daythree.test'))).toMatchObject({ created: false, role: 'internal_admin' });
+  });
+
+  it('refuses a disabled admin called directly, even with the right client set', async () => {
+    const r = await must(env.call(tok.adminA, 'POST', '/client/users', { email: 'gone-admin@acme.test', role: 'tenant_admin' }));
+    await must(env.call(tok.adminA, 'POST', `/client/users/${r.id}/disable`), 200);
+    await expect(asClient(ids.a, (c) => c.query("SELECT * FROM client_add_user($1, 'z2@acme.test', 'tenant_user', 'h')", [r.id]))).rejects.toThrow(/only an active client admin/);
+    await expect(asClient(ids.a, (c) => c.query('SELECT * FROM client_disable_user($1, $2)', [r.id, users.userA]))).rejects.toThrow(/only an active client admin/);
+  });
+
+  it('holds when staff disable a client admin while that admin disables another: the client is not left with no admin by the race', async () => {
+    const { disableUser } = await import('../src/store/tenants.js');
+    const mk = async (email: string) => (await env.pool.query("INSERT INTO users (tenant_id, email, role, token_hash) VALUES ($1, $2, 'tenant_admin', $3) RETURNING id", [ids.b, email, randomUUID()])).rows[0].id as string;
+    // Bolt is down to exactly these two admins.
+    await env.pool.query("UPDATE users SET disabled_at = now(), disabled_by = id WHERE tenant_id = $1 AND role = 'tenant_admin' AND disabled_at IS NULL", [ids.b]);
+    const [m, n] = [await mk('m@bolt.test'), await mk('n@bolt.test')];
+    const staffId = (await env.pool.query("SELECT id FROM users WHERE email = 'staff@daythree.test' AND tenant_id IS NULL")).rows[0].id as string;
+    const c1 = await env.pool.connect(); const c2 = await env.pool.connect();
+    try {
+      await c1.query('BEGIN'); await c1.query('SET LOCAL ROLE voicelab_internal');
+      await disableUser(c1, staffId, m); // staff switch m off, not yet committed
+      await c2.query('BEGIN'); await c2.query('SET LOCAL ROLE voicelab_client'); await c2.query("SELECT set_config('app.tenant_id', $1, true)", [ids.b]);
+      const second = c2.query('SELECT * FROM client_disable_user($1, $2)', [m, n]).then(() => 'done', (e: Error) => e.message); // meanwhile m switches n off
+      await new Promise((r) => setTimeout(r, 200));
+      await c1.query('COMMIT');
+      expect(await second).toMatch(/only an active client admin/);
+      await c2.query('ROLLBACK');
+    } finally { c1.release(); c2.release(); }
+    expect((await env.pool.query('SELECT id FROM users WHERE id = ANY($1) AND disabled_at IS NULL', [[m, n]])).rows.map((r) => r.id)).toEqual([n]);
+  });
+
+  it('lets the client role reach exactly what the portal needs, and nothing a later migration quietly adds', async () => {
+    const tables = (await env.pool.query(
+      `SELECT c.relname, array_agg(p.priv ORDER BY p.priv) AS privs FROM pg_class c
+         CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS p(priv)
+        WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'v', 'p', 'm') AND has_table_privilege('voicelab_client', c.oid, p.priv)
+        GROUP BY c.relname ORDER BY c.relname`)).rows;
+    expect(tables).toEqual([
+      { relname: 'client_calls', privs: ['SELECT'] }, { relname: 'client_tenant', privs: ['SELECT'] }, { relname: 'client_users', privs: ['SELECT'] },
+      { relname: 'credit_entries', privs: ['SELECT'] }, { relname: 'projects', privs: ['SELECT'] },
+    ]);
+    // Functions that run with their owner's rights are the ones that matter; only the portal's two exist.
+    const definers = (await env.pool.query(
+      `SELECT p.proname, has_function_privilege('voicelab_client', p.oid, 'EXECUTE') AS client, has_function_privilege('public', p.oid, 'EXECUTE') AS anyone
+         FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef ORDER BY p.proname`)).rows;
+    expect(definers).toEqual([{ proname: 'client_add_user', client: true, anyone: false }, { proname: 'client_disable_user', client: true, anyone: false }]);
   });
 });

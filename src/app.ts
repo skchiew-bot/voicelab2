@@ -750,7 +750,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   }
   app.get('/client/me', async (req) => {
     const s = await clientSession(req);
-    const tenant = (await pool.query('SELECT name FROM tenants WHERE id = $1', [s.actor.tenantId])).rows[0]?.name as string;
+    const tenant = await withActor(pool, s.actor, async (c) => (await c.query('SELECT name FROM client_tenant')).rows[0]?.name as string);
     return { email: s.email, role: s.role, client: tenant };
   });
   app.get('/client/credits', async (req) => {

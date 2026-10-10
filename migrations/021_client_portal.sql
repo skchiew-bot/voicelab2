@@ -14,12 +14,22 @@ CREATE VIEW client_calls WITH (security_barrier) AS
     FROM calls c LEFT JOIN projects p ON p.id = c.project_id
    WHERE c.tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid;
 
+-- The signed-in user's own client, for the portal's header.
+CREATE VIEW client_tenant WITH (security_barrier) AS
+  SELECT id, name FROM tenants WHERE id = nullif(current_setting('app.tenant_id', true), '')::uuid;
+
 CREATE VIEW client_users WITH (security_barrier) AS
   SELECT id, email, role, created_at, disabled_at
     FROM users
    WHERE tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid;
 
-GRANT SELECT ON client_calls, client_users TO voicelab_client;
+GRANT SELECT ON client_calls, client_tenant, client_users TO voicelab_client;
+
+-- An email is unique within one client (and among staff), not across the platform: if it were, a client admin adding a
+-- user could learn from the answer whether that email belonged to staff or to another client.
+ALTER TABLE users DROP CONSTRAINT users_email_key;
+DROP INDEX users_email_lower_key;
+CREATE UNIQUE INDEX users_email_scope_key ON users (coalesce(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid), lower(email));
 CREATE INDEX credit_entries_ref_idx ON credit_entries (tenant_id, ref);
 
 -- A client admin adds or disables users of their own client, and only of their own client. The tenant comes from the

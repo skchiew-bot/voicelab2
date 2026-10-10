@@ -25,14 +25,19 @@ function SignIn({ onDone }: { onDone: (me: Me) => void }) {
   );
 }
 
+/** When the data on screen was fetched (lesson L-011). */
+const asOf = (at: Date) => <p className="muted">As of {fmtDate(at.toISOString())}</p>;
+
 function Overview() {
-  const s = useLoad(() => api<Summary>('GET', '/client/summary'));
+  const [at, setAt] = useState<Date | null>(null);
+  const s = useLoad(() => api<Summary>('GET', '/client/summary').then((d) => { setAt(new Date()); return d; }));
   return (
     <>
       <h1>Overview</h1>
       <Errors error={s.error} />
-      {s.data && (
+      {s.data && !s.error && (
         <>
+          {at && asOf(at)}
           <p aria-label="Balance"><strong>{fmtDecimal(s.data.balance)}</strong> credits</p>
           <h2>Last 30 days</h2>
           {s.data.last30Days.length === 0 ? <p className="muted">No calls in the last 30 days.</p> : (
@@ -52,10 +57,12 @@ function Overview() {
 function Calls() {
   const [pages, setPages] = useState<CallRow[][]>([]);
   const [next, setNext] = useState<string | null>(null);
+  // Set once the first page has arrived: before that (loading, or failed) nothing is said about whether there are calls.
+  const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const act = useAction();
   const load = async (before: string | null) => {
     const r = await act.run(() => api<{ calls: CallRow[]; next: string | null }>('GET', `/client/calls?limit=50${before ? `&before=${before}` : ''}`));
-    if (r) { setPages((p) => (before ? [...p, r.calls] : [r.calls])); setNext(r.next); }
+    if (r) { setPages((p) => (before ? [...p, r.calls] : [r.calls])); setNext(r.next); if (!before) setLoadedAt(new Date()); }
   };
   useEffect(() => { void load(null); }, []);
   const rows = pages.flat();
@@ -63,7 +70,8 @@ function Calls() {
     <>
       <h1>Calls</h1>
       <Errors error={act.error} />
-      {rows.length === 0 && !act.pending ? <p className="muted">No calls yet.</p> : (
+      {loadedAt && asOf(loadedAt)}
+      {!loadedAt ? null : rows.length === 0 ? <p className="muted">No calls yet.</p> : (
         <table aria-label="Calls">
           <thead><tr><th>Started</th><th>Project</th><th>Direction</th><th>Status</th><th>Outcome</th><th className="num">Seconds</th><th className="num">Credits</th></tr></thead>
           <tbody>{rows.map((c) => (
@@ -129,6 +137,11 @@ export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [checking, setChecking] = useState(Boolean(getToken()));
   const [tab, setTab] = useState<'overview' | 'calls' | 'users'>('overview');
+  useEffect(() => {
+    const out = () => setMe(null);
+    addEventListener('portal:signed-out', out);
+    return () => removeEventListener('portal:signed-out', out);
+  }, []);
   useEffect(() => {
     if (!getToken()) return;
     api<Me>('GET', '/client/me').then(setMe, () => setToken(null)).finally(() => setChecking(false));

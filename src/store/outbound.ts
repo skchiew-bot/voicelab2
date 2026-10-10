@@ -2,8 +2,10 @@ import type pg from 'pg';
 import { AppError } from '../errors.js';
 import { audit } from './audit.js';
 
-export const OUTCOMES = ['contacted', 'rejected', 'wrong_number', 'third_party'] as const;
-export type Outcome = (typeof OUTCOMES)[number];
+import { CONTACT_OUTCOMES, type ContactOutcome } from '../workflows/definition.js';
+
+export const OUTCOMES = CONTACT_OUTCOMES;
+export type Outcome = ContactOutcome;
 /** Calls that never reached the dialling stage: not attempts, and not the provider's doing. */
 const NOT_DIALLED = `('did_locked', 'all_locked_for_contact', 'no_numbers', 'providers_unhealthy')`;
 
@@ -28,6 +30,22 @@ export async function recordOutcome(
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, call_id, outcome, callback_day, callback_hour, callback_tz, created_at`,
     [call.tenant_id, call.project_id, callId, e.outcome, e.callback?.day ?? null, e.callback?.hour ?? null, e.callback?.timeZone ?? null, actorId])).rows[0];
   await audit(c, actorId, 'outbound.outcome', 'call', callId, { outcome: e.outcome, callback: Boolean(e.callback) });
+  return row;
+}
+
+/**
+ * A live call's workflow ended at a node that says how the call turned out: that is recorded as the call's outcome, in
+ * the same step that ends the run, with no person named. Only an outbound call has one. A person can still correct it:
+ * the latest statement is the current one. The call may not have completed yet (its end is reported after the
+ * workflow's); the analytics count an outcome only once the call has.
+ */
+export async function recordWorkflowOutcome(c: pg.PoolClient, e: { callId: string; runId: string; contact: Outcome }) {
+  const call = (await c.query('SELECT tenant_id, project_id, direction FROM calls WHERE id = $1', [e.callId])).rows[0];
+  if (!call || call.direction !== 'outbound') return null;
+  const row = (await c.query(
+    `INSERT INTO outbound_outcomes (tenant_id, project_id, call_id, outcome) VALUES ($1,$2,$3,$4) RETURNING id`,
+    [call.tenant_id, call.project_id, e.callId, e.contact])).rows[0];
+  await audit(c, null, 'outbound.outcome', 'call', e.callId, { outcome: e.contact, callback: false, source: 'workflow', run: e.runId });
   return row;
 }
 

@@ -9,7 +9,8 @@ export interface Scenario {
   replies?: string[];
   /** Canned answers for the integrations the workflow calls: simulations never touch a real system. */
   integrations?: Record<string, Json>;
-  expect?: { outcome?: string; says?: string[]; doesNotSay?: string[]; handoff?: string };
+  /** `contact`: the call outcome the end it finishes at records (`none` for an end that records none). */
+  expect?: { outcome?: string; says?: string[]; doesNotSay?: string[]; handoff?: string; contact?: string };
 }
 
 export interface ScenarioResult { name: string; passed: boolean; outcome: string | null; failures: string[]; runId?: string }
@@ -46,5 +47,7 @@ export function evaluateScenario(s: Scenario, result: { state: RunState; records
   if (s.expect?.handoff !== undefined && !records.some((r) => r.type === 'handoff' && r.payload.to === s.expect!.handoff)) {
     failures.push(`Expected a handoff to "${s.expect.handoff}", and there was none.`);
   }
+  const contact = records.find((r) => r.type === 'end')?.payload.contact ?? 'none';
+  if (s.expect?.contact !== undefined && contact !== s.expect.contact) failures.push(`Expected the call to end as "${s.expect.contact}" but it ended as "${String(contact)}".`);
   return { name: s.name, passed: failures.length === 0, outcome: state.outcome ?? null, failures };
 }

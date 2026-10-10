@@ -266,9 +266,9 @@ export async function reply(state: RunState, text: string, deps: Deps): Promise<
 }
 
 /** The current workflow ended cleanly (or by an end node): finish the call, or return to the parent of a subflow. */
-function leave(state: RunState, out: StepRecord[], outcome: string, deps: Deps): void {
+function leave(state: RunState, out: StepRecord[], outcome: string, deps: Deps, contact?: string): void {
   const frame = state.stack.pop();
-  if (!frame) { state.status = 'ended'; state.outcome = outcome; state.node = null; scrub(state); out.push({ type: 'end', workflow: state.workflow, payload: { outcome } }); return; }
+  if (!frame) { state.status = 'ended'; state.outcome = outcome; state.node = null; scrub(state); out.push({ type: 'end', workflow: state.workflow, payload: { outcome, ...(contact ? { contact } : {}) } }); return; }
   out.push({ type: 'subflow_exit', workflow: state.workflow, node: frame.node, payload: { outcome } });
   state.vars[`${frame.node}_outcome`] = outcome;
   state.workflow = frame.workflow;
@@ -405,8 +405,8 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         break;
       }
       case 'end':
-        out.push({ type: 'reached_end', workflow: wf, node: id, payload: { outcome: node.outcome } });
-        leave(state, out, node.outcome, deps);
+        out.push({ type: 'reached_end', workflow: wf, node: id, payload: { outcome: node.outcome, ...(node.contact ? { contact: node.contact } : {}) } });
+        leave(state, out, node.outcome, deps, node.contact);
         break;
     }
   }

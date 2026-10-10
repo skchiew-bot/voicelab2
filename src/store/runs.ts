@@ -14,6 +14,7 @@ import { perUsd } from './costs.js';
 import { evaluateScenario, gateProblems, MAX_REPLIES, MAX_SCENARIOS, type Scenario, type ScenarioResult } from '../workflows/simulate.js';
 import { audit } from './audit.js';
 import { recordStepDecisions } from './ai-decisions.js';
+import { caseVariables } from './cases.js';
 import { activePromotions, logLearningTurns } from './learning.js';
 import { getJourneyConfig } from './journey.js';
 import { recordingIndex } from './recordings.js';
@@ -71,7 +72,7 @@ async function loadPinned(c: pg.PoolClient, pins: Record<string, string>): Promi
 }
 
 /** The tenant's integrations, keys decrypted in memory for the length of the call. A staging run never writes to them. */
-async function integrationsFor(c: pg.PoolClient, tenantId: string, key: Buffer, env: Environment, http?: HttpDeps): Promise<NonNullable<Deps['integrations']>> {
+export async function integrationsFor(c: pg.PoolClient, tenantId: string, key: Buffer, env: Environment, http?: HttpDeps): Promise<NonNullable<Deps['integrations']>> {
   const rows = (await c.query('SELECT id, name, base_url, auth_header, auth_secret FROM integrations WHERE tenant_id = $1', [tenantId])).rows;
   const cfgs = new Map(rows.map((r) => [r.name as string, { baseUrl: r.base_url as string, authHeader: r.auth_header as string | undefined,
     authSecret: r.auth_secret ? decryptSecrets(r.auth_secret, key, r.id).value : undefined }]));
@@ -134,15 +135,18 @@ export async function startRun(d: RunDeps, actorId: string | null, e: { workflow
   const ctx = await asInternal(d, async (c) => {
     const wf = await getWorkflow(c, e.workflowId);
     const resolved = await resolvePins(c, wf, e.environment);
+    let caseVars: Record<string, Json> = {};
     if (e.callId) {
-      const call = (await c.query('SELECT tenant_id FROM calls WHERE id = $1', [e.callId])).rows[0];
+      const call = (await c.query('SELECT tenant_id, case_id FROM calls WHERE id = $1', [e.callId])).rows[0];
       if (!call || call.tenant_id !== wf.tenant_id) throw new AppError(404, 'That call does not belong to this workflow\'s client.');
+      // A call that belongs to a case carries on where the case left off; the caller's own variables win.
+      if (call.case_id) caseVars = await caseVariables(c, call.case_id);
     }
-    return { wf, resolved, integrations: await integrationsFor(c, wf.tenant_id, d.key, e.environment, d.integrationHttp), recordings: await recordingIndex(c, wf.tenant_id), journey: await getJourneyConfig(c, wf.tenant_id), promoted: await activePromotions(c, wf.tenant_id) };
+    return { wf, resolved, integrations: await integrationsFor(c, wf.tenant_id, d.key, e.environment, d.integrationHttp), recordings: await recordingIndex(c, wf.tenant_id), journey: await getJourneyConfig(c, wf.tenant_id), promoted: await activePromotions(c, wf.tenant_id), caseVars };
   });
   const deps: Deps = { load: (n) => ctx.resolved.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings, journey: ctx.journey, promoted: ctx.promoted };
   let out: { state: RunState; records: StepRecord[] };
-  try { out = await engineStart(ctx.resolved.entryName, e.variables, deps); }
+  try { out = await engineStart(ctx.resolved.entryName, { ...ctx.caseVars, ...e.variables }, deps); }
   catch (err) { if (err instanceof PhoneInVariable) throw new AppError(400, err.message); throw err; }
 
   return asInternal(d, async (c) => {

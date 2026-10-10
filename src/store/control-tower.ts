@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { decryptSecrets } from '../secrets.js';
+import { caseSummary } from './cases.js';
 import { fundingStatus } from './funding-monitor.js';
 import { healthMap } from './resilience.js';
 
@@ -140,6 +141,10 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   const drifted = (await c.query(
     `SELECT count(*)::int AS n FROM promotion_events e WHERE e.kind = 'demoted' AND NOT (e.detail->>'forced')::boolean AND e.created_at > now() - interval '7 days'`)).rows[0].n as number;
   if (drifted > 0) add('medium', 'learning_drift', `${drifted} promoted script${drifted === 1 ? '' : 's'} drifted in the last 7 days and ${drifted === 1 ? 'was' : 'were'} put back to live speech.`, '#/learning');
+  // Cases that cannot go on without a person, and calls that were missed or whose outcome is unknown.
+  const cs = await caseSummary(c);
+  if (cs.decisionRequired > 0) add('medium', 'cases_decision', `${cs.decisionRequired} case${cs.decisionRequired === 1 ? ' needs' : 's need'} a decision before ${cs.decisionRequired === 1 ? 'it' : 'they'} can be called again.`, '#/cases');
+  if (cs.missedOrUnknown > 0) add('medium', 'cases_missed', `${cs.missedOrUnknown} case call${cs.missedOrUnknown === 1 ? ' was' : 's were'} missed or left with an unknown outcome in the last 7 days.`, '#/cases');
   const queued = (await c.query(`SELECT count(*)::int AS n FROM calls WHERE status = 'queued'`)).rows[0].n as number;
   if (queued > 0) add('medium', 'calls_queued', `${queued} inbound call${queued === 1 ? ' is' : 's are'} waiting for a free channel.`, '#/calls');
   const deferred = (await c.query(`SELECT count(*)::int AS n FROM failover_events WHERE scope = 'telephony' AND trigger = 'capacity' AND at > now() - interval '1 hour'`)).rows[0].n as number;

@@ -368,6 +368,24 @@ Goal: self-contained modules that each plug into the shared backbone. Each one c
   - Case ageing forces a decision.
   - Inbound calls recognise an open case and continue it.
   - Quiet hours and limits on how often a contact is called.
+**Status (in progress)**
+
+Closed-loop case management is built and tested against fakes (no real call, number lookup or payment system has been involved):
+- **Cases** are known by the client's own reference and a keyed hash of the number; the number is used once to recognise the person and is not kept.
+- **Callbacks** are locked to a time, refused inside the contact's quiet hours, and placed within the agreed lateness of exactly that time or not at all (a late one is missed and retried by the rules). Each is claimed before it is dialled, a dial whose outcome is unknown is never repeated, and every dial still goes through the do-not-call gate and the DID check.
+- **Promises to pay** are tracked through the client's payment-status integration, which reports a total paid (an exact decimal string): a kept promise is thanked once and the balance recalculated; a part payment recalculates the balance and passes the case to a plan or a person; a broken promise makes the treatment one step firmer and schedules the next call. Checking twice never counts a payment twice.
+- **Reminders** before a promise falls due; **thanks** on payment; **read-back** of what was arranged, built from the case's own records.
+- **Retries** by a backoff list; after enough failures in a row the next try is on another channel (queued for the client's own sender); after the retry limit the case waits for a person's decision. **Reachability** is learned from each attempt by the contact's local hour.
+- **Case ageing** stops an old case being called until a person decides to carry on, escalate or close it.
+- **Inbound calls** from someone with an open case are recognised by the keyed hash of their number and carry the case's variables into the workflow.
+- **Quiet hours and limits on how often a contact is called** (per day, per week, minimum gap) are enforced by the dial gate on every outbound call for a client that sets a contact policy.
+
+Not built or not proven:
+- No client number lookup or payment system is connected; messages on other channels are queued, not sent.
+- The dispatcher, payment check and ageing sweep must be scheduled by the deployment.
+- A workflow does not yet record a promise from what a caller says.
+- Appointments and the knowledge base and policy module have not been started.
+
 - **Appointments**
   - Diaries per individual or per group.
   - Customer comes to a fixed location, or a field officer goes to the customer.

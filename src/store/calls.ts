@@ -13,6 +13,7 @@ import { getEntitlement, inboundAdmission, isFull, promoteQueued, providerLoad }
 import { chooseDid, didLockedFor } from './dids.js';
 import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.js';
 import { recordCallEnd } from './call-end.js';
+import { caseCallEnded, recogniseInbound, safely } from './cases.js';
 import { recordEvent } from './events.js';
 import { healthMap, logFailover, recordSample } from './resilience.js';
 
@@ -52,7 +53,7 @@ export const listNumbers = async (c: pg.PoolClient) =>
   (await c.query('SELECT id, provider_id, e164, tenant_id, project_id, country, label FROM phone_numbers ORDER BY e164')).rows;
 
 // --------------------------------------------------------------- outbound
-export interface PlaceInput { tenantId: string; projectId?: string; providerId?: string; from?: string; to: string; country: string }
+export interface PlaceInput { tenantId: string; projectId?: string; providerId?: string; from?: string; to: string; country: string; /** The contact's own time zone, for quiet hours; else the client's. */ timeZone?: string; now?: Date }
 
 /** How long a held-back dial is told to wait before trying again. */
 export const RETRY_AFTER_SECONDS = 10;
@@ -66,7 +67,7 @@ const MAX_DIAL_TRIES = 2;
  * client has agreed to pay a premium for overburst. If the chosen provider fails to place the call, the next one is
  * tried. The customer's number is passed to the provider and not kept; only a keyed hash of it is.
  */
-export async function placeOutboundCall(d: CallDeps, actorId: string, input: PlaceInput) {
+export async function placeOutboundCall(d: CallDeps, actorId: string | null, input: PlaceInput) {
   if (!d.baseUrl) throw new AppError(503, 'PUBLIC_BASE_URL is not set, so providers cannot reach this server. Set it to place calls.');
   const callId = randomUUID();
   const named = input.from === undefined ? null : normalizeE164(input.from);
@@ -95,7 +96,7 @@ export async function placeOutboundCall(d: CallDeps, actorId: string, input: Pla
       if (rows.length > 1) throw new AppError(400, 'That number is registered with more than one provider. Say which provider to dial from.');
       own = rows[0];
     }
-    const decision = await gateOutbound(c, d.dncKey, { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, to: input.to });
+    const decision = await gateOutbound(c, d.dncKey, { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, to: input.to, contactHash: chash ?? undefined, timeZone: input.timeZone, now: input.now });
     const anyTelephony = async () => (await c.query(`SELECT id FROM providers WHERE kind = 'telephony' ORDER BY created_at LIMIT 1`)).rows[0]?.id as string | undefined;
     const insertCall = (providerId: string, status: string, fromId: string | null, o: { reason?: string; burst?: boolean; creditMultiplier?: string | null } = {}) => c.query(
       `INSERT INTO calls (id, tenant_id, project_id, provider_id, direction, status, country, cost_status, from_number_id, contact_hash, end_reason, ended_at, burst, credit_multiplier)
@@ -307,7 +308,7 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
   }
 }
 
-async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: NormalizedEvent, hint?: string):
+async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: NormalizedEvent, hint?: string, contactKey?: Buffer):
   Promise<{ duplicate: boolean; actions: Action[] }> {
   const fresh = await c.query('INSERT INTO webhook_events (provider_id, event_key) VALUES ($1,$2) ON CONFLICT DO NOTHING', [provider.id, ev.key]);
   if (!fresh.rowCount) return { duplicate: true, actions: [] };
@@ -317,6 +318,9 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
   if (!call && ev.kind === 'initiated' && ev.direction === 'inbound') {
     call = await createInbound(c, provider.id, ev);
     routed = call !== null;
+    // A caller with an open case is recognised by the keyed hash of their number, so the call can carry on where the case left off.
+    const from = ev.transient?.from ? normalizeE164(ev.transient.from) : null;
+    if (call && from && contactKey) { const inbound = call; await safely(c, 'recognise_inbound', () => recogniseInbound(c, inbound, contactHash(from, contactKey))); }
   }
   const isTelnyx = provider.adapter_key === 'telnyx';
   if (!call) {
@@ -365,6 +369,8 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
       call.status = status;
       await log('call.ended', { status, reason: ev.endReason ?? 'completed', durationSeconds: seconds });
       await recordCallEnd(c, call, { endReason: ev.endReason, occurredAt: ev.occurredAt, answered });
+      const ended = call;
+      await safely(c, 'case_call_ended', () => caseCallEnded(c, { id: ended.id, started_at: ended.started_at, answered_at: ended.answered_at, duration_seconds: seconds }, ev.endReason));
       await costCall(c, null, call.id);
       // A channel has freed: whoever has waited longest moves up.
       if (call.direction === 'inbound') await promoteQueued(c, call.tenant_id);
@@ -379,7 +385,7 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
 
 /** Process a verified webhook. Provider commands run after the database work has committed. */
 export async function processWebhook(d: CallDeps, provider: ProviderRow, ev: NormalizedEvent, hint?: string) {
-  const out = await asInternal(d, (c) => applyEvent(c, provider, ev, hint));
+  const out = await asInternal(d, (c) => applyEvent(c, provider, ev, hint, contactKeyFrom(d.key)));
   if (out.actions.length && provider.adapter_key === 'telnyx') {
     const creds = credentials<TelnyxCreds>(provider, d.key);
     for (const a of out.actions) {

@@ -18,6 +18,7 @@ import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRa
 import { addNumbers, declareRegistry, dncKeyFrom, gateOutbound, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
 import { addNumber, callKnown, callQueued, costCall, getCall, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, type CallDeps } from './store/calls.js';
 import { registerJourneyRoutes } from './routes/journey.js';
+import { registerCaseRoutes } from './routes/cases.js';
 import { registerLearningRoutes } from './routes/learning.js';
 import { registerResilienceRoutes } from './routes/resilience.js';
 import { registerStitchingRoutes } from './routes/stitching.js';
@@ -49,6 +50,8 @@ export interface Deps {
   judges?: import('./store/qa.js').QaDeps['judges'];
   /** The models and recorder behind the learning loop. None is connected to a live provider yet. */
   learning?: Omit<import('./store/learning.js').LearnDeps, 'pool'>;
+  /** Where to find a number to dial at the moment of a case call, and how to reach a client's payment system. Neither is connected to a live system yet. */
+  cases?: Omit<import('./store/cases.js').CaseDeps, 'calls'>;
 }
 
 export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): FastifyInstance {
@@ -361,6 +364,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   });
 
   registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerCaseRoutes(app, { internal, cases: { calls: callDeps, ...deps.cases } });
   registerLearningRoutes(app, { internal, learn: { pool, ...deps.learning } });
   registerJourneyRoutes(app, { pool, internal, judges: deps.judges, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
   registerResilienceRoutes(app, { pool, internal, callDeps });

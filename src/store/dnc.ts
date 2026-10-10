@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import type pg from 'pg';
 import { AppError } from '../errors.js';
+import { inQuietHours, waitForLimits, type Window } from '../cases/policy.js';
 import { audit } from './audit.js';
 import { recordEvent } from './events.js';
 
@@ -75,14 +76,14 @@ export async function removeNumber(
 
 export type DialDecision =
   | { allowed: true }
-  | { allowed: false; reason: 'invalid_number' | 'no_registry_declared' | 'on_national_registry' | 'on_client_list' };
+  | { allowed: false; reason: 'invalid_number' | 'no_registry_declared' | 'on_national_registry' | 'on_client_list' | 'quiet_hours' | 'contact_limit' };
 
 /**
  * The hard pre-dial gate. It fails closed: an unparseable number, or a country
  * nobody has declared a do-not-call position for, is blocked.
  */
 export async function preDialCheck(
-  c: pg.PoolClient, key: Buffer, e: { tenantId: string; country: string; to: string },
+  c: pg.PoolClient, key: Buffer, e: { tenantId: string; country: string; to: string; contactHash?: string; timeZone?: string; now?: Date },
 ): Promise<DialDecision> {
   const n = normalizeE164(e.to);
   if (!n) return { allowed: false, reason: 'invalid_number' };
@@ -95,7 +96,31 @@ export async function preDialCheck(
     [e.country, hashNumber(n, key), e.tenantId],
   )).rows[0];
   if (hit) return { allowed: false, reason: hit.national ? 'on_national_registry' : 'on_client_list' };
+  // The client's own rules about when and how often a person may be called, for every dial, not only those of a case.
+  if (e.contactHash) {
+    const pol = await getContactPolicy(c, e.tenantId);
+    if (pol) {
+      const now = e.now ?? new Date();
+      if (inQuietHours(now, e.timeZone ?? pol.timeZone, pol.quietStart, pol.quietEnd)) return { allowed: false, reason: 'quiet_hours' };
+      if (waitForLimits(now, await contactWindow(c, e.tenantId, e.contactHash, now), pol)) return { allowed: false, reason: 'contact_limit' };
+    }
+  }
   return { allowed: true };
+}
+
+export interface ContactPolicy { timeZone: string; quietStart: string; quietEnd: string; maxPerDay: number; maxPerWeek: number; minGapMinutes: number }
+export async function getContactPolicy(c: pg.PoolClient, tenantId: string): Promise<ContactPolicy | null> {
+  const r = (await c.query('SELECT * FROM contact_policy WHERE tenant_id = $1', [tenantId])).rows[0];
+  return r ? { timeZone: r.time_zone, quietStart: r.quiet_start, quietEnd: r.quiet_end, maxPerDay: r.max_per_day, maxPerWeek: r.max_per_week, minGapMinutes: r.min_gap_minutes } : null;
+}
+
+/** How many times this contact has been called lately, whoever placed the call. A call that never went out does not count. */
+export async function contactWindow(c: pg.PoolClient, tenantId: string, hash: string, now: Date): Promise<Window> {
+  const r = (await c.query(
+    `SELECT count(*) FILTER (WHERE started_at > $3::timestamptz - interval '24 hours')::int AS day, count(*)::int AS week, max(started_at) AS last
+       FROM calls WHERE tenant_id = $1 AND contact_hash = $2 AND direction = 'outbound' AND status NOT IN ('blocked', 'failed')
+        AND started_at > $3::timestamptz - interval '7 days' AND started_at <= $3::timestamptz`, [tenantId, hash, now])).rows[0];
+  return { dayCount: r.day, weekCount: r.week, lastAt: r.last ?? null };
 }
 
 /**
@@ -104,7 +129,7 @@ export async function preDialCheck(
  */
 export async function gateOutbound(
   c: pg.PoolClient, key: Buffer,
-  e: { tenantId: string; projectId?: string; callId: string; country: string; to: string },
+  e: { tenantId: string; projectId?: string; callId: string; country: string; to: string; contactHash?: string; timeZone?: string; now?: Date },
 ): Promise<DialDecision> {
   const decision = await preDialCheck(c, key, e);
   await recordEvent(c, {

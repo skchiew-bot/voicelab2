@@ -918,12 +918,138 @@
  {
   "number": 23,
   "title": "Phase 1: live Twilio check script, and hosting and alert decisions",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/23",
   "created_at": "2026-10-10T08:02:31Z",
-  "merged_at": null,
+  "merged_at": "2026-10-10T08:25:42Z",
   "head": "claude/phase-1-twilio-live",
   "head_sha": "c1f6299d43d8f3fa40e69c5a5cfec265ad90a30b",
+  "findings": []
+ },
+ {
+  "number": 24,
+  "title": "Control Tower workstream: operator actions with a reason in the change log",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/24",
+  "created_at": "2026-10-10T08:21:33Z",
+  "merged_at": "2026-10-10T08:25:45Z",
+  "head": "claude/phase-CT-actions",
+  "head_sha": "c29d1773f80a21832fd413756a6eb3f775e85a13",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   }
+  ]
+ },
+ {
+  "number": 25,
+  "title": "Control Tower workstream: hardening tests from the last two reviews",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/25",
+  "created_at": "2026-10-10T08:43:36Z",
+  "merged_at": null,
+  "head": "claude/phase-CT-hardening",
+  "head_sha": "a66ecacb976b0f9f21db8660c1ad3ad6fbc96d63",
+  "findings": []
+ },
+ {
+  "number": 26,
+  "title": "Phase 0: tenant switcher, read-only staff, user management, install run end to end",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/26",
+  "created_at": "2026-10-10T08:48:36Z",
+  "merged_at": null,
+  "head": "claude/phase-0-roles-switcher",
+  "head_sha": "a7257f47dcfaaf59fa5ab97abd415e013ffbf141",
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   }
+  ]
+ },
+ {
+  "number": 27,
+  "title": "Control Tower workstream: dev Control Tower data refresh (PRs #14–#23) and lesson counts",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/27",
+  "created_at": "2026-10-10T09:07:31Z",
+  "merged_at": null,
+  "head": "claude/phase-CT-devlog-refresh",
+  "head_sha": "534377f7d559ea5b474b1657b3ae40be46434b63",
   "findings": []
  }
 ]

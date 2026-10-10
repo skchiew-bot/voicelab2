@@ -69,6 +69,8 @@ export interface Deps {
   now?: () => Date;
   /** Read each caller turn; re-route on a change of intent and escalate to a person on failed recoveries or severe sentiment. */
   journey?: JourneyConfig;
+  /** A dynamic node whose line has been promoted to a reviewed, pre-recorded script: its script is spoken instead of asking a model. */
+  promoted?: (workflow: string, node: string, language: string) => { id: string; script: string } | undefined;
 }
 
 export const DEFAULT_MAX_STEPS = 200;
@@ -281,8 +283,16 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         let line: string | undefined;
         let plan: SpeechPlan | undefined;
         let ai: Record<string, Json> | undefined;
+        let promotedId: string | undefined;
         try {
-          if (node.speech === 'dynamic') {
+          const promo = node.speech === 'dynamic' ? deps.promoted?.(wf, id, lang ?? 'en') : undefined;
+          if (promo) {
+            // Same stitching as any frame: the fixed words play from their recordings, slots are spoken live. A slot with no value falls back to the model.
+            try { line = renderText(promo.script, state.vars, state.sensitive); plan = planSpeech(promo.script, state.vars, state.sensitive, lang ?? 'en', deps.recordings); promotedId = promo.id; }
+            catch (e) { if (!(e instanceof MissingVariable || e instanceof SensitiveVariable)) throw e; line = undefined; plan = undefined; }
+          }
+          if (promotedId !== undefined) { /* spoken from the promoted script */ }
+          else if (node.speech === 'dynamic') {
             const fallback = node.text !== undefined ? pickText(node.text, lang) : undefined;
             if (deps.speaker) {
               const g = await deps.speaker.generate(node, withoutSensitive(state), lang);
@@ -315,6 +325,7 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
           strategy: node.speech, text: line!, ...(lang ? { lang } : {}),
           synthChars: plan.synthCharacters, recordedChars: plan.recordedCharacters,
           ...(ai ? { ai } : {}),
+          ...(promotedId !== undefined ? { promotion: promotedId } : {}),
           segments: plan.segments.map((s): Json => (s.kind === 'recorded' ? { kind: 'recorded', chars: s.characters, recordingId: s.recordingId } : { kind: 'synth', chars: s.characters })),
         } });
         if (node.listen) {

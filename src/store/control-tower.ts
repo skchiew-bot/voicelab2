@@ -136,6 +136,10 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   // A call the system dropped is loud: it is an alert the moment it is flagged, until someone has acknowledged it.
   const faults = (await c.query(`SELECT count(*)::int AS n FROM calls c WHERE c.fault AND NOT EXISTS (SELECT 1 FROM fault_acks a WHERE a.call_id = c.id)`)).rows[0].n as number;
   if (faults > 0) add('high', 'system_drop', `${faults} call${faults === 1 ? ' was' : 's were'} dropped by the system and ${faults === 1 ? 'has' : 'have'} not been looked at.`, '#/faults');
+  // A promoted script that drifted was put back to live speech: say so, and say what is waiting for a person.
+  const drifted = (await c.query(
+    `SELECT count(*)::int AS n FROM promotion_events e WHERE e.kind = 'demoted' AND NOT (e.detail->>'forced')::boolean AND e.created_at > now() - interval '7 days'`)).rows[0].n as number;
+  if (drifted > 0) add('medium', 'learning_drift', `${drifted} promoted script${drifted === 1 ? '' : 's'} drifted in the last 7 days and ${drifted === 1 ? 'was' : 'were'} put back to live speech.`, '#/learning');
   const queued = (await c.query(`SELECT count(*)::int AS n FROM calls WHERE status = 'queued'`)).rows[0].n as number;
   if (queued > 0) add('medium', 'calls_queued', `${queued} inbound call${queued === 1 ? ' is' : 's are'} waiting for a free channel.`, '#/calls');
   const deferred = (await c.query(`SELECT count(*)::int AS n FROM failover_events WHERE scope = 'telephony' AND trigger = 'capacity' AND at > now() - interval '1 hour'`)).rows[0].n as number;

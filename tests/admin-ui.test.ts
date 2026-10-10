@@ -71,7 +71,7 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(p1.getByText('Inbound and outbound test calls work on both Twilio and Telnyx.')).toBeVisible();
     await expect(p1).toContainText('tested against fakes, not the real provider');
     await expect(p1).toContainText('Still open');
-    await expect(page.getByLabel('Phase 6')).toContainText('Not started');
+    await expect(page.getByLabel('Phase 7')).toContainText('Not started');
     await expect(page.getByLabel('Control Tower', { exact: true }).first()).toBeVisible();
     await expect(page.getByLabel('Applies to every phase')).toContainText('configured model tier');
     await progress.getByText('10 open decisions').click();
@@ -422,7 +422,7 @@ describe.skipIf(!run)('admin UI', () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
     await signIn(page, env.staffToken);
     await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
-    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience', 'tickets', 'qa', 'changes']) {
+    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience', 'tickets', 'qa', 'changes', 'learning']) {
       await page.goto(`${base}#/${route}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
@@ -747,6 +747,38 @@ describe.skipIf(!run)('admin UI', () => {
     void hot; void drop;
     await page.close();
   }, 120_000);
+
+  it('shows what the learning loop is doing, and lets a person approve, turn down and demote scripts', async () => {
+    const tenant = (await env.call(env.staffToken, 'POST', '/internal/tenants', { name: 'Loop UI Co' })).json().id as string;
+    const mk = async (node: string, script: string, kinds: string[]) => {
+      const id = (await env.pool.query(
+        `INSERT INTO promotions (tenant_id, workflow, node, language, context_kind, script, slots, support, variants, avg_synth_chars, avg_slot_chars, node_hash, distilled_by)
+         VALUES ($1,'ui_flow',$2,'en','start',$3,'{name}',12,2,48,8,'h','rules') RETURNING id`, [tenant, node, script])).rows[0].id as string;
+      for (const k of kinds) await env.pool.query(`INSERT INTO promotion_events (promotion_id, kind, reason) VALUES ($1,$2,$3)`, [id, k, `${k} for the test`]);
+      return id;
+    };
+    await mk('wait_node', 'Please hold while I check {{name}}.', ['distilled']);
+    await mk('pay_node', 'Hello {{name}}, can you pay this week?', ['distilled', 'approved', 'promoted']);
+    const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
+    await signIn(page, env.staffToken);
+    await page.goto(`${base}#/learning`);
+    await page.getByLabel('Client').selectOption({ label: 'Loop UI Co' });
+    await expect(page.getByLabel('Loop status')).toContainText('1 promoted · 1 waiting for review');
+    const waiting = page.getByLabel('Script for wait_node');
+    await expect(waiting).toContainText('Waiting for review');
+    await expect(waiting.getByRole('button', { name: 'Turn down' })).toBeDisabled();           // a refusal needs a reason
+    const live = page.getByLabel('Script for pay_node');
+    await expect(live).toContainText('Promoted (pre-recorded)');
+    await live.getByRole('button', { name: 'History and cost' }).click();
+    await expect(live).toContainText('What happened');
+    await expect(live).toContainText('approved for the test');
+    await page.getByLabel('Note').fill('Callers were upset by the wording.');
+    await live.getByRole('button', { name: 'Demote' }).click();
+    await expect(live).toContainText('Demoted (live again)');
+    await waiting.getByRole('button', { name: 'Turn down' }).click();
+    await expect(waiting).toContainText('Turned down');
+    await page.close();
+  }, 60_000);
 
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();

@@ -109,12 +109,22 @@ export const PHASES: PhaseProgress[] = [
     ],
   },
   {
-    id: '6', name: 'Self-Learning Promotion Loop', status: 'not_started', summary: 'Promote nodes from live TTS to pre-recorded audio based on evidence, never assumption.',
+    id: '6', name: 'Self-Learning Promotion Loop', status: 'in_progress', summary: "Promote nodes from live TTS to pre-recorded audio based on evidence, never assumption. Logging of every model-written line, clustering by wording and journey context, canonical scripts, council review, automatic promotion with recordings, drift screening with demotion and replay, and the cost change are built and tested against fakes.",
     criteria: [
-      notMet('At least one node is promoted automatically, with an audit trail.'),
-      notMet('A simulated drift demotes it again, also with an audit trail.'),
-      notMet('The financial assessment shows the cost change for both.'),
-    ], open: [],
+      { text: 'At least one node is promoted automatically, with an audit trail.', state: 'partly', proof: 'fakes',
+        note: "A node whose model-written line recurred past the threshold was drawn up as one script, passed both councils at high confidence, had its fixed words recorded and was promoted with no person involved; every step (distilled, each council's opinion with model and tokens, approved, recorded, promoted) is in the audit trail and the events are never edited. The councils and the recorder are stand-ins in the tests: no real council model or voice provider is connected, so this has not been shown with real reviews or real audio." },
+      { text: 'A simulated drift demotes it again, also with an audit trail.', state: 'partly', proof: 'fakes',
+        note: "Callers in the test reacted worse to the script than to the live line; the screen found the mood had fallen, demoted the node back to live speech, assembled replays of its worst calls and recorded each step. A change to the node itself demotes it at once. Drift is judged from simulated calls, so the thresholds are untested against real callers." },
+      { text: 'The financial assessment shows the cost change for both.', state: 'met', proof: 'tests',
+        note: "Promotion and demotion each record the per-use change in live characters and cost at the voice provider's rate in force, the one-off cost of recording, the number of uses to pay it back, and the saving realised while promoted, all in exact money. It prices speech synthesis only; model tokens saved are not priced." },
+    ], open: [
+      'No real council model, distiller model or voice provider is connected; councils, distilling by a model and recording are exercised with stand-ins, and the rules do the rest',
+      'Clustering uses word overlap and a threshold, not embeddings; it has not been tuned on real conversations',
+      'The sweep (`POST /internal/learning/sweep`) that finishes approved scripts and screens promoted nodes for drift must be run on a schedule by the deployment',
+      'The frequency, similarity, confidence and drift thresholds are conservative defaults and have not been tuned',
+      'Drift compares how callers reacted before and after promotion; a change in the caller population over the same period would look like drift',
+      'A promoted script is a layer over the workflow, not a part of its version: demoting or promoting changes what an in-flight call says at its next line',
+    ],
   },
   {
     id: '7', name: 'Business Modules', status: 'not_started', summary: 'Self-contained modules that each plug into the shared backbone: case management, appointments, knowledge base and policy.',

@@ -478,14 +478,14 @@ Not built yet: actions taken from the Control Tower itself (drain a provider, fo
 | --- | --- | --- |
 | Client rate card (per minute, and per feature) | Credits drawn and margin, from Phase 1 onward | TBD |
 | Confirm the proposed technology stack (see Global Requirements): language, plus any changes | Phase 0 | TBD |
-| Hosting region (Malaysian data-residency rules for call recordings and debtor data) | Phase 0: where Postgres and storage run | TBD |
+| Hosting region (Malaysian data-residency rules for call recordings and debtor data) | Phase 0: where Postgres and storage run | Owner, 2026-10-10: a Malaysian region, so recordings and debtor data stay in the country |
 | Cloud provider | Phase 0 | TBD |
 | How each provider's usage is ingested (per-call API, webhook or invoice) and how long it lags | Accurate cost records in Phase 1 | TBD |
 | Failover thresholds: N errors, latency window, hysteresis | Phase 4 | TBD |
 | Frequency and confidence thresholds for promotion | Phase 6 | TBD |
 | Do-not-call registry sources per country | Outbound in Phase 1 | TBD |
 | Who staffs the Quality Council and Customer Experience Council, and what they need to sign off | Phases 3 and 6 | TBD |
-| Alert channels and on-call ownership | Control Tower alerting | TBD |
+| Alert channels and on-call ownership | Control Tower alerting | Owner, 2026-10-10: email first; on-call ownership still TBD |
 
 ## Risks
 

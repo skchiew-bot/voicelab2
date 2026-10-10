@@ -65,7 +65,7 @@ export function clean(raw) {
     set('source', id(raw.source));
     // This project's own branch names look like tokens to the scrubber, so keep those as they are;
     // any other branch name is scrubbed (it could hold a number or a token).
-    if (typeof raw.branch === 'string') out.branch = /^(main|claude\/[a-z0-9.-]{1,80})$/.test(raw.branch) ? raw.branch : scrub(raw.branch, 100);
+    if (typeof raw.branch === 'string') out.branch = /^(main|claude\/[a-z0-9.-]{1,80})$/.test(raw.branch) && !/\d{7,}/.test(raw.branch) ? raw.branch : scrub(raw.branch, 100);
     if (/^[0-9a-f]{4,40}$/.test(raw.head ?? '')) out.head = raw.head;
     set('behind_main', nat(raw.behind_main));
   }
@@ -116,7 +116,7 @@ export function clean(raw) {
     if (typeof raw.tests === 'string' && /^\d{1,6}\/\d{1,6}$/.test(raw.tests)) out.tests = raw.tests;
     set('pr', nat(raw.pr));
     // A branch linked to a task: this project's branch names as they are, anything else scrubbed.
-    if (typeof raw.branch === 'string') out.branch = /^(main|claude\/[a-z0-9.-]{1,80})$/.test(raw.branch) ? raw.branch : scrub(raw.branch, 100);
+    if (typeof raw.branch === 'string') out.branch = /^(main|claude\/[a-z0-9.-]{1,80})$/.test(raw.branch) && !/\d{7,}/.test(raw.branch) ? raw.branch : scrub(raw.branch, 100);
   }
   if (raw.event === 'Incident') {
     if (typeof raw.id !== 'string' || !/^INC-\d{8}-[0-9a-f]{4}$/.test(raw.id)) return null;

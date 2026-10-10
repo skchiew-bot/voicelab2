@@ -600,48 +600,103 @@ describe('control tower report', () => {
 });
 
 describe('branch and fork audit', () => {
-  it('classes every branch as the trunk, part of the plan, or a fork, and flags merged, stale and default-branch problems', () => {
+  /** A throwaway repo with an origin, where each branch is one of the cases the audit must tell apart. */
+  function branchRepo() {
     const { dir, git } = makeRepo();
     mkdirSync(path.join(dir, 'src'), { recursive: true });
     writeFileSync(path.join(dir, 'src/progress.ts'), read('src/progress.ts'));
     const commit = (msg: string, date = '2026-10-10T00:00:00Z') => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', msg], { cwd: dir, env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } });
-    commit('base');
-    git('add', '-A'); commit('tooling');
+    commit('base'); git('add', '-A'); commit('tooling');
     const origin = freshDir('origin-bare');
     execFileSync('git', ['init', '-q', '--bare', origin]);
     git('remote', 'add', 'origin', origin);
-    const branch = (name: string, msg: string, date?: string) => { git('switch', '-q', '-c', name, 'main'); commit(msg, date); git('push', '-q', 'origin', name); };
+    git('push', '-q', 'origin', 'main');
+    const branch = (name: string, msg?: string, date?: string) => { git('switch', '-q', '-c', name, 'main'); if (msg) commit(msg, date); git('push', '-q', 'origin', name); git('switch', '-q', 'main'); };
     branch('claude/phase-2-workflow', 'phase 2 work');
-    git('switch', '-q', 'main'); git('merge', '-q', '--no-edit', 'claude/phase-2-workflow'); git('push', '-q', 'origin', 'main');
+    branch('claude/old-default', 'old default');
+    git('merge', '-q', '--no-edit', 'claude/phase-2-workflow', 'claude/old-default'); git('push', '-q', 'origin', 'main');
     branch('claude/phase-9-mystery', 'phase 9?');
     branch('feature/side-project', 'unplanned', '2026-09-01T00:00:00Z');
     branch('claude/session-abc', 'task work');
-    branch('claude/old-default', 'old default');
+    branch('claude/by-title', 'titled work');        // plan only through its PR title
+    branch('claude/mentions-phase', 'regression fix'); // PR title only mentions a phase
+    branch('claude/closed-pr', 'abandoned');          // PR titled with a phase but closed unmerged
+    branch('claude/task-pr', 'task via pr');          // linked to a task through the task's PR
+    branch('claude/open-pr', 'in review');            // unmerged, with an open PR
+    branch('claude/squashed', 'squash-merged');       // its PR was squash-merged: not an ancestor of main
+    branch('claude/fresh');                           // just created: no commits of its own
+    branch('claude/phase-CT-console', 'control tower'); // plan id CT, upper case in the name
+    git('switch', '-q', '-c', 'local-only', 'main'); commit('never pushed'); const localSha = git('rev-parse', 'HEAD').trim(); git('switch', '-q', 'main');
     git('fetch', '-q', '--prune', 'origin');
-    const unknownSha = 'f'.repeat(40);
+    const sha = (b: string) => git('rev-parse', `origin/${b}`).trim();
+    const pr = (number: number, head: string, title: string, state: string, merged = false) => ({ number, head, title, state, html_url: `https://github.com/o/r/pull/${number}`, created_at: '2026-10-10T00:00:00Z', merged_at: merged ? '2026-10-10T00:00:00Z' : null, head_sha: sha(head), findings: [] });
+    writeFileSync(path.join(dir, 'prs.json'), JSON.stringify([
+      pr(1, 'claude/by-title', 'Phase 3: Stitching', 'open'),
+      pr(2, 'claude/mentions-phase', 'Fix regression from Phase 2', 'open'),
+      pr(3, 'claude/closed-pr', 'Phase 1: abandoned attempt', 'closed'),
+      pr(4, 'claude/task-pr', 'Board tooling', 'open'),
+      pr(5, 'claude/open-pr', 'Phase 4: resilience', 'open'),
+      pr(6, 'claude/squashed', 'Phase 5: journey', 'closed', true),
+    ]));
     writeFileSync(path.join(dir, 'devlog/repo.json'), JSON.stringify({ fullName: 'o/r', defaultBranch: 'claude/old-default', forksCount: 2, checkedAt: '2026-10-10T00:00:00Z',
-      forks: [{ fullName: 'someone/r', url: 'https://github.com/someone/r', branches: [{ name: 'main', sha: git('rev-parse', 'origin/main').trim() }, { name: 'hack', sha: unknownSha }] }] }));
+      forks: [{ fullName: 'someone/r', url: 'https://github.com/someone/r', branches: [{ name: 'main', sha: sha('main') }, { name: 'hack', sha: 'f'.repeat(40) }, { name: 'odd', sha: 'HEAD' }, { name: 'local', sha: localSha }] }] }));
     run(dir, 'scripts/devlog-task.mjs', ['start', 'T-9', '--title', 'Session task', '--branch', 'claude/session-abc']);
-    const out = path.join(dir, 'r.json');
-    expect(run(dir, 'scripts/devlog-report.mjs', ['--json', out]).status).toBe(0);
-    const r = JSON.parse(readFileSync(out, 'utf8'));
+    run(dir, 'scripts/devlog-task.mjs', ['start', 'T-10', '--title', 'Tooling', '--pr', '4']);
+    const report = () => {
+      const out = path.join(dir, 'r.json');
+      expect(run(dir, 'scripts/devlog-report.mjs', ['--prs', path.join(dir, 'prs.json'), '--json', out]).status).toBe(0);
+      return JSON.parse(readFileSync(out, 'utf8'));
+    };
+    return { dir, report };
+  }
+
+  it('classes every branch as the trunk, part of the plan, task-only or a fork, and flags merged, stale and default-branch problems', () => {
+    const { report } = branchRepo();
+    const r = report();
     const by = (n: string) => r.branches.branches.find((b: { name: string }) => b.name === n);
-    expect(by('main')).toMatchObject({ cls: 'trunk' });
-    expect(by('claude/phase-2-workflow')).toMatchObject({ cls: 'plan', merged: true, plan: 'Phase 2: Workflow Skeleton' });
-    expect(by('claude/phase-2-workflow').flags).toContain('merged: can be deleted');
+    expect(by('main')).toMatchObject({ cls: 'trunk', merged: false, flags: [] });
+    expect(by('claude/phase-2-workflow')).toMatchObject({ cls: 'plan', merged: true, plan: 'Phase 2: Workflow Skeleton', flags: ['merged: can be deleted'] });
     expect(by('claude/phase-9-mystery')).toMatchObject({ cls: 'fork' });
     expect(by('claude/phase-9-mystery').reasons.join(' ')).toContain('not in the plan');
     expect(by('feature/side-project')).toMatchObject({ cls: 'fork', ahead: 1 });
     expect(by('feature/side-project').flags.join(' ')).toMatch(/unmerged, no open PR.*no commit for \d+ days/);
-    expect(by('claude/session-abc')).toMatchObject({ cls: 'plan', plan: 'Task T-9' });
-    expect(by('claude/old-default').flags).toContain('default branch is not the trunk');
-    const fork = r.branches.forks[0];
-    expect(fork.branches.find((b: { name: string }) => b.name === 'main')).toMatchObject({ inSync: true, cls: 'trunk' });
-    expect(fork.branches.find((b: { name: string }) => b.name === 'hack')).toMatchObject({ inSync: false, cls: 'fork' });
+    expect(by('claude/session-abc')).toMatchObject({ cls: 'task', plan: 'Task T-9' });
+    expect(by('claude/by-title')).toMatchObject({ cls: 'plan', plan: 'Phase 3: Stitching And Outbound Deliverability (#1)' });
+    expect(by('claude/mentions-phase')).toMatchObject({ cls: 'fork' });
+    expect(by('claude/closed-pr')).toMatchObject({ cls: 'fork' });
+    expect(by('claude/task-pr')).toMatchObject({ cls: 'task', plan: 'Task T-10' });
+    expect(by('claude/open-pr').flags).toEqual([]);
+    expect(by('claude/squashed')).toMatchObject({ merged: true, flags: ['merged: can be deleted'] });
+    expect(by('claude/fresh')).toMatchObject({ merged: false, flags: ['no new commits'] });
+    expect(by('claude/phase-CT-console')).toMatchObject({ cls: 'plan', plan: 'Phase CT: Control Tower' });
+    expect(by('claude/old-default')).toMatchObject({ merged: true, flags: ['default branch is not the trunk', 'merged: change the default branch first, then it can be deleted'] });
+    const fork = Object.fromEntries(r.branches.forks[0].branches.map((b: { name: string; inSync: boolean }) => [b.name, b.inSync]));
+    expect(fork).toEqual({ main: true, hack: false, odd: false, local: false }); // a commit only in a local clone is not on any branch here
     expect(r.branches.uninspectedForks).toBe(1);
     const text = r.attention.map((a: { text: string }) => a.text).join('\n');
-    for (const want of ['default branch on GitHub is claude/old-default', 'claude/phase-9-mystery is not part of the plan', 'feature/side-project is not part of the plan', 'Fork someone/r, branch hack', '1 GitHub fork(s) of the repository have not been inspected']) {
+    for (const want of ['default branch on GitHub is claude/old-default', 'branch(es) are not part of the plan', 'claude/phase-9-mystery (', 'feature/side-project (', 'claude/mentions-phase (', 'claude/closed-pr (', 'justified only by a board task', 'claude/old-default only after the default branch is changed', 'someone/r:hack', '1 GitHub fork(s) of the repository have not been inspected']) {
       expect(text).toContain(want);
     }
+    expect(text).not.toMatch(/can be deleted by the owner: [^;]*claude\/old-default/); // never listed for deletion before the default changes
+  });
+
+  it('runs no audit and flags nothing when the trunk cannot be found', () => {
+    const { dir, report } = branchRepo();
+    const cfg = JSON.parse(readFileSync(path.join(dir, 'devlog/control-tower.json'), 'utf8'));
+    cfg.branches.trunk = 'master';
+    writeFileSync(path.join(dir, 'devlog/control-tower.json'), JSON.stringify(cfg));
+    const r = report();
+    expect(r.branches.error).toContain('origin/master is missing');
+    expect(r.branches.branches).toEqual([]);
+    expect(r.attention.map((a: { text: string }) => a.text).join('\n')).not.toContain('can be deleted');
+  });
+
+  it('keeps a branch name out of git when it holds a long number', () => {
+    const { dir } = makeRepo();
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    writeFileSync(path.join(dir, 'devlog/.spool/s.jsonl'), JSON.stringify({ ts: '2026-10-10T00:00:00Z', session: 's', event: 'SessionStart', branch: 'claude/call-60123456789' }) + '\n');
+    run(dir, 'scripts/devlog-flush.mjs', []);
+    const out = readdirSync(path.join(dir, 'devlog/activity')).map((f) => readFileSync(path.join(dir, 'devlog/activity', f), 'utf8')).join('');
+    expect(out).not.toContain('60123456789');
   });
 });

@@ -40,12 +40,13 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "keeps money out of floating point in the console"
 
 ### L-005: Something that never happened gets no status as if it had
-- **Seen:** 3 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)).
-- **Rule:** Give "never started" its own state (such as `not_applicable`) and keep it out of failure counts, alerts and retries.
+- **Seen:** 4 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10).
+- **Rule:** Give "never started" or "unknown" its own state (such as `not_applicable`, or `null` rather than 0) and keep it out of failure counts, alerts, retries and anything that recommends an action.
 - **Guards:**
   - `tests/phase3.test.ts` › "will not lock a DID because of a call that never went out"
   - `tests/phase3.test.ts` › "does not count a refused dial as the provider failing"
   - `tests/reconcile.test.ts` › "skips calls that never connected"
+  - `tests/devlog.test.ts` › "runs no audit and flags nothing when the trunk cannot be found"
 
 ### L-006: One bad record must not take a whole feature down
 - **Seen:** 3 times. One unreadable secret returned a 500 for the whole Control Tower ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). One provider priced in a currency with no exchange rate made every pooled dial fail ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). A very large number gave a 500 instead of a 400 ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)).
@@ -168,6 +169,14 @@ Format, checked by `tests/devlog.test.ts`:
 
 ### L-023: Keep every branch accountable to the plan, and the trunk as the default
 - **Seen:** The repository's default branch on GitHub was still the first session branch (`claude/elegant-fermat-er13o8`), long merged, so clones and the GitHub page showed stale code; seven merged branches were never deleted; and nothing checked that a branch belonged to the plan (found by the dev Control Tower branch audit, 2026-10-10).
-- **Rule:** Every branch is either named for a plan phase, carries a PR titled with a phase, or is linked to a board task; anything else is a fork to be linked or retired. The default branch is `main`. Deleting branches and changing the default are the owner's calls: report them, never do them unasked.
+- **Rule:** Every branch is either named for a plan phase or carries a PR titled with one. A branch justified only by a board task is listed for the owner to confirm, and anything else is a fork; never create or link a task just to clear the warning. The default branch is `main`. Deleting branches and changing the default are the owner's calls: report them, never do them unasked.
 - **Guards:**
-  - `tests/devlog.test.ts` › "classes every branch as the trunk, part of the plan, or a fork, and flags merged, stale and default-branch problems"
+  - `tests/devlog.test.ts` › "classes every branch as the trunk, part of the plan, task-only or a fork"
+  - `tests/devlog.test.ts` › "runs no audit and flags nothing when the trunk cannot be found"
+
+### L-024: A check the checked party can pass by itself proves nothing
+- **Seen:** The first branch audit counted any branch linked to a board task as part of the plan, and its instructions told sessions to link a task to clear the fork warning: a session could invent a task and approve its own branch (independent review, 2026-10-10).
+- **Rule:** When a check guards against the agent's own work drifting, the agent must not be able to satisfy it alone. Show self-declared evidence (a task link) as its own class for the owner to confirm, and never create evidence just to clear a warning.
+- **Guards:**
+  - `tests/devlog.test.ts` › "classes every branch as the trunk, part of the plan, task-only or a fork"
+  - `CLAUDE.md` › "never create or link a task just to clear a warning"

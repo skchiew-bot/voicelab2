@@ -11,7 +11,7 @@
 // created_at, merged_at, body). Review findings are read from the "Independent review" table in
 // each body. Without --prs the report still covers everything that lives in the repository.
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fromUnits, priceTokens, readConfig, toUnits } from '../.claude/hooks/devlog.mjs';
@@ -19,7 +19,7 @@ import { clean } from './devlog-flush.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
-const git = (...a) => { try { return execFileSync('git', a, { cwd: root, encoding: 'utf8', maxBuffer: 64 << 20 }); } catch { return ''; } };
+const git = (...a) => { try { return execFileSync('git', a, { cwd: root, encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return ''; } };
 // Only claude.ai sessions have a link; a local CLI session's id does not.
 const sessionUrl = (id) => (/^session_\w+$/.test(id) ? `https://claude.ai/code/${id}` : null);
 
@@ -96,9 +96,16 @@ export function planPhases(dir = root) {
 }
 
 /**
- * Every branch on origin, and every branch of a known GitHub fork, classed as the trunk, part of
- * the plan, or a fork (work the plan does not account for). Reads local remote refs: run
- * `git fetch --prune origin` first.
+ * Every branch on origin, classed as:
+ * - trunk: `main`;
+ * - plan: named for a plan phase (`claude/phase-<id>-`, ids from src/progress.ts), or carrying a PR
+ *   whose title starts with a plan phase (closed-unmerged PRs do not count);
+ * - task: justified only by a board task (linked with --branch, or through the task's PR). Not a
+ *   fork, but listed for the owner to confirm, since any session can create a task;
+ * - fork: none of the above.
+ * GitHub forks (from devlog/repo.json) are compared by commit only: a fork branch whose commit is
+ * on no branch here has diverged. Reads local remote-tracking refs: run `git fetch --prune origin`
+ * first; the report shows when that fetch happened.
  */
 export function branchAudit({ prs, board, phases, repo, cfg, now }) {
   const bc = cfg.branches ?? {};
@@ -106,56 +113,77 @@ export function branchAudit({ prs, board, phases, repo, cfg, now }) {
   const phaseRe = new RegExp(bc.phasePattern ?? '^claude/phase-([0-9a-z]+)-', 'i');
   const stale = (bc.staleDays ?? 7) * 864e5;
   const phaseById = new Map(phases.map((p) => [p.id.toLowerCase(), p]));
-  const phaseInTitle = (title) => { const m = /\bPhase (\d+)\b/i.exec(title ?? ''); return m ? phaseById.get(m[1]) : null; };
+  // A title that starts with a plan phase ("Phase 3: …", "Phase CT …"), not one that mentions one.
+  const phaseInTitle = (title) => { const m = /^Phase ([0-9a-z]+)(?![.\w-])/i.exec(String(title ?? '').trim()); return m ? phaseById.get(m[1].toLowerCase()) : null; };
+  let fetchedAt = null;
+  try { fetchedAt = statSync(path.join(root, '.git', 'FETCH_HEAD')).mtime.toISOString(); } catch { /* never fetched */ }
+  const base = { trunk, defaultBranch: repo?.defaultBranch ?? null, forksCount: repo?.forksCount ?? null, checkedAt: repo?.checkedAt ?? null, fetchedAt };
 
-  const classify = (name) => {
+  // Without the trunk there is nothing to measure against: say so, and flag nothing (lessons L-005, L-020).
+  if (!git('rev-parse', '--verify', '--quiet', `refs/remotes/origin/${trunk}`).trim()) {
+    return { ...base, error: `origin/${trunk} is missing, so the branch audit did not run. Fetch it (git fetch --prune origin) or check branches.trunk.`, branches: [], forks: [], uninspectedForks: 0 };
+  }
+
+  const classify = (name, sha) => {
     const reasons = []; let plan = null; let cls = 'fork';
-    if (name === trunk) return { cls: 'trunk', plan: null, reasons: ['trunk'] };
+    if (name === trunk) return { cls: 'trunk', plan: null, reasons: ['trunk'], prs: [] };
+    const branchPrs = prs.filter((p) => p.head === name);
     const m = phaseRe.exec(name);
     if (m) {
       const p = phaseById.get(m[1].toLowerCase());
       if (p) { plan = `Phase ${p.id}: ${p.name}`; cls = 'plan'; reasons.push('named for a plan phase'); }
       else reasons.push(`names phase "${m[1]}", which is not in the plan`);
     }
-    const branchPrs = prs.filter((p) => p.head === name);
-    for (const p of branchPrs) {
+    for (const p of branchPrs.filter((x) => x.state !== 'closed')) { // merged or open; closed unmerged does not count
       const ph = phaseInTitle(p.title);
       if (ph && cls !== 'plan') { plan = `Phase ${ph.id}: ${ph.name} (#${p.number})`; cls = 'plan'; reasons.push(`PR #${p.number} is plan work`); }
     }
-    const tasks = board.filter((t) => t.branch === name || (t.pr && branchPrs.some((p) => p.number === t.pr)));
-    if (tasks.length && cls !== 'plan') { plan = `Task ${tasks.map((t) => t.id).join(', ')}`; cls = 'plan'; reasons.push('linked to a board task'); }
+    if (cls !== 'plan') {
+      const tasks = board.filter((t) => t.status !== 'abandoned' && (t.branch === name || (t.pr && branchPrs.some((p) => p.number === t.pr))));
+      if (tasks.length) { plan = `Task ${tasks.map((t) => t.id).join(', ')}`; cls = 'task'; reasons.push('justified only by a board task: the owner should confirm it'); }
+    }
     if (cls === 'fork' && !reasons.length) reasons.push('no plan phase, PR or board task');
-    return { cls, plan, reasons, prs: branchPrs.map((p) => ({ number: p.number, state: p.state })) };
+    return { cls, plan, reasons, prs: branchPrs.map((p) => ({ number: p.number, state: p.state, headSha: p.headSha ?? null })) };
   };
 
-  const out = [];
-  const refs = git('for-each-ref', 'refs/remotes/origin', '--format=%(refname:short)%09%(objectname:short)%09%(committerdate:iso-strict)')
+  // One call for every branch: name, commit, date, and commits behind/ahead of the trunk.
+  const rows = git('for-each-ref', 'refs/remotes/origin', `--format=%(refname:short)%09%(objectname)%09%(committerdate:iso-strict)%09%(ahead-behind:refs/remotes/origin/${trunk})`)
     .split('\n').filter(Boolean).map((l) => l.split('\t')).filter(([r]) => r !== 'origin/HEAD' && r !== 'origin');
-  for (const [ref, sha, date] of refs) {
+  const branches = rows.map(([ref, sha, date, ab]) => {
     const name = ref.replace(/^origin\//, '');
-    const [behind = 0, ahead = 0] = (git('rev-list', '--left-right', '--count', `origin/${trunk}...${ref}`).trim().split(/\s+/).map(Number));
-    const c = classify(name);
+    const [ahead, behind] = /^\d+ \d+$/.test(ab ?? '') ? ab.split(' ').map(Number) : [null, null]; // unknown, never guessed as 0
+    const c = classify(name, sha);
     const last = new Date(date).toISOString();
-    const openPr = (c.prs ?? []).some((p) => p.state === 'open');
+    const openPr = c.prs.some((p) => p.state === 'open');
+    const mergedPr = c.prs.find((p) => p.state === 'merged' && p.headSha && p.headSha === sha); // squash or rebase merges too
+    const isDefault = repo?.defaultBranch === name;
     const flags = [];
-    if (repo?.defaultBranch && name === repo.defaultBranch && name !== trunk) flags.push('default branch is not the trunk');
-    if (name !== trunk && ahead === 0) flags.push('merged: can be deleted');
-    if (name !== trunk && ahead > 0 && !openPr) flags.push('unmerged, no open PR');
-    if (name !== trunk && ahead > 0 && now - new Date(last) > stale) flags.push(`no commit for ${Math.floor((now - new Date(last)) / 864e5)} days`);
-    out.push({ repo: repo?.fullName ?? 'origin', name, sha, last, ahead, behind, merged: name !== trunk && ahead === 0, ...c, flags });
-  }
-  const forks = (repo?.forks ?? []).map((f) => ({
-    fullName: f.fullName, url: f.url, pushedAt: f.pushedAt ?? null,
-    branches: (f.branches ?? []).map((b) => {
-      const known = /^[0-9a-f]{7,40}$/.test(b.sha ?? '') && git('cat-file', '-t', b.sha).trim() === 'commit';
-      return { name: b.name, sha: b.sha, ...classify(b.name), inSync: known, flags: known ? [] : ['has commits not in this repository'] };
+    let merged = false;
+    if (name !== trunk) {
+      if (isDefault) flags.push('default branch is not the trunk');
+      if (ahead === null) flags.push('could not compare with the trunk');
+      else if ((ahead === 0 && behind > 0 && !openPr) || mergedPr) {
+        merged = true;
+        flags.push(isDefault ? 'merged: change the default branch first, then it can be deleted' : 'merged: can be deleted');
+      } else if (ahead === 0) flags.push('no new commits');
+      else {
+        if (!openPr) flags.push('unmerged, no open PR');
+        if (now - new Date(last) > stale) flags.push(`no commit for ${Math.floor((now - new Date(last)) / 864e5)} days`);
+      }
+    }
+    return { repo: repo?.fullName ?? 'origin', name, sha: sha.slice(0, 7), last, ahead, behind, merged, isDefault, ...c, flags };
+  }).sort((a, b) => (a.name === trunk ? -1 : b.name === trunk ? 1 : b.last.localeCompare(a.last)));
+
+  // Fork branches are judged by their commit only, never by name.
+  const forks = (Array.isArray(repo?.forks) ? repo.forks : []).map((f) => ({
+    fullName: String(f?.fullName ?? ''), url: f?.url, pushedAt: f?.pushedAt ?? null,
+    branches: (Array.isArray(f?.branches) ? f.branches : []).map((b) => {
+      const sha = String(b?.sha ?? '');
+      const inSync = /^[0-9a-f]{7,40}$/.test(sha) && git('branch', '-r', '--contains', sha).trim() !== '';
+      return { name: String(b?.name ?? ''), sha: sha.slice(0, 7), inSync, flags: inSync ? [] : ['has commits on no branch of this repository'] };
     }),
   }));
-  return {
-    trunk, defaultBranch: repo?.defaultBranch ?? null, forksCount: repo?.forksCount ?? null, checkedAt: repo?.checkedAt ?? null,
-    branches: out.sort((a, b) => (a.name === trunk ? -1 : b.name === trunk ? 1 : b.last.localeCompare(a.last))), forks,
-    uninspectedForks: Math.max(0, (repo?.forksCount ?? 0) - forks.length),
-  };
+  return { ...base, branches, forks, uninspectedForks: Math.max(0, (repo?.forksCount ?? 0) - forks.length) };
 }
 
 const sum = (xs) => xs.reduce((a, b) => a + b, 0n);
@@ -201,7 +229,7 @@ export function build(opts = {}) {
   const prs = (prsFile ? JSON.parse(readFileSync(prsFile, 'utf8')) : []).map((p) => {
     const findings = p.findings ?? reviewFindings(p.body);
     return {
-      number: p.number, title: p.title, url: p.html_url, state: p.merged_at ? 'merged' : p.state, head: p.head ?? null,
+      number: p.number, title: p.title, url: p.html_url, state: p.merged_at ? 'merged' : p.state, head: p.head ?? null, headSha: p.head_sha ?? null,
       created: p.created_at, merged: p.merged_at ?? null, findings, reviewed: findings.length > 0,
       lessons: lessons.filter((l) => l.prs.includes(p.number)).map((l) => l.id),
     };
@@ -410,7 +438,9 @@ export function build(opts = {}) {
   // -------------------------------------------------------------- branches
   let repoFacts = null;
   try { repoFacts = JSON.parse(readFileSync(path.join(root, 'devlog', 'repo.json'), 'utf8')); } catch { /* not recorded yet */ }
-  const branches = branchAudit({ prs, board, phases: planPhases(), repo: repoFacts, cfg, now });
+  let branches;
+  try { branches = branchAudit({ prs, board, phases: planPhases(), repo: repoFacts, cfg, now }); }
+  catch (err) { branches = { trunk: cfg.branches?.trunk ?? 'main', error: `The branch audit failed: ${String(err?.message ?? err).slice(0, 200)}`, branches: [], forks: [], uninspectedForks: 0 }; } // one bad record must not take the report down (L-006)
 
   // ------------------------------------------------------------- attention
   const behind = Number(git('rev-list', '--count', 'HEAD..origin/main').trim() || 0);
@@ -426,13 +456,21 @@ export function build(opts = {}) {
   for (const p of prs.filter((x) => x.state === 'open')) attention.push({ level: 'info', text: `PR #${p.number} is open: ${p.title}.` });
   for (const s of starts.filter((x) => x.behind_main > 0).slice(0, 5)) attention.push({ level: 'info', text: `A session started ${s.behind_main} commits behind main on ${s.ts.slice(0, 10)}.` });
   for (const g of areas.governance.loggingGaps) attention.push({ level: 'warning', text: `Session ${g.session.slice(-8)} made ${g.commits} commit(s) while not being logged${g.lastLogged ? ` (last logged ${g.lastLogged.slice(0, 16).replace('T', ' ')} UTC)` : ''}. Its hooks were not running.` });
-  if (branches.defaultBranch && branches.defaultBranch !== branches.trunk) attention.push({ level: 'warning', text: `The repository's default branch on GitHub is ${branches.defaultBranch}, not ${branches.trunk}: clones and the GitHub page show it. Change it in the repository settings.` });
-  for (const b of branches.branches.filter((x) => x.cls === 'fork')) attention.push({ level: 'warning', text: `Branch ${b.name} is not part of the plan (${b.reasons.join('; ')}). Link it to a board task with --branch, or retire it.` });
-  for (const b of branches.branches.filter((x) => x.flags.some((f) => f.startsWith('no commit')) )) attention.push({ level: 'warning', text: `Branch ${b.name} has unmerged work and ${b.flags.find((f) => f.startsWith('no commit'))}.` });
+  // Branch findings, summarised so a repository with many branches stays readable.
+  const capped = (list, max = 8) => (list.length > max ? `${list.slice(0, max).join(', ')} and ${list.length - max} more` : list.join(', '));
+  if (branches.error) attention.push({ level: 'warning', text: branches.error });
+  if (branches.defaultBranch && branches.defaultBranch !== branches.trunk) attention.push({ level: 'warning', text: `The repository's default branch on GitHub is ${branches.defaultBranch}, not ${branches.trunk}: clones and the GitHub page show it. The owner can change it in the repository settings.` });
+  const forkBranches = branches.branches.filter((x) => x.cls === 'fork');
+  if (forkBranches.length) attention.push({ level: 'warning', text: `${forkBranches.length} branch(es) are not part of the plan: ${capped(forkBranches.map((b) => `${b.name} (${b.reasons.join('; ')})`))}. Ask the owner whether to link each to a task or retire it.` });
+  const taskOnly = branches.branches.filter((x) => x.cls === 'task' && !x.merged);
+  if (taskOnly.length) attention.push({ level: 'info', text: `Branch(es) justified only by a board task, for the owner to confirm: ${capped(taskOnly.map((b) => `${b.name} (${b.plan})`))}.` });
+  const staleOnes = branches.branches.filter((x) => x.flags.some((f) => f.startsWith('no commit')));
+  if (staleOnes.length) attention.push({ level: 'warning', text: `Unmerged work has gone quiet on: ${capped(staleOnes.map((b) => `${b.name} (${b.flags.find((f) => f.startsWith('no commit'))})`))}.` });
   const mergedLeft = branches.branches.filter((x) => x.merged);
-  if (mergedLeft.length) attention.push({ level: 'info', text: `${mergedLeft.length} merged branch(es) are still on GitHub and can be deleted: ${mergedLeft.map((b) => b.name).join(', ')}.` });
-  for (const f of branches.forks) for (const b of f.branches.filter((x) => !x.inSync || x.cls === 'fork')) attention.push({ level: 'warning', text: `Fork ${f.fullName}, branch ${b.name}: ${[...b.flags, ...(b.cls === 'fork' ? ['not part of the plan'] : [])].join('; ')}.` });
-  if (branches.uninspectedForks) attention.push({ level: 'warning', text: `${branches.uninspectedForks} GitHub fork(s) of the repository have not been inspected. Add them to a session so /control-tower can read their branches.` });
+  if (mergedLeft.length) attention.push({ level: 'info', text: `${mergedLeft.length} merged branch(es) are still on GitHub and can be deleted by the owner: ${capped(mergedLeft.filter((b) => !b.isDefault).map((b) => b.name))}${mergedLeft.some((b) => b.isDefault) ? `; ${mergedLeft.find((b) => b.isDefault).name} only after the default branch is changed` : ''}.` });
+  const diverged = branches.forks.flatMap((f) => f.branches.filter((b) => !b.inSync).map((b) => `${f.fullName}:${b.name}`));
+  if (diverged.length) attention.push({ level: 'warning', text: `GitHub fork branch(es) with commits on no branch of this repository: ${capped(diverged)}.` });
+  if (branches.uninspectedForks) attention.push({ level: 'warning', text: `${branches.uninspectedForks} GitHub fork(s) of the repository have not been inspected. Ask the owner whether to add them to a session so their branches can be read.` });
   if (economics.unpriced.length) attention.push({ level: 'warning', text: `No price configured for ${economics.unpriced.join(', ')}; its cost is not counted.` });
   for (const a of alerts.filter((x) => x.kind === 'waste' && x.ts >= since(2))) attention.push({ level: 'info', text: `Wasted effort in ${a.session.slice(-8)}: ${a.rule} (${a.key}).` });
 

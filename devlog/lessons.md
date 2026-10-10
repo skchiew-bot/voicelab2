@@ -321,14 +321,14 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:**
   - `tests/relay.test.ts` › "serves no call it is not: the id of another call, the wrong Twilio call, a malformed id, or a missing or wrong call key ends the line and starts nothing"
 
-### L-042: A line picking up is not a person answering
+### L-043: A line picking up is not a person answering
 - **Seen:** The first live transfer counted any answered dial to the agent as reaching a person, so an agent's voicemail would have taken the caller, with no callback; a repeated request after the agent number was removed hung up on the caller (human transfer independent review, 2026-10-10).
 - **Rule:** When a step depends on a person being there, get a sign only a person gives (here, pressing 1 after the whisper) and record it; judge the outcome from that record, not from the line's status. Every path that ends a caller who asked for a person runs the callback ladder.
 - **Guards:**
   - `tests/transfer.test.ts` › "does not take a voicemail on the agent phone for a person: a dial no one took with 1 runs the callback ladder"
   - `tests/transfer.test.ts` › "runs the ladder when Twilio asks again after the agent number was removed"
 
-### L-043: A failing check must stop the commit
+### L-044: A failing check must stop the commit
 - **Seen:** A test run, the board update and the commit were joined with `;`, so a broken `src/progress.ts` (an unescaped apostrophe) was committed and pushed while the run reported a failure (human transfer, 2026-10-10).
 - **Rule:** Join the checks and the commit with `&&`, never `;`, and read the result before pushing. A failure you cannot explain is read from its kept output before anything else (L-038).
 - **Guards:**

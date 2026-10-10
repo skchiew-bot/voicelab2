@@ -30,7 +30,7 @@ export function fakeProviderApi() {
   return { ...state, state, fetch: fetchFn };
 }
 
-export async function setupDb(opts: { integrationHttp?: import('../src/workflows/integrations.js').HttpDeps; judges?: import('../src/store/qa.js').QaDeps['judges']; learning?: import('../src/app.js').Deps['learning']; cases?: import('../src/app.js').Deps['cases'] } = {}) {
+export async function setupDb(opts: { integrationHttp?: import('../src/workflows/integrations.js').HttpDeps; judges?: import('../src/store/qa.js').QaDeps['judges']; learning?: import('../src/app.js').Deps['learning']; cases?: import('../src/app.js').Deps['cases']; mailer?: import('../src/app.js').Deps['mailer'] } = {}) {
   const name = `voicelab_test_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
   const admin = new pg.Client({ connectionString: ADMIN_URL });
   await admin.connect();
@@ -50,7 +50,7 @@ export async function setupDb(opts: { integrationHttp?: import('../src/workflows
     RECONCILE_TOLERANCE_PCT: 2,
   };
   const provider = fakeProviderApi();
-  const app = buildApp(pool, config, { fetch: provider.fetch, integrationHttp: opts.integrationHttp, judges: opts.judges, learning: opts.learning, cases: opts.cases });
+  const app = buildApp(pool, config, { fetch: provider.fetch, integrationHttp: opts.integrationHttp, judges: opts.judges, learning: opts.learning, cases: opts.cases, mailer: opts.mailer });
 
   const staff = await withActor(pool, { kind: 'internal' }, (c) =>
     createUser(c, null, { tenantId: null, email: 'staff@daythree.test', role: 'internal_admin' }));
@@ -60,7 +60,7 @@ export async function setupDb(opts: { integrationHttp?: import('../src/workflows
     await pool.end();
     const a = new pg.Client({ connectionString: ADMIN_URL });
     await a.connect();
-    await a.query(`DROP DATABASE ${name} WITH (FORCE)`);
+    await dropDatabase(a, name);
     await a.end();
   }
 
@@ -69,4 +69,19 @@ export async function setupDb(opts: { integrationHttp?: import('../src/workflows
     app.inject({ method, url, payload: payload as object, headers: { authorization: `Bearer ${token}` } });
 
   return { pool, app, config, provider, staffToken: staff.token, call, teardown };
+}
+
+/**
+ * Drop a test database. FORCE ends its other sessions, but the test role may not end one the server itself runs there
+ * (an autovacuum worker): "permission denied to terminate process". Such a worker finishes in moments, so try again;
+ * any other error is real and thrown at once.
+ */
+export async function dropDatabase(a: { query(sql: string): Promise<unknown> }, name: string, waitMs = 250, attempts = 40) {
+  for (let attempt = 1; ; attempt++) {
+    try { await a.query(`DROP DATABASE ${name} WITH (FORCE)`); return attempt; }
+    catch (err) {
+      if (attempt >= attempts || !/permission denied to terminate process/.test((err as Error).message)) throw err;
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
 }

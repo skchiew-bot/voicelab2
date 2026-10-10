@@ -326,7 +326,7 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:**
   - `tests/relay.test.ts` › "serves no call it is not: the id of another call, the wrong Twilio call, a malformed id, or a missing or wrong call key ends the line and starts nothing"
 
-### L-042: Take a person's words as an answer only to a question they heard
+### L-043: Take a person's words as an answer only to a question they heard
 - **Seen:** A relay connection that took a call over applied the caller's first words as the answer to a question that had gone to the connection that dropped, so a "yes" could become consent to something never heard; words said over the greeting were taken as the answer to the first question (live call voice link hardening review, 2026-10-10).
 - **Rule:** Apply an answer only to a question this side knows was put to the person on the line they are on. When that is in doubt (a takeover, words that arrived before the question was sent), ask again instead of applying them.
 - **Guards:**

@@ -344,6 +344,13 @@ function main() {
       context += `WARNING (dev Control Tower, lesson L-013): this branch is ${behind} commits behind origin/main. `
         + 'Bring main in before reporting on the project or building on it.\n';
     }
+    if (process.env.DEVLOG_VIA === 'fallback') {
+      // Lesson L-020: the session's folder is not the repository, so its hooks, CLAUDE.md and
+      // lessons did not load; the user-level fallback (devlog-fallback.mjs) is logging it instead.
+      line.via = 'fallback';
+      context += `Dev Control Tower: this session was opened outside the repository, so the repository's hooks, CLAUDE.md and lessons did not load. `
+        + `The user-level fallback hook is logging it to ${root} instead. Read ${path.join(root, 'CLAUDE.md')} and ${path.join(root, 'devlog', 'lessons.md')} before working.\n`;
+    }
     context += 'Dev Control Tower: this session is logged to devlog/.spool/. Before each commit run '
       + '`node scripts/devlog-flush.mjs` and commit devlog/activity/ with the work. '
       + 'Track the task you work on with `node scripts/devlog-task.mjs` (start, update at each milestone, done). '

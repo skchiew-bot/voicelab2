@@ -455,6 +455,7 @@ export function build(opts = {}) {
   for (const n of areas.governance.unreviewedMerged) attention.push({ level: 'info', text: `PR #${n} was merged with no independent review recorded.` });
   for (const p of prs.filter((x) => x.state === 'open')) attention.push({ level: 'info', text: `PR #${p.number} is open: ${p.title}.` });
   for (const s of starts.filter((x) => x.behind_main > 0).slice(0, 5)) attention.push({ level: 'info', text: `A session started ${s.behind_main} commits behind main on ${s.ts.slice(0, 10)}.` });
+  for (const s of starts.filter((x) => x.via === 'fallback').slice(0, 5)) attention.push({ level: 'info', text: `Session ${s.session.slice(-8)} was opened outside the repository on ${s.ts.slice(0, 10)}; the fallback hook logged it (lesson L-020).` });
   for (const g of areas.governance.loggingGaps) attention.push({ level: 'warning', text: `Session ${g.session.slice(-8)} made ${g.commits} commit(s) while not being logged${g.lastLogged ? ` (last logged ${g.lastLogged.slice(0, 16).replace('T', ' ')} UTC)` : ''}. Its hooks were not running.` });
   // Branch findings, summarised so a repository with many branches stays readable.
   const capped = (list, max = 8) => (list.length > max ? `${list.slice(0, max).join(', ')} and ${list.length - max} more` : list.join(', '));

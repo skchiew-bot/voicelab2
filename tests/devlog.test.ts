@@ -222,6 +222,175 @@ describe('activity hook', () => {
   });
 });
 
+describe('fallback hook for a session opened outside the repository (lesson L-020)', () => {
+  // A copy of the hooks, their settings and the installer, in a folder whose name a shell would
+  // misread if it were not quoted (lesson L-018).
+  const makeCheckout = () => {
+    const dir = freshDir("check out's $HOME ");
+    for (const f of ['.claude/hooks/devlog.mjs', '.claude/hooks/devlog-fallback.mjs', '.claude/settings.json', 'scripts/install-devlog-fallback.mjs', 'devlog/control-tower.json']) {
+      mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+      writeFileSync(path.join(dir, f), read(f));
+    }
+    return dir;
+  };
+  const install = (checkout: string, home: string) => spawnSync('node', [path.join(checkout, 'scripts/install-devlog-fallback.mjs')], {
+    encoding: 'utf8', env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: undefined },
+  });
+  const userSettings = (home: string) => path.join(home, '.claude/settings.json');
+  const commandsFor = (file: string, event: string): string[] => (existsSync(file)
+    ? (JSON.parse(readFileSync(file, 'utf8')).hooks?.[event] ?? []).flatMap((e: { hooks: { command: string }[] }) => e.hooks.map((h) => h.command))
+    : []);
+  /** One event as Claude Code delivers it: the handlers of the project folder's settings and the user's, a handler in both once, all given the same input. */
+  const deliver = (home: string, projectDir: string, payload: Record<string, unknown>) => {
+    const event = String(payload.hook_event_name);
+    const commands = new Set([...commandsFor(path.join(projectDir, '.claude/settings.json'), event), ...commandsFor(userSettings(home), event)]);
+    return [...commands].map((c) => spawnSync('sh', ['-c', c], {
+      input: JSON.stringify({ cwd: projectDir, ...payload }), encoding: 'utf8',
+      env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: projectDir, CLAUDE_CODE_REMOTE_SESSION_ID: undefined, DEVLOG_VIA: undefined },
+    }));
+  };
+  type Handler = { command: string; timeout?: number };
+  const fallbacksIn = (file: string) => {
+    const s = JSON.parse(readFileSync(file, 'utf8')) as { hooks: Record<string, { hooks: Handler[] }[]> };
+    const out: Record<string, Handler[]> = {};
+    for (const [event, entries] of Object.entries(s.hooks)) {
+      const list = entries.flatMap((e) => e.hooks).filter((h) => h.command.includes('devlog-fallback.mjs'));
+      if (list.length > 0) out[event] = list;
+    }
+    return out;
+  };
+
+  it('installs into the user settings once for every event the repository logs, keeps what was there, and changes nothing when run again', () => {
+    const checkout = makeCheckout(); const home = freshDir('home');
+    const file = userSettings(home);
+    mkdirSync(path.dirname(file), { recursive: true });
+    const mine = {
+      model: 'opus',
+      hooks: {
+        PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo mine' }] }],
+        Notification: [{ hooks: [{ type: 'command', command: 'echo note' }] }],
+        // An earlier install from a checkout somewhere else, sharing an entry with one of the owner's hooks.
+        Stop: [{ hooks: [{ type: 'command', command: 'echo stop' }, { type: 'command', command: "f='/old/place/.claude/hooks/devlog-fallback.mjs'; node \"$f\"" }] }],
+      },
+    };
+    writeFileSync(file, JSON.stringify(mine));
+    const first = install(checkout, home);
+    expect(first.status, first.stderr).toBe(0);
+    expect(first.stdout).toContain('Installed');
+    const s = JSON.parse(readFileSync(file, 'utf8'));
+    expect(s.model).toBe('opus');
+    expect(s.hooks.PostToolUse[0]).toEqual(mine.hooks.PostToolUse[0]);
+    expect(s.hooks.Notification).toEqual(mine.hooks.Notification);
+    expect(s.hooks.Stop[0]).toEqual({ hooks: [{ type: 'command', command: 'echo stop' }] });
+    // Once on each event the repository's own settings log, with the same time limit; nowhere else.
+    const project = JSON.parse(read('.claude/settings.json')).hooks as Record<string, { hooks: { command: string; timeout: number }[] }[]>;
+    const logged = Object.entries(project).map(([event, entries]) => [event, entries.flatMap((e) => e.hooks).filter((h) => h.command.endsWith('/.claude/hooks/devlog.mjs"')).map((h) => h.timeout)] as const).filter(([, t]) => t.length > 0);
+    expect(logged.length).toBeGreaterThanOrEqual(8);
+    const installed = fallbacksIn(file);
+    expect(Object.fromEntries(Object.entries(installed).map(([e, list]) => [e, list.map((h) => h.timeout)]))).toEqual(Object.fromEntries(logged));
+    // Every one runs this checkout's fallback, its path one inert shell word however it is spelt.
+    const targets = Object.values(installed).flat().map((h) => execFileSync('sh', ['-c', `${h.command.split('; [')[0]}; printf %s "$f"`], { encoding: 'utf8' }));
+    expect(new Set(targets)).toEqual(new Set([path.join(checkout, '.claude/hooks/devlog-fallback.mjs')]));
+
+    const before = readFileSync(file, 'utf8');
+    const second = install(checkout, home);
+    expect(second.status).toBe(0);
+    expect(second.stdout).toContain('already installed');
+    expect(readFileSync(file, 'utf8')).toBe(before);
+  });
+
+  it('creates the user settings when there are none, and leaves a settings file it cannot read as it is', () => {
+    const checkout = makeCheckout();
+    const fresh = freshDir('home');
+    expect(install(checkout, fresh).status).toBe(0);
+    expect(Object.keys(fallbacksIn(userSettings(fresh))).length).toBeGreaterThanOrEqual(8);
+    for (const bad of ['{ "model": ', '[]', '{ "hooks": [] }', '{ "hooks": { "Stop": {} } }']) {
+      const home = freshDir('home');
+      mkdirSync(path.join(home, '.claude'));
+      writeFileSync(userSettings(home), bad);
+      const r = install(checkout, home);
+      expect(r.status, bad).toBe(1);
+      expect(r.stderr, bad).toContain('left as it is');
+      expect(readFileSync(userSettings(home), 'utf8')).toBe(bad);
+    }
+  });
+
+  it('logs a session opened outside the repository to the repository, and tells Claude where its instructions are', () => {
+    const checkout = makeCheckout(); const home = freshDir('home');
+    expect(install(checkout, home).status).toBe(0);
+    const outside = freshDir('outside'); // like /home/user after the restart in lesson L-020
+    const start = deliver(home, outside, { hook_event_name: 'SessionStart', session_id: 's1', source: 'resume' });
+    expect(start.map((r) => r.status)).toEqual([0]);
+    expect(start[0]!.stdout).toContain('opened outside the repository');
+    expect(start[0]!.stdout).toContain(path.join(checkout, 'CLAUDE.md'));
+    expect(start[0]!.stdout).toContain('Before each commit run');
+    deliver(home, outside, { hook_event_name: 'PostToolUse', session_id: 's1', tool_name: 'Edit', tool_input: { file_path: path.join(checkout, 'src/x.ts') } });
+    expect(spoolLines(checkout)).toEqual([
+      expect.objectContaining({ event: 'SessionStart', session: 's1', via: 'fallback' }),
+      expect.objectContaining({ event: 'PostToolUse', session: 's1', tool: 'Edit', target: 'src/x.ts' }),
+    ]);
+    expect(existsSync(path.join(outside, 'devlog'))).toBe(false);
+    // Started in a folder inside the repository, Claude Code reads that folder's settings, not the
+    // repository's; started in the home folder, the user settings are the project's too.
+    for (const dir of [path.join(checkout, 'admin'), home]) {
+      mkdirSync(dir, { recursive: true });
+      const before = spoolLines(checkout).length;
+      expect(deliver(home, dir, { hook_event_name: 'UserPromptSubmit', session_id: 's2' }).map((r) => r.status)).toEqual([0]);
+      expect(spoolLines(checkout)).toHaveLength(before + 1);
+    }
+  });
+
+  it('steps aside when the session\'s own project runs the devlog hook, so each event is logged once', () => {
+    const checkout = makeCheckout(); const home = freshDir('home');
+    expect(install(checkout, home).status).toBe(0);
+    const events = [
+      { hook_event_name: 'SessionStart', source: 'startup' },
+      { hook_event_name: 'UserPromptSubmit' },
+      { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: path.join(checkout, 'a.ts') } },
+      { hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_input: { command: 'false' }, error: 'Exit code 1' },
+      { hook_event_name: 'SubagentStart', agent_type: 'Explore', agent_id: 'a1' },
+      { hook_event_name: 'SubagentStop', agent_type: 'Explore', agent_id: 'a1' },
+      { hook_event_name: 'Stop' },
+      { hook_event_name: 'SessionEnd', reason: 'other' },
+    ];
+    for (const e of events) {
+      const results = deliver(home, checkout, { session_id: 's1', ...e });
+      expect(results.map((r) => r.status), e.hook_event_name).toEqual([0, 0]); // the project's hook and the fallback both ran
+    }
+    // Stop with no transcript yet records nothing; SessionEnd records the end and the session's usage.
+    expect(spoolLines(checkout).map((l) => l.event)).toEqual(['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'SubagentStart', 'SubagentStop', 'SessionEnd', 'Usage']);
+    expect(spoolLines(checkout).some((l) => 'via' in l)).toBe(false);
+
+    // Another checkout with its own devlog hook logs its own sessions; this one stays out of them.
+    const other = makeCheckout();
+    deliver(home, other, { hook_event_name: 'UserPromptSubmit', session_id: 's3' });
+    expect(spoolLines(other)).toEqual([expect.objectContaining({ event: 'UserPromptSubmit', session: 's3' })]);
+    expect(spoolLines(checkout).some((l) => l.session === 's3')).toBe(false);
+  });
+
+  it('passes a stop-loss on to Claude, and never blocks or errors when its checkout lacks the hooks or the input is bad', () => {
+    const checkout = makeCheckout(); const home = freshDir('home');
+    expect(install(checkout, home).status).toBe(0);
+    const outside = freshDir('outside');
+    // Five different test runs failing in a row (different, so the same-command rule stays out of it).
+    const failedTest = (i: number) => ({ hook_event_name: 'PostToolUseFailure', session_id: 's1', tool_name: 'Bash', tool_input: { command: `npm test -- t${i}` }, error: 'Exit code 1' });
+    const runs = Array.from({ length: 5 }, (_, i) => deliver(home, outside, failedTest(i))[0]!);
+    expect(runs.map((r) => r.status)).toEqual([0, 0, 0, 0, 2]);
+    expect(runs[4]!.stderr).toContain('STOP-LOSS TRIGGERED');
+
+    const quiet = (r: ReturnType<typeof spawnSync>) => ({ status: r.status, stdout: String(r.stdout), stderr: String(r.stderr) });
+    const [command] = commandsFor(userSettings(home), 'UserPromptSubmit');
+    const raw = (input: string) => quiet(spawnSync('sh', ['-c', command!], { input, encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: outside } }));
+    const lines = spoolLines(checkout).length;
+    expect(raw('not json')).toEqual({ status: 0, stdout: '', stderr: '' });
+    rmSync(path.join(checkout, '.claude/hooks/devlog.mjs'));
+    expect(raw(JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 's1' }))).toEqual({ status: 0, stdout: '', stderr: '' });
+    rmSync(path.join(checkout, '.claude/hooks/devlog-fallback.mjs')); // a branch from before the fallback existed
+    expect(raw(JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 's1' }))).toEqual({ status: 0, stdout: '', stderr: '' });
+    expect(spoolLines(checkout)).toHaveLength(lines);
+  });
+});
+
 describe('flushing the log for a commit', () => {
   const runFlush = (dir: string) => {
     mkdirSync(path.join(dir, 'scripts'), { recursive: true });
@@ -534,16 +703,20 @@ describe('control board and incident register', () => {
       { ts: '2026-10-10T00:00:05Z', session: 's', event: 'SessionStart', branch: 'fix/call-0412345678-refund' },
       { ts: '2026-10-10T00:00:06Z', session: 's', event: 'SessionStart', branch: 'claude/dev-control-tower-v2' },
       { ts: '2026-10-10T00:00:07Z', session: 's', event: 'PostToolUse', tool: 'Bash', target: 'x', cmd: 'abcdef0123456789', range: '1:2', ms: -5 },
+      { ts: '2026-10-10T00:00:08Z', session: 's', event: 'SessionStart', via: 'fallback' },
+      { ts: '2026-10-10T00:00:09Z', session: 's', event: 'SessionStart', via: 'leak' },
     ];
     writeFileSync(path.join(dir, 'devlog/.spool/s.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
     expect(run(dir, 'scripts/devlog-flush.mjs', []).status).toBe(0);
     const out = readdirSync(path.join(dir, 'devlog/activity')).map((f) => readFileSync(path.join(dir, 'devlog/activity', f), 'utf8')).join('');
     const parsed = out.trim().split('\n').map((l) => JSON.parse(l));
-    expect(parsed.map((p) => p.event)).toEqual(['Task', 'Incident', 'Usage', 'Alert', 'SessionStart', 'SessionStart', 'PostToolUse']);
+    expect(parsed.map((p) => p.event)).toEqual(['Task', 'Incident', 'Usage', 'Alert', 'SessionStart', 'SessionStart', 'PostToolUse', 'SessionStart', 'SessionStart']);
     expect(out).not.toMatch(/secret|dropped|leak|not-an-id|0412345678|abcdef0123456789/);
     expect(parsed[3].key).toBe('2026-10-10T00:00:01.000Z');
     expect(parsed[5].branch).toBe('claude/dev-control-tower-v2');
     expect(parsed[6]).not.toHaveProperty('ms');
+    expect(parsed[7].via).toBe('fallback'); // logged by the fallback hook (lesson L-020)
+    expect(parsed[8]).not.toHaveProperty('via');
   });
 });
 
@@ -558,7 +731,7 @@ describe('control tower report', () => {
     mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
     const ev = (o: object) => JSON.stringify({ session: 'session_01A', ...o });
     writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), [
-      ev({ ts: '2026-10-10T00:00:00Z', event: 'SessionStart', source: 'startup' }),
+      ev({ ts: '2026-10-10T00:00:00Z', event: 'SessionStart', source: 'startup', via: 'fallback' }),
       ev({ ts: '2026-10-10T00:01:00Z', event: 'Task', action: 'start', id: 'T-1', title: 'Old title', status: 'in_progress' }),
       ev({ ts: '2026-10-10T00:02:00Z', event: 'Task', action: 'update', id: 'T-1', title: 'New title', progress: 50 }),
       ev({ ts: '2026-10-10T00:03:00Z', event: 'Task', action: 'start', id: 'T-2', title: 'Second' }),
@@ -587,6 +760,7 @@ describe('control tower report', () => {
     expect(JSON.parse(readFileSync(out, 'utf8')).incidents[0]).toMatchObject({ lesson: 'L-013', guarded: true });
     expect(r.areas.governance.loggingGaps).toEqual([expect.objectContaining({ session: 'session_01A', commits: 1 })]);
     expect(r.attention.map((a: { text: string }) => a.text).join(' ')).toContain('while not being logged');
+    expect(r.attention).toContainEqual({ level: 'info', text: 'Session sion_01A was opened outside the repository on 2026-10-10; the fallback hook logged it (lesson L-020).' });
   });
 
   it('shows RM only from a configured rate, computed exactly', () => {

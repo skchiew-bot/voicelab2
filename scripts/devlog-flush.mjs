@@ -68,6 +68,7 @@ export function clean(raw) {
     if (typeof raw.branch === 'string') out.branch = /^(main|claude\/[a-z0-9.-]{1,80})$/.test(raw.branch) && !/\d{7,}/.test(raw.branch) ? raw.branch : scrub(raw.branch, 100);
     if (/^[0-9a-f]{4,40}$/.test(raw.head ?? '')) out.head = raw.head;
     set('behind_main', nat(raw.behind_main));
+    if (raw.via === 'fallback') out.via = 'fallback'; // opened outside the repository (lesson L-020)
   }
   if (raw.event === 'PostToolUse' || raw.event === 'PostToolUseFailure') {
     out.tool = scrub(raw.tool, 80);

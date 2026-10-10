@@ -485,5 +485,445 @@
     "fixed": false
    }
   ]
+ },
+ {
+  "number": 14,
+  "title": "Dev Control Tower: refresh after branch cleanup",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/14",
+  "created_at": "2026-10-10T02:29:32Z",
+  "merged_at": "2026-10-10T02:29:36Z",
+  "head": "claude/elegant-hopper-6mid2t",
+  "head_sha": "b36854b71518657786a2e36d883a028b5cf69e11",
+  "findings": []
+ },
+ {
+  "number": 15,
+  "title": "Phase 5: Journey, QA and audit",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/15",
+  "created_at": "2026-10-10T03:28:41Z",
+  "merged_at": "2026-10-10T03:32:11Z",
+  "head": "claude/phase-5-journey",
+  "head_sha": "9c1833014182c4d12d5539d796fba5168117f09d",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ]
+ },
+ {
+  "number": 16,
+  "title": "Phase 6: Self-learning promotion loop",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/16",
+  "created_at": "2026-10-10T03:57:18Z",
+  "merged_at": "2026-10-10T04:07:31Z",
+  "head": "claude/phase-6-learning",
+  "head_sha": "6d4ce297ff288bff4a088c8179ddc5a8bc47dc5d",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   }
+  ]
+ },
+ {
+  "number": 17,
+  "title": "Phase 7 (module 1): Closed-loop case management",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/17",
+  "created_at": "2026-10-10T04:35:54Z",
+  "merged_at": "2026-10-10T05:22:29Z",
+  "head": "claude/phase-7-cases",
+  "head_sha": "c2b3bef0079b4abe056e50218964052cf3d17f49",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   }
+  ]
+ },
+ {
+  "number": 18,
+  "title": "Phase 7 (module 2): Appointments",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/18",
+  "created_at": "2026-10-10T05:28:10Z",
+  "merged_at": "2026-10-10T06:01:10Z",
+  "head": "claude/phase-7-appointments",
+  "head_sha": "a6ba7f0a029cccbc443de8f482e9ab423da8a735",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ]
+ },
+ {
+  "number": 19,
+  "title": "Phase 7 (module 3): knowledge base and policy",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/19",
+  "created_at": "2026-10-10T06:17:01Z",
+  "merged_at": "2026-10-10T06:27:57Z",
+  "head": "claude/phase-7-knowledge",
+  "head_sha": "31b736ec544f60991c1c932619b41d58dd29d7d4",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   }
+  ]
+ },
+ {
+  "number": 20,
+  "title": "Control Tower workstream: delete merged branches automatically",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/20",
+  "created_at": "2026-10-10T06:30:11Z",
+  "merged_at": "2026-10-10T06:30:49Z",
+  "head": "claude/phase-CT-branch-cleanup",
+  "head_sha": "012ee861f97abe29b733b7ca762b90b0326a9e4e",
+  "findings": []
+ },
+ {
+  "number": 21,
+  "title": "Control Tower workstream: let a session delete branches on request",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/21",
+  "created_at": "2026-10-10T06:32:13Z",
+  "merged_at": "2026-10-10T06:35:12Z",
+  "head": "claude/phase-CT-branch-delete",
+  "head_sha": "ef1a0227cba07da737f6760cc72bd597c8edc339",
+  "findings": []
+ },
+ {
+  "number": 22,
+  "title": "Control Tower workstream: change log, panels and days of funding left",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/22",
+  "created_at": "2026-10-10T06:58:42Z",
+  "merged_at": "2026-10-10T07:47:57Z",
+  "head": "claude/phase-CT-panels",
+  "head_sha": "7c066d582c6f5d3b5bb1e6d9fc963451e288057a",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ]
+ },
+ {
+  "number": 23,
+  "title": "Phase 1: live Twilio check script, and hosting and alert decisions",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/23",
+  "created_at": "2026-10-10T08:02:31Z",
+  "merged_at": null,
+  "head": "claude/phase-1-twilio-live",
+  "head_sha": "c1f6299d43d8f3fa40e69c5a5cfec265ad90a30b",
+  "findings": []
  }
 ]

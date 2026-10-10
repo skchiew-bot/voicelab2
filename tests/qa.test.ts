@@ -197,4 +197,15 @@ describe('scoring finished calls in batches', () => {
     expect((await put('/internal/model-config/qa_judge', { tier: 'sonnet', modelId: 'm', escalateTo: 'haiku' })).statusCode).toBe(400);
     void withActor;
   });
+  it('keeps scoring the rest of a batch when the model fails on one call, and tries the failed one again next time', async () => {
+    await must(post(`/internal/tenants/${tenantId}/qa-criteria`, { useCase: 'qa_flow', criteria: [{ id: 'empathy', label: 'Showed empathy', type: 'judge', question: 'Did the agent show empathy?', weight: 1 }] }));
+    const one = await finished(['yes thanks']); const two = await finished(['yes thanks']);
+    let calls = 0;
+    const flaky: Judge = { tier: 'haiku', model: 'h', judge: async () => { if (++calls === 1) throw new Error('model unavailable'); return { passed: true, confidence: 1, reason: 'ok', inputTokens: 1, outputTokens: 1 }; } };
+    const { scoreBatch } = await import('../src/store/qa.js');
+    const out = await scoreBatch({ pool: env.pool, judges: { haiku: flaky } }, null, { tenantId });
+    expect(out).toMatchObject({ scored: 2, failed: 1 });   // a run left over from the summary test, plus these two
+    void one; void two;
+    expect(await scoreBatch({ pool: env.pool, judges: { haiku: flaky } }, null, { tenantId })).toMatchObject({ scored: 1, failed: 0 });
+  });
 });

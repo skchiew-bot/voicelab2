@@ -55,6 +55,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/control-tower.test.ts` › "is reported as an alert and does not take the whole Control Tower down"
   - `tests/phase3.test.ts` › "ranks a provider priced in a currency with no exchange rate last instead of failing every dial"
   - `tests/reconcile.test.ts` › "are refused with a clear error, not a server error"
+  - `tests/qa.test.ts` › "keeps scoring the rest of a batch when the model fails on one call, and tries the failed one again next time"
 
 ### L-007: Bill only for what was served
 - **Seen:** A caller who hung up in the queue was charged credits, and a served caller was billed for their time on hold. A promoted caller lost their agreed premium ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)).

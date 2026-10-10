@@ -144,6 +144,22 @@ describe('escalation tickets', () => {
     await expect(env.pool.query('DELETE FROM ticket_events')).rejects.toThrow(/append-only/);
   });
 
+  it('opens a ticket when the workflow itself hands the call to a person, with the same required fields', async () => {
+    const hand: WorkflowDefinition = { start: 'a', nodes: { a: { type: 'speak', speech: 'fixed', text: 'One moment.', transitions: [{ to: 'h' }] }, h: { type: 'handoff', target: { human: { reason: 'Customer asked for a person' } } } } };
+    const c = (await must(post(`/internal/tenants/${tenantId}/workflows`, { name: 'hand_flow', definition: hand }))).json();
+    await must(post(`/internal/workflows/${c.workflow.id}/deploy`, { versionId: c.version.id, environment: 'staging' }));
+    const r = (await must(post(`/internal/workflows/${c.workflow.id}/runs`, { environment: 'staging', kind: 'test' }))).json();
+    expect(r).toMatchObject({ status: 'ended', outcome: 'handoff_human' });
+    const t = (await get(`/internal/tickets?tenantId=${tenantId}`)).json().find((x: { run_id: string }) => x.run_id === r.id);
+    expect(t).toMatchObject({ kind: 'escalation', trigger: 'workflow_handoff', node: 'h' });
+    const full = (await get(`/internal/tickets/${t.id}`)).json();
+    expect(full.reason).toContain('Customer asked for a person');
+    expect(full.customer_view.length).toBeGreaterThan(10);
+    expect(full.ai_reviews[0].verdict).toContain('as it was written to');
+    expect(full.council_notes).toMatchObject({ status: 'not_requested' });
+    expect(Object.keys(full.impact)).toEqual(expect.arrayContaining(['workflow', 'node', 'sameNodeLast30d']));
+  });
+
   it('keeps a sensitive answer out of the ticket, whatever the caller said', async () => {
     const sens: WorkflowDefinition = { start: 'a', nodes: { a: { type: 'speak', speech: 'fixed', text: 'Last four digits?', listen: { captureAs: 'ic', sensitive: true }, transitions: [{ to: 'b' }] }, b: { type: 'speak', speech: 'fixed', text: 'And how are you?', listen: { captureAs: 'mood' }, transitions: [{ to: 'b' }] } } };
     const c = (await must(post(`/internal/tenants/${tenantId}/workflows`, { name: 'sens_flow', definition: sens }))).json();

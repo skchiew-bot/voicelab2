@@ -44,11 +44,12 @@ export async function scoreBatch(d: QaDeps, actorId: string | null, e: { tenantI
   });
   const primary = plan.cfg ? d.judges?.[plan.cfg.tier] : undefined;
   const escalate = plan.cfg?.escalateTo ? d.judges?.[plan.cfg.escalateTo] : undefined;
-  let scored = 0; let skipped = 0;
+  let scored = 0; let skipped = 0; let failed = 0;
   for (const run of plan.runs) {
     const set = plan.sets.get(run.name) ?? plan.sets.get('*');
     if (!set) { skipped++; continue; }
     // Judging can take a while: the replay is built in one short transaction and the model is asked outside it.
+    try {
     const rp = await withActor(d.pool, { kind: 'internal' }, (c) => replayRun(c, run.id));
     const card = await scoreCall(set.criteria as Criterion[], rp, { primary, escalate });
     await withActor(d.pool, { kind: 'internal' }, async (c) => {
@@ -73,9 +74,10 @@ export async function scoreBatch(d: QaDeps, actorId: string | null, e: { tenantI
       });
     });
     scored++;
+    } catch { failed++; } // one bad run must not stop the rest of the batch; it stays unscored and is tried next time
   }
   if (scored) await withActor(d.pool, { kind: 'internal' }, (c) => audit(c, actorId, 'qa.score_batch', 'tenant', e.tenantId, { scored, skipped }));
-  return { scored, skipped, remaining: Math.max(0, plan.runs.length - scored - skipped), usedModel: Boolean(primary) };
+  return { scored, skipped, failed, remaining: Math.max(0, plan.runs.length - scored - skipped - failed), usedModel: Boolean(primary) };
 }
 
 export const listScores = async (c: pg.PoolClient, o: { tenantId?: string; runId?: string; limit?: number }) =>

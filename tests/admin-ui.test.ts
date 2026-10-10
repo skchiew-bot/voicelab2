@@ -71,7 +71,7 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(p1.getByText('Inbound and outbound test calls work on both Twilio and Telnyx.')).toBeVisible();
     await expect(p1).toContainText('tested against fakes, not the real provider');
     await expect(p1).toContainText('Still open');
-    await expect(page.getByLabel('Phase 5')).toContainText('Not started');
+    await expect(page.getByLabel('Phase 6')).toContainText('Not started');
     await expect(page.getByLabel('Control Tower', { exact: true }).first()).toBeVisible();
     await expect(page.getByLabel('Applies to every phase')).toContainText('configured model tier');
     await progress.getByText('10 open decisions').click();
@@ -422,7 +422,7 @@ describe.skipIf(!run)('admin UI', () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
     await signIn(page, env.staffToken);
     await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
-    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience']) {
+    for (const route of ['tower', 'providers', `providers/${provider}`, 'tenants', 'rates', 'numbers', 'compliance', 'calls', 'workflows', `workflows/${workflow}`, 'recordings', 'outbound', 'resilience', 'tickets', 'qa', 'changes']) {
       await page.goto(`${base}#/${route}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
@@ -611,6 +611,142 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(field(rules, 'Errors before failing over')).toHaveAttribute('placeholder', '5');
     await page.close();
   }, 60_000);
+
+  it('replays a call, works a ticket, clears a dropped call, scores calls and takes a change through approval, all from the console', async () => {
+    const { parseKey } = await import('../src/secrets.js');
+    const { loadProvider, processWebhook } = await import('../src/store/calls.js');
+    const { dncKeyFrom } = await import('../src/store/dnc.js');
+    const { withActor } = await import('../src/db.js');
+    const { createUser } = await import('../src/store/tenants.js');
+    const { randomUUID } = await import('node:crypto');
+    const st = env.staffToken;
+    const call = (method: 'GET' | 'POST' | 'PUT', url: string, body?: unknown) => env.call(st, method, url, body);
+    const ok = async <T extends { statusCode: number; body: string }>(p: Promise<T>): Promise<T> => { const r = await p; if (r.statusCode >= 300) throw new Error(`setup failed (${r.statusCode}): ${r.body}`); return r; };
+
+    const tenant = (await ok(call('POST', '/internal/tenants', { name: 'Journey UI Co' }))).json().id;
+    const OUR = '+60300000777';
+    const tx = (await ok(call('POST', '/internal/providers', { adapterKey: 'telnyx', name: 'ui-tx', params: { apiKey: 'K', webhookUrl: 'https://voicelab.test/h', connectionId: 'c', webhookPublicKey: 'AAAA' } }))).json().id;
+    await ok(call('POST', '/internal/numbers', { providerId: tx, e164: OUR, tenantId: tenant, country: 'MY' }));
+    const flow = { start: 'ask', variables: ['name'], nodes: {
+      ask: { type: 'speak', speech: 'hybrid', text: 'Hello {{name}}, can you pay this week?', listen: { captureAs: 'a', intents: { yes: ['yes'], no: ['no'] } }, transitions: [{ when: { var: 'a_intent', op: 'eq', value: 'yes' }, to: 'thanks' }, { to: 'ask' }] },
+      thanks: { type: 'speak', speech: 'fixed', text: 'Thank you.', transitions: [{ to: 'done' }] }, done: { type: 'end', outcome: 'paid_promise' } } };
+    const failing = { start: 'look', nodes: { look: { type: 'api', integration: 'nothing', path: '/x', transitions: [{ to: 'done' }] }, done: { type: 'end', outcome: 'ok' } } };
+    const mk = async (name: string, def: unknown) => { const c = (await ok(call('POST', `/internal/tenants/${tenant}/workflows`, { name, definition: def }))).json(); await ok(call('POST', `/internal/workflows/${c.workflow.id}/deploy`, { versionId: c.version.id, environment: 'staging' })); return c; };
+    const wf = await mk('ui_journey', flow); const bad = await mk('ui_failing', failing);
+
+    const key = parseKey(env.config.VOICELAB_SECRET_KEY);
+    const deps = { pool: env.pool, key, dncKey: dncKeyFrom(key), http: env.provider.fetch, baseUrl: 'https://voicelab.test' };
+    const provider = await withActor(env.pool, { kind: 'internal' }, (c) => loadProvider(c, tx));
+    const ev = (kind: 'initiated' | 'answered' | 'ended', pcid: string, extra: object = {}) => ({ key: randomUUID(), providerCallId: pcid, kind, direction: 'inbound' as const, occurredAt: new Date(), transient: { to: OUR, from: '+60129990000' }, ...extra });
+    const live = async (pcid: string, workflowId: string, vars: object) => {
+      await processWebhook(deps, provider!, ev('initiated', pcid)); await processWebhook(deps, provider!, ev('answered', pcid));
+      const callId = (await env.pool.query('SELECT id FROM calls WHERE provider_call_id = $1', [pcid])).rows[0].id as string;
+      const run = (await ok(call('POST', `/internal/workflows/${workflowId}/runs`, { environment: 'staging', kind: 'test', variables: vars, callId }))).json();
+      return { callId, runId: run.id as string, pcid };
+    };
+    const hot = await live('ui1', wf.workflow.id, { name: 'Aisha' });
+    await ok(call('POST', `/internal/workflow-runs/${hot.runId}/reply`, { text: 'no, that is bad' }));
+    await ok(call('POST', `/internal/workflow-runs/${hot.runId}/reply`, { text: 'I will call my lawyer' }));      // passed to a person
+    await processWebhook(deps, provider!, ev('ended', 'ui1', { durationSeconds: 40, endReason: 'completed' }));
+    const calm = await live('ui2', wf.workflow.id, { name: 'Ben' });
+    await ok(call('POST', `/internal/workflow-runs/${calm.runId}/reply`, { text: 'great thank you but no' }));
+    await ok(call('POST', `/internal/workflow-runs/${calm.runId}/reply`, { text: 'yes thanks' }));
+    await processWebhook(deps, provider!, ev('ended', 'ui2', { durationSeconds: 30, endReason: 'completed' }));
+    const drop = await live('ui3', bad.workflow.id, {});
+    await processWebhook(deps, provider!, ev('ended', 'ui3', { durationSeconds: 5, endReason: 'completed' }));
+
+    const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
+    await signIn(page, st);
+
+    // the Control Tower says a call was dropped, and leads to it
+    await expect(page.getByLabel('Needs attention').getByRole('link', { name: /dropped by the system/ })).toBeVisible();
+    await page.getByLabel('Needs attention').getByRole('link', { name: /dropped by the system/ }).click();
+    await expect(page.getByRole('heading', { name: 'Tickets', level: 1 })).toBeVisible();
+    const dropped = page.getByLabel('Dropped calls');
+    await expect(dropped).toContainText('The workflow failed');
+    await dropped.getByRole('link', { name: 'Replay' }).click();
+    await expect(page.getByRole('heading', { name: 'Replay', level: 1 })).toBeVisible();
+    await expect(page.getByLabel('Summary')).toContainText('The system dropped this call');
+    await page.goBack();
+    await dropped.getByRole('button', { name: "I've seen it" }).click();
+    await expect(dropped).toContainText('No dropped calls waiting');
+
+    // replay a call that went well: the mood line leads to the transcript and the step
+    await page.goto(`${base}#/replay/call/${calm.callId}`);
+    await expect(page.getByLabel('Summary')).toContainText('Ended paid_promise');
+    await expect(page.getByLabel('Summary')).toContainText('The system ended the call at done, as the workflow intended');
+    await expect(page.getByLabel('Summary')).toContainText('Kept to the workflow: 100%');
+    const mood = page.getByLabel('Mood over the call');
+    await expect(mood.getByRole('button')).toHaveCount(2);
+    await mood.getByRole('button', { name: /^Turn 2:/ }).click();
+    await expect(page.getByLabel('Mood').getByRole('status')).toContainText('Turn 2');
+    await expect(page.getByLabel('Transcript').locator('li[aria-current="true"]')).toContainText('yes thanks');
+    const steps = page.getByLabel('Every step');
+    await expect(steps.getByRole('row', { name: /heard · ask/ }).first()).toBeVisible();
+    await steps.getByRole('row', { name: /Reached the end/ }).waitFor();
+    // picking the mood point opened the reasoning of the step it belongs to; another step's can be opened too
+    await expect(steps).toContainText('"matchedWords"');
+    await steps.getByRole('row', { name: /Went from ask to thanks/ }).getByRole('button', { name: 'Why' }).click();
+    await expect(steps).toContainText('transition 1 (condition held)');
+
+    // the escalated call has a ticket, which can be worked
+    await page.goto(`${base}#/tickets`);
+    await page.getByRole('row', { name: /Escalation/ }).getByRole('button', { name: 'Open' }).click();
+    const ticket = page.getByRole('region', { name: 'Ticket', exact: true });
+    await expect(ticket).toContainText("The customer's view");
+    await expect(ticket).toContainText('I will call my lawyer');
+    await expect(ticket).toContainText('Council notes');
+    await ticket.getByRole('button', { name: 'Mark in review' }).click();
+    await expect(ticket.getByRole('heading', { name: /Escalation/ })).toContainText('In review');
+    await field(ticket, 'Add a note').fill('Called the customer back.');
+    await ticket.getByRole('button', { name: 'Add', exact: true }).click();
+    await expect(ticket).toContainText('note: Called the customer back.');
+
+    // quality: criteria, then a batch
+    await page.goto(`${base}#/qa`);
+    await field(page, 'Client').selectOption({ label: 'Journey UI Co' });
+    await page.getByRole('button', { name: 'Save criteria' }).click();
+    await expect(page.getByRole('region', { name: 'Criteria', exact: true })).toContainText('Every workflow · version 1');
+    await page.getByRole('button', { name: 'Score finished calls' }).click();
+    await expect(page.getByRole('status')).toContainText('No model is set up, so only the rules were applied');
+    await expect(page.getByRole('region', { name: 'Recent scores', exact: true }).getByRole('row', { name: /ui_journey/ }).first()).toBeVisible();
+
+    // a change, approved by someone else and put live
+    const second = (await withActor(env.pool, { kind: 'internal' }, (c) => createUser(c, null, { tenantId: null, email: 'second@daythree.test', role: 'internal_admin' }))).token;
+    const v2 = (await ok(call('POST', `/internal/workflows/${wf.workflow.id}/versions`, { definition: { ...flow, nodes: { ...flow.nodes, thanks: { type: 'speak', speech: 'fixed', text: 'Thank you very much, we appreciate it.', transitions: [{ to: 'done' }] } } } }))).json();
+    await page.goto(`${base}#/changes`);
+    const form = page.getByLabel('Propose a change');
+    await field(form, 'Workflow').selectOption({ label: 'ui_journey' });
+    await field(form, 'Version').selectOption({ value: v2.id });
+    await field(form, 'Why is this wanted').fill('The thank-you felt curt.');
+    await field(form, 'Scripted callers').fill(JSON.stringify([{ name: 'pays', variables: { name: 'A' }, replies: ['yes'], expect: { outcome: 'paid_promise' } }]));
+    await form.getByRole('button', { name: 'Propose this change' }).click();
+    const detail = page.getByRole('region', { name: 'Change', exact: true });
+    await expect(detail).toContainText('Waiting for approval');
+    await expect(detail.getByRole('list', { name: 'Changes' })).toContainText('thanks: wording: Thank you. → Thank you very much, we appreciate it.');
+    await expect(detail).toContainText('Speech spoken live');
+    const changeId = (await env.pool.query('SELECT id FROM change_requests ORDER BY created_at DESC LIMIT 1')).rows[0].id as string;
+    expect((await env.call(st, 'POST', `/internal/changes/${changeId}/decision`, { decision: 'approved' })).statusCode).toBe(403);   // not by the person who proposed it
+    expect((await env.call(second, 'POST', `/internal/changes/${changeId}/decision`, { decision: 'approved', note: 'Fine.' })).statusCode).toBe(200);
+    await page.reload();
+    await page.getByRole('row', { name: /ui_journey/ }).first().getByRole('button', { name: 'Open' }).click();
+    await expect(page.getByRole('region', { name: 'Change', exact: true })).toContainText('Approved');
+    await page.getByRole('region', { name: 'Change', exact: true }).getByRole('button', { name: 'Show the client' }).click();
+    await expect(page.getByLabel('Showcase')).toContainText('What we saw in the flow today');
+    await expect(page.getByLabel('Showcase')).toContainText('The thank-you felt curt.');
+    await page.getByRole('region', { name: 'Change', exact: true }).getByRole('button', { name: 'Put it live' }).click();
+    await expect(page.getByRole('region', { name: 'Change', exact: true }).getByRole('heading', { level: 2 }).first()).toContainText('Live');
+
+    // the replay fits a phone
+    const phone = await browser.newPage({ viewport: { width: 390, height: 800 } });
+    await signIn(phone, st);
+    await phone.goto(`${base}#/replay/call/${calm.callId}`);
+    await expect(phone.getByRole('heading', { name: 'Replay', level: 1 })).toBeVisible();
+    expect(await phone.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    await phone.close();
+    void hot; void drop;
+    await page.close();
+  }, 120_000);
 
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();

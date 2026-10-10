@@ -122,3 +122,38 @@ export interface FailoverRow { id: number; scope: string; call_id: string | null
 export interface CapacityRow { providerId: string; name: string; active: number; ceiling: number | null }
 export interface FundingRow { providerId: string; provider: string; providerStatus: string; currency: string; balance: string; level: 'ok' | 'warn' | 'critical' | 'empty'; warnBelow: string | null; criticalBelow: string | null }
 export interface PolicyView { errorThreshold: number; errorWindowMs: number; latencyThresholdMs: number; latencyWindowMs: number; latencyMinSamples: number; deadAirMs: number; recoveryOkSamples: number; recoveryDwellMs: number }
+
+export interface ReplayTimeline { index: number; at: string; source: string; type: string; node?: string | null; speaker: 'assistant' | 'caller' | 'system'; summary: string; text?: string; latencyMs?: number; reasoning?: Record<string, unknown>; policy?: string; adherence?: 'on_path' | 'deviation' }
+export interface ReplayView {
+  run: { id: string; workflow: string; status: string; outcome: string | null; environment: string; kind: string; versions: Record<string, string> } | null;
+  call: { id: string; status: string; direction: string; ended_by: string | null; ended_node: string | null; fault: boolean; fault_reason: string | null } | null;
+  summary: { durationMs: number | null; turns: number; outcome: string | null; endedBy: string | null; endedAtNode: string | null; fault: boolean; escalated: boolean };
+  timeline: ReplayTimeline[];
+  transcript: { index: number; speaker: 'assistant' | 'caller'; text: string; at: string; node: string | null; timelineIndex: number; latencyMs?: number; sentiment?: number }[];
+  sentiment: { turn: number; sentiment: number; severe: boolean; kind: string; topic: string | null; node: string | null; transcriptIndex: number; timelineIndex: number }[];
+  adherence: { score: number | null; followed: number; checked: number; deviations: { seq: number; node: string | null; reason: string }[] };
+}
+export interface TicketRow { id: string; kind: 'escalation' | 'fault'; trigger: string; reason: string; node: string | null; status: 'open' | 'in_review' | 'resolved'; created_at: string; call_id: string | null; run_id: string | null }
+export interface TicketFull extends TicketRow {
+  customer_view: string; ai_reviews: { reviewer: string; verdict: string; findings: { check: string; result: string }[] }[];
+  council_notes: { status: string; note?: string; notes: { note: string; at: string }[] }; impact: Record<string, unknown>;
+  events: { id: number; kind: string; status: string | null; note: string | null; at: string }[];
+}
+export interface FaultRow { id: string; direction: string; ended_node: string | null; fault_reason: string; fault_at: string; acknowledged: boolean; flagged_after_ms: string | null }
+export interface QaSet { id: string; use_case: string; version: number; criteria: { id: string; label: string; type: string; weight: number }[] }
+export interface QaScore { id: string; run_id: string; workflow: string; use_case: string; criteria_version: number; score: string; scorer: string; model: string | null; tier: string | null; input_tokens: number; output_tokens: number; escalated_from: string | null; results: { complete: boolean; results: { id: string; label: string; passed: boolean | null; detail: string; scorer: string }[] }; created_at: string }
+export interface QaSummary { byWorkflow: { workflow: string; scored: number; average: string; lowest: string }[]; mostFailed: { criterion: string; label: string; failed: number }[]; unscored: number }
+export interface AiUsage { task: string; model: string; tier: string; decisions: number; input_tokens: string; output_tokens: string; rejected: number; reworked: number; escalations: number }
+export interface ChangeRow { id: string; workflow: string; environment: string; from_version: string | null; to_version: string; status: 'pending' | 'approved' | 'rejected' | 'applied'; reason: string; changes: number; levelsDone: number; levelsTotal: number; created_at: string }
+export interface ChangeFull extends ChangeRow {
+  diff: { shape: string; summary: string[]; lines: { op: '+' | '-' | '~'; node: string | null; text: string }[] };
+  financial: { basis: { scenarios: number }; delta: { synthChars: number; says: number; steps: number; escalations: number; costUsd: string | null }; ratesConfirmed: boolean | null; note: string; before: { synthChars: number } | null; after: { synthChars: number } };
+  progress: { level: number; name: string; decision: string | null; note: string | null; at: string | null }[]; nextLevel: number | null;
+}
+export interface Showcase {
+  change: { workflow: string; status: string; reason: string; from: string | null; to: string };
+  before: { version: string | null; steps: { id: string; type: string; start: boolean; text: string }[] }; after: { version: string; steps: { id: string; type: string; start: boolean; text: string }[] };
+  detected: { periodDays: number; calls: number; escalated: number; escalationPercent: number | null; failed: number; averageSentiment: number | null; turns: number; turnsNotUnderstood: number; whereCallsEscalate: { node: string; escalations: number }[] };
+  why: string; changes: ChangeFull['diff']; financial: ChangeFull['financial']; approvals: ChangeFull['progress'];
+  audio: { node: string; language: string; text: string; recordingId: string | null }[]; audioNote: string;
+}

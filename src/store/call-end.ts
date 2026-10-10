@@ -48,8 +48,9 @@ export async function sweepFaults(c: pg.PoolClient, now = new Date()) {
   const latency = await dropLatencySeconds(c);
   const cutoff = new Date(now.getTime() - latency * 1000);
   const rows = (await c.query(
-    `SELECT DISTINCT ON (c.id) c.id, c.tenant_id, c.project_id, r.status, r.outcome, r.error, r.state
-       FROM calls c JOIN workflow_runs r ON r.call_id = c.id
+    `WITH locked AS (SELECT id FROM calls WHERE status IN ('in_progress', 'ringing') AND ended_at IS NULL AND NOT fault FOR UPDATE SKIP LOCKED)
+     SELECT DISTINCT ON (c.id) c.id, c.tenant_id, c.project_id, r.status, r.outcome, r.error, r.state
+       FROM calls c JOIN locked l ON l.id = c.id JOIN workflow_runs r ON r.call_id = c.id
       WHERE c.status IN ('in_progress', 'ringing') AND c.ended_at IS NULL AND NOT c.fault
         AND ((r.status = 'ended' AND r.outcome IN ('error', 'integration_failed') AND r.ended_at < $1)
           OR (r.status IN ('running', 'processing') AND r.updated_at < $1))

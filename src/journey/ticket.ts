@@ -49,10 +49,10 @@ export function draftTicket(i: TicketInput): TicketDraft {
     { check: 'workflow_adherence', result: i.adherence.score === null ? 'Not checked: the definitions were not available.' : `${i.adherence.score}% of moves kept to the workflow${i.adherence.deviations.length ? `; ${i.adherence.deviations.length} did not.` : '.'}` },
     { check: 'integrations', result: `${i.steps.filter((s) => s.type === 'api_error').length} integration call${i.steps.filter((s) => s.type === 'api_error').length === 1 ? '' : 's'} failed.` },
   ];
-  const justified = i.kind === 'fault' ? false : i.trigger === 'severe_sentiment' || i.trigger === 'failed_recoveries';
+  const justified = i.kind === 'fault' ? false : i.trigger === 'severe_sentiment' || i.trigger === 'failed_recoveries' || i.trigger === 'workflow_handoff';
   const aiReviews: Record<string, Json>[] = [{
     reviewer: 'rules', model: null, kind: i.kind,
-    verdict: i.kind === 'fault' ? 'A system fault: the caller should be contacted and the cause fixed.' : justified ? 'The escalation followed the policy (about two failed recoveries, or severe sentiment).' : 'The escalation was not triggered by the standard policy; check the flow.',
+    verdict: i.kind === 'fault' ? 'A system fault: the caller should be contacted and the cause fixed.' : i.trigger === 'workflow_handoff' ? 'The workflow passed the call to a person, as it was written to.' : justified ? 'The escalation followed the policy (about two failed recoveries, or severe sentiment).' : 'The escalation was not triggered by the standard policy; check the flow.',
     findings,
   }];
 

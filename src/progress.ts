@@ -90,12 +90,23 @@ export const PHASES: PhaseProgress[] = [
     ],
   },
   {
-    id: '5', name: 'Journey, QA And Audit', status: 'not_started', summary: 'Every call can be reconstructed down to the node and the reason.',
+    id: '5', name: 'Journey, QA And Audit', status: 'in_progress', summary: 'Every call can be reconstructed down to the node and the reason. Replay, tickets, call-end classification with a drop alert, turn-by-turn reading, QA scoring, the AI decision audit and approved changes are built and tested against fakes.',
     criteria: [
-      notMet('Any production call can be fully replayed.'),
-      notMet('Every escalation produces a ticket with all the required fields.'),
-      notMet('An unintentional system drop raises an alert within agreed latency.'),
-    ], open: [],
+      { text: 'Any production call can be fully replayed.', state: 'partly', proof: 'fakes',
+        note: "A call that carried a workflow is replayed step by step with the reason for each, the transcript with timing, adherence to the workflow, a clickable mood line, the call's own events and any failover; a call with no workflow is replayed from its events. Built from stored records and checked against calls driven through the real code, but no real phone call has yet been through it, and the call's audio is not recorded, so a replay shows what was said, not how it sounded." },
+      { text: 'Every escalation produces a ticket with all the required fields.', state: 'met', proof: 'tests',
+        note: "A call passed to a person (by the reading of the caller, or by the workflow's own handoff) opens a ticket in the same step, with the reason, the customer's view, the automatic review, council notes, and the impact; the database refuses a ticket with a field missing. Council notes begin as \"not requested\" until the council exists (a later phase), and the automatic review is by rules." },
+      { text: 'An unintentional system drop raises an alert within agreed latency.', state: 'partly', proof: 'fakes',
+        note: "A call that ends after the workflow failed, or while it was still working, is flagged as a fault when the end is reported, with a Control Tower alert and a ticket; a watchdog flags a drop that never came with an end event once the failure is older than the agreed latency (60 s unless changed). Tested with simulated provider events: who really hung up is judged from the workflow's state, not from anything the providers report, and the watchdog must be run on a schedule." },
+    ], open: [
+      'No real call has been replayed: no live provider events have reached this code, and the call audio is not recorded',
+      'The watchdog (`POST /internal/faults/sweep`) must be run on a schedule by the deployment; nothing calls it automatically',
+      'Who ended a call is inferred from the workflow, because what the providers report about who hung up has not been checked against the live services',
+      'Mood and intent are read by word lists (English and Bahasa Malaysia, extendable per client); a model for turns the lists cannot read is not connected',
+      'QA judgement questions need a model; none is connected, so they are left out of the score and the scorecard says it is incomplete',
+      'The council (Phase 6) does not exist, so ticket council notes are empty and changes are not reviewed by it',
+      'Changes can be proposed, approved and put live; a change to a live flow made some other way is not stopped from skipping this path',
+    ],
   },
   {
     id: '6', name: 'Self-Learning Promotion Loop', status: 'not_started', summary: 'Promote nodes from live TTS to pre-recorded audio based on evidence, never assumption.',
@@ -124,7 +135,7 @@ export const CROSS_CUTTING: Criterion[] = [
   {
     text: 'each AI task the phase introduces has a configured model tier, a logged token count and a documented escalation rule.',
     state: 'partly', proof: 'none',
-    note: 'No AI task exists in the product yet. The model_config table and the tier rules in CLAUDE.md are in place; token logging and escalation rules do not exist yet.',
+    note: 'The model for a task is configuration (`model_config`), and every AI decision, with its model, tier, tokens and any step up a tier, goes in an append-only record (`ai_decisions`) that the console rolls up. The two AI tasks that exist (a model-written line, and a QA judgement) log tokens and escalate on low confidence; no real model is connected yet, so this is tested with stand-ins.',
   },
 ];
 

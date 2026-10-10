@@ -152,7 +152,7 @@ export async function startRun(d: RunDeps, actorId: string | null, e: { workflow
         out.state.status, out.state.outcome ?? null, out.state.error ?? null, e.callId ?? null]);
     await persistSteps(c, id, 1, out.records);
     await recordStepDecisions(c, { tenantId: ctx.wf.tenant_id, callId: e.callId ?? null, runId: id, records: out.records });
-    if (out.state.escalation) await ticketForEscalation(c, actorId, id);
+    if (out.state.escalation || out.state.outcome === 'handoff_human') await ticketForEscalation(c, actorId, id);
     await audit(c, actorId, 'workflow.run', 'workflow', ctx.wf.id, { run: id, kind: e.kind, environment: e.environment });
     return view(id, out.state, out.records);
   });
@@ -198,7 +198,7 @@ export async function replyRun(d: RunDeps, runId: string, text: string, expected
     await persistSteps(c, runId, last + 1, out.records);
     // A call passed to a person gets its ticket in the same step that passed it, so none can be missed.
     await recordStepDecisions(c, { tenantId: ctx.run.tenant_id, callId: ctx.run.call_id ?? null, runId, records: out.records });
-    if (out.state.escalation) await ticketForEscalation(c, null, runId);
+    if (out.state.escalation || out.state.outcome === 'handoff_human') await ticketForEscalation(c, null, runId);
     return view(runId, out.state, out.records, ctx.run.state_version + 1);
   });
 }

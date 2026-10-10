@@ -299,6 +299,25 @@ Goal: every call can be reconstructed down to the node and the reason.
 - **Client showcase replay** shows the existing flow and what was detected, then what changed and why, before and after. The stitched audio can be played.
 - Financial assessment attached to every proposed change.
 
+**Status (in progress)**
+
+Built and tested against fakes (no real call has been through it):
+- **Reading each turn:** the kind of moment (inquiry, complaint, request), a topic, and sentiment, by word lists in English and Bahasa Malaysia that a client can add to. The call re-routes when the intent changes (`intentRoutes` in a workflow), and escalates to a person after about two failed recoveries in a row (a turn not understood, or the caller upset) or on severe sentiment, whichever is first. A sensitive answer is never read. Escalating needs no model.
+- **How a call ended:** recorded to the node, and by whom: the customer (hung up while the workflow waited), or the system. A system drop (the workflow failed or was still working when the call ended, or the provider reported a failure after answer) is flagged on the call, alerts in the Control Tower straight away until someone has looked, and opens a ticket. A watchdog flags a drop that came with no end event once the failure is older than the agreed latency.
+- **Tickets** for every call passed to a person and every dropped call, each with the reason, the customer's view, the automatic review, council notes and the impact; they are never edited, and what happens to one is kept as events.
+- **Replay** of a call: every step with its reason (the node's script, the words that decided an intent, the rule that chose the next step, a model's account of a line it wrote), the transcript with how long each step took, whether the call kept to its workflow, a mood line whose points lead to the transcript line and the step, the call's own events and any failover.
+- **QA scorecard:** criteria per client and use case (each version kept), rules for what can be decided by rules, a model only for a question of judgement (the configured tier first, one tier up when unsure), scored in batches after the call, with tokens recorded.
+- **Audit trail of AI decisions:** every model-written line is checked and recorded as used, tidied or turned down with the reason; every QA judgement and step up a tier is recorded with model, tier and tokens. A line a model wrote is never spoken if it is empty, has an unfilled slot, runs on, or contains something that looks like a phone number.
+- **Changes:** a proposed change shows what differs (a visual diff), carries a financial assessment worked out by playing scripted callers through both versions, and needs the configured levels of approval, each by a different person who did not propose it; the history is kept, and applying goes through the usual deploy gates. A **showcase** tells the client the flow now, what was detected in it, what changes and why, the flow after, and plays the recorded phrases.
+
+Not built or not proven:
+- **No real call has been replayed.** Provider events are simulated, and call audio is not recorded.
+- **Who hung up** is inferred from where the workflow was, because what the providers report has not been checked against the live services.
+- **The watchdog must be scheduled** by the deployment.
+- **A model for turns the word lists cannot read, and for QA judgement, is not connected:** those parts are tested with stand-ins and otherwise left out (the scorecard says when it is incomplete).
+- **The council** is a later phase: ticket council notes begin as "not requested".
+- The financial assessment counts speech spoken live, lines and steps, and escalations in the rehearsal; call length and telephony cost are not estimated.
+
 **Exit criteria**
 - Any production call can be fully replayed.
 - Every escalation produces a ticket with all the required fields.

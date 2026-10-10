@@ -38,7 +38,9 @@ const toRow = (t: TicketDraft) => [t.kind, t.trigger, t.reason, t.node, t.custom
 export async function ticketForEscalation(c: pg.PoolClient, actorId: string | null, runId: string) {
   const g = await gather(c, runId);
   if (g.run.kind === 'simulation') return null;
-  const esc = g.state.escalation;
+  // Either the call was escalated by reading the caller, or the workflow's own handoff passed it to a person.
+  const handoff = g.state.outcome === 'handoff_human' ? [...g.steps].reverse().find((s) => s.type === 'handoff_human') : undefined;
+  const esc = g.state.escalation ?? (handoff ? { trigger: 'workflow_handoff', detail: String((handoff.payload as Record<string, Json>).reason ?? 'The workflow handed the call to a person.'), node: handoff.node as string } : undefined);
   if (!esc) return null;
   const adherence = checkAdherence(g.steps, g.defs, g.state.workflow ?? Object.keys(g.defs)[0]!);
   const draft = draftTicket({

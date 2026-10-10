@@ -413,10 +413,10 @@
  {
   "number": 13,
   "title": "Dev Control Tower: branch and fork audit; fix session cost across resumed runs",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/13",
   "created_at": "2026-10-10T01:49:00Z",
-  "merged_at": null,
+  "merged_at": "2026-10-10T01:51:55Z",
   "head": "claude/elegant-hopper-6mid2t",
   "head_sha": "905cff7ecbfa3aac025deaece7d36ac184595e82",
   "findings": [

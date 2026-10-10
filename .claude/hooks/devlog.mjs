@@ -145,11 +145,13 @@ function sessionFiles(transcriptPath) {
  * - Claude Code writes one line per content block, all with the same message id and usage, and a
  *   session resumed in another folder starts a new transcript holding copies of the earlier
  *   messages, so each message id is counted once across every file.
- * - Background calls (such as the permission classifier) are not in any transcript. Claude Code's
- *   "cost-state" checkpoints include them. Each run of Claude Code (its `startTime`) keeps its own
- *   running total: a resumed session starts a new run from zero, so totals from different runs
- *   are added, never compared. A message is priced only when it came after the last checkpoint of
- *   the run it belongs to (`since`).
+ * - Background calls (such as the permission classifier) and subagents are included in Claude
+ *   Code's "cost-state" checkpoints but not in the transcripts. Checkpoints are grouped by run (their
+ *   `startTime`): a resume that restores Claude Code's cost state keeps its run and growing totals;
+ *   one that cannot (for example in another folder, whose new transcript has no checkpoint) starts a
+ *   new run from zero. So each run's latest checkpoint is added, never compared with another run's,
+ *   and a message is priced only when it came after the last checkpoint of the run it belongs to
+ *   (`since`). Checkpoints without a `startTime` (older versions) count as one run.
  */
 export function tokenUsage(transcriptPath) {
   const all = {}; const since = {};
@@ -196,6 +198,7 @@ export function tokenUsage(transcriptPath) {
   for (const msg of messages) {
     add(all, msg);
     const t = new Date(msg.ts).getTime();
+    if (!Number.isFinite(t)) continue; // no timestamp: it cannot be placed in a run, so it is not priced
     const run = runOf(t);
     if (ordered.length && (!run || !run.at || t > new Date(run.at).getTime())) add(since, msg);
   }

@@ -117,13 +117,13 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "no tracked file holds a token in a real provider's key format"
 
 ### L-016: Check an integration against a real payload, not an assumed one
-- **Seen:** 5 times. Twilio and Telnyx request formats were written from memory and are still unverified against the live services ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)). The dev Control Tower hook assumed the hook's `session_id` was the claude.ai session id; in a cloud session it is a local id, so links broke and one session counted twice (session on 2026-10-10). Session cost was nearly built on the transcript alone; a real transcript showed each message repeated per content block and background calls (the permission classifier) missing, so cost is now Claude Code's own checkpoint plus priced messages after it (session on 2026-10-10). A session resumed in another folder starts a new transcript that copies the earlier messages; summing transcripts double counted (independent review, 2026-10-10). The fix then assumed a resumed run's checkpoints carry the earlier total and called taking the largest "right either way"; real checkpoints showed each run starts from zero, so spend fell by a whole run once the new one overtook it ([#12](https://github.com/skchiew-bot/voicelab2/pull/12), found by the next dashboard run).
+- **Seen:** 5 times. Twilio and Telnyx request formats were written from memory and are still unverified against the live services ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)). The dev Control Tower hook assumed the hook's `session_id` was the claude.ai session id; in a cloud session it is a local id, so links broke and one session counted twice (session on 2026-10-10). Session cost was nearly built on the transcript alone; a real transcript showed each message repeated per content block and background calls (the permission classifier) missing, so cost is now Claude Code's own checkpoint plus priced messages after it (session on 2026-10-10). A session resumed in another folder starts a new transcript that copies the earlier messages; summing transcripts double counted (independent review, 2026-10-10). The fix then assumed a resumed run's checkpoints carry the earlier total and called taking the largest "right either way"; real checkpoints showed the resumed run started from zero (it had no checkpoint to restore), so spend fell by a whole run once the new one overtook it; the first wording of that finding then overgeneralised it to every resume (independent review, 2026-10-10) ([#12](https://github.com/skchiew-bot/voicelab2/pull/12), found by the next dashboard run).
 - **Rule:** Before building on an outside payload or format, capture one real example and test against its actual shape. Where that is impossible, say so as unverified, in the PR and in `src/progress.ts`, and do not argue the code is right regardless; check it against real data as soon as the data exists.
 - **Guards:**
   - `tests/devlog.test.ts` › "records the claude.ai session id in a cloud session, and the local id elsewhere"
   - `tests/devlog.test.ts` › "counts each message once, prices tokens exactly, and adds them to Claude Code's own checkpoint"
   - `tests/devlog.test.ts` › "counts a session resumed in another folder once"
-  - `tests/devlog.test.ts` › "each run's checkpoint added"
+  - `tests/devlog.test.ts` › "places every message in its own run"
 
 ### L-017: Record logs by allowlist; anything logged may be published
 - **Seen:** The dev Control Tower hook scrubbed by blocklist and still let through credentials in URLs, `key=value` secrets, tokens split by digit runs, emails, and other tools' raw error text with a customer's name and email, all bound for git (independent review, 2026-10-10).
@@ -165,3 +165,9 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** Turn every timestamp into one form (`new Date(x).toISOString()`, or milliseconds) at the edge, before comparing or sorting.
 - **Guards:**
   - `tests/devlog.test.ts` › "finds logging gaps"
+
+### L-023: Keep every branch accountable to the plan, and the trunk as the default
+- **Seen:** The repository's default branch on GitHub was still the first session branch (`claude/elegant-fermat-er13o8`), long merged, so clones and the GitHub page showed stale code; seven merged branches were never deleted; and nothing checked that a branch belonged to the plan (found by the dev Control Tower branch audit, 2026-10-10).
+- **Rule:** Every branch is either named for a plan phase, carries a PR titled with a phase, or is linked to a board task; anything else is a fork to be linked or retired. The default branch is `main`. Deleting branches and changing the default are the owner's calls: report them, never do them unasked.
+- **Guards:**
+  - `tests/devlog.test.ts` › "classes every branch as the trunk, part of the plan, or a fork, and flags merged, stale and default-branch problems"

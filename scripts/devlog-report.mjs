@@ -86,6 +86,78 @@ export function reviewFindings(body = '') {
   });
 }
 
+// ------------------------------------------------------------ branches
+/** Plan phases (id and name) from src/progress.ts, which a test ties to BUILD_PLAN.md. */
+export function planPhases(dir = root) {
+  try {
+    const src = readFileSync(path.join(dir, 'src', 'progress.ts'), 'utf8');
+    return [...src.matchAll(/^\s*id: '([^']+)', name: '([^']+)'/gm)].map((m) => ({ id: m[1], name: m[2] }));
+  } catch { return []; }
+}
+
+/**
+ * Every branch on origin, and every branch of a known GitHub fork, classed as the trunk, part of
+ * the plan, or a fork (work the plan does not account for). Reads local remote refs: run
+ * `git fetch --prune origin` first.
+ */
+export function branchAudit({ prs, board, phases, repo, cfg, now }) {
+  const bc = cfg.branches ?? {};
+  const trunk = bc.trunk ?? 'main';
+  const phaseRe = new RegExp(bc.phasePattern ?? '^claude/phase-([0-9a-z]+)-', 'i');
+  const stale = (bc.staleDays ?? 7) * 864e5;
+  const phaseById = new Map(phases.map((p) => [p.id.toLowerCase(), p]));
+  const phaseInTitle = (title) => { const m = /\bPhase (\d+)\b/i.exec(title ?? ''); return m ? phaseById.get(m[1]) : null; };
+
+  const classify = (name) => {
+    const reasons = []; let plan = null; let cls = 'fork';
+    if (name === trunk) return { cls: 'trunk', plan: null, reasons: ['trunk'] };
+    const m = phaseRe.exec(name);
+    if (m) {
+      const p = phaseById.get(m[1].toLowerCase());
+      if (p) { plan = `Phase ${p.id}: ${p.name}`; cls = 'plan'; reasons.push('named for a plan phase'); }
+      else reasons.push(`names phase "${m[1]}", which is not in the plan`);
+    }
+    const branchPrs = prs.filter((p) => p.head === name);
+    for (const p of branchPrs) {
+      const ph = phaseInTitle(p.title);
+      if (ph && cls !== 'plan') { plan = `Phase ${ph.id}: ${ph.name} (#${p.number})`; cls = 'plan'; reasons.push(`PR #${p.number} is plan work`); }
+    }
+    const tasks = board.filter((t) => t.branch === name || (t.pr && branchPrs.some((p) => p.number === t.pr)));
+    if (tasks.length && cls !== 'plan') { plan = `Task ${tasks.map((t) => t.id).join(', ')}`; cls = 'plan'; reasons.push('linked to a board task'); }
+    if (cls === 'fork' && !reasons.length) reasons.push('no plan phase, PR or board task');
+    return { cls, plan, reasons, prs: branchPrs.map((p) => ({ number: p.number, state: p.state })) };
+  };
+
+  const out = [];
+  const refs = git('for-each-ref', 'refs/remotes/origin', '--format=%(refname:short)%09%(objectname:short)%09%(committerdate:iso-strict)')
+    .split('\n').filter(Boolean).map((l) => l.split('\t')).filter(([r]) => r !== 'origin/HEAD' && r !== 'origin');
+  for (const [ref, sha, date] of refs) {
+    const name = ref.replace(/^origin\//, '');
+    const [behind = 0, ahead = 0] = (git('rev-list', '--left-right', '--count', `origin/${trunk}...${ref}`).trim().split(/\s+/).map(Number));
+    const c = classify(name);
+    const last = new Date(date).toISOString();
+    const openPr = (c.prs ?? []).some((p) => p.state === 'open');
+    const flags = [];
+    if (repo?.defaultBranch && name === repo.defaultBranch && name !== trunk) flags.push('default branch is not the trunk');
+    if (name !== trunk && ahead === 0) flags.push('merged: can be deleted');
+    if (name !== trunk && ahead > 0 && !openPr) flags.push('unmerged, no open PR');
+    if (name !== trunk && ahead > 0 && now - new Date(last) > stale) flags.push(`no commit for ${Math.floor((now - new Date(last)) / 864e5)} days`);
+    out.push({ repo: repo?.fullName ?? 'origin', name, sha, last, ahead, behind, merged: name !== trunk && ahead === 0, ...c, flags });
+  }
+  const forks = (repo?.forks ?? []).map((f) => ({
+    fullName: f.fullName, url: f.url, pushedAt: f.pushedAt ?? null,
+    branches: (f.branches ?? []).map((b) => {
+      const known = /^[0-9a-f]{7,40}$/.test(b.sha ?? '') && git('cat-file', '-t', b.sha).trim() === 'commit';
+      return { name: b.name, sha: b.sha, ...classify(b.name), inSync: known, flags: known ? [] : ['has commits not in this repository'] };
+    }),
+  }));
+  return {
+    trunk, defaultBranch: repo?.defaultBranch ?? null, forksCount: repo?.forksCount ?? null, checkedAt: repo?.checkedAt ?? null,
+    branches: out.sort((a, b) => (a.name === trunk ? -1 : b.name === trunk ? 1 : b.last.localeCompare(a.last))), forks,
+    uninspectedForks: Math.max(0, (repo?.forksCount ?? 0) - forks.length),
+  };
+}
+
 const sum = (xs) => xs.reduce((a, b) => a + b, 0n);
 const pct = (n, d) => (d > 0 ? Math.round((n / d) * 1000) / 10 : null); // a ratio of counts, for display only
 const tierOf = (model, tiers = {}) => Object.entries(tiers).find(([k, v]) => !k.startsWith('_') && Array.isArray(v) && v.some((w) => model.includes(w)))?.[0] ?? 'other';
@@ -104,7 +176,7 @@ export function buildBoard(events = activity(), now = new Date()) {
   const tasks = new Map();
   for (const e of events.filter((x) => x.event === 'Task')) {
     const t = tasks.get(e.id) ?? { id: e.id, status: 'planned', sessions: [], events: 0, started: e.ts, attempt: 1 };
-    for (const k of ['title', 'epic', 'workstream', 'phase', 'owner', 'status', 'progress', 'attempt', 'tests', 'blocker', 'next', 'pr']) {
+    for (const k of ['title', 'epic', 'workstream', 'phase', 'owner', 'status', 'progress', 'attempt', 'tests', 'blocker', 'next', 'pr', 'branch']) {
       if (e[k] !== undefined) t[k] = e[k];
     }
     if (e.action === 'done') { t.finished = e.ts; t.blocker = ''; }
@@ -129,7 +201,7 @@ export function build(opts = {}) {
   const prs = (prsFile ? JSON.parse(readFileSync(prsFile, 'utf8')) : []).map((p) => {
     const findings = p.findings ?? reviewFindings(p.body);
     return {
-      number: p.number, title: p.title, url: p.html_url, state: p.merged_at ? 'merged' : p.state,
+      number: p.number, title: p.title, url: p.html_url, state: p.merged_at ? 'merged' : p.state, head: p.head ?? null,
       created: p.created_at, merged: p.merged_at ?? null, findings, reviewed: findings.length > 0,
       lessons: lessons.filter((l) => l.prs.includes(p.number)).map((l) => l.id),
     };
@@ -335,6 +407,11 @@ export function build(opts = {}) {
     },
   };
 
+  // -------------------------------------------------------------- branches
+  let repoFacts = null;
+  try { repoFacts = JSON.parse(readFileSync(path.join(root, 'devlog', 'repo.json'), 'utf8')); } catch { /* not recorded yet */ }
+  const branches = branchAudit({ prs, board, phases: planPhases(), repo: repoFacts, cfg, now });
+
   // ------------------------------------------------------------- attention
   const behind = Number(git('rev-list', '--count', 'HEAD..origin/main').trim() || 0);
   const starts = events.filter((e) => e.event === 'SessionStart').sort((a, b) => b.ts.localeCompare(a.ts));
@@ -349,6 +426,13 @@ export function build(opts = {}) {
   for (const p of prs.filter((x) => x.state === 'open')) attention.push({ level: 'info', text: `PR #${p.number} is open: ${p.title}.` });
   for (const s of starts.filter((x) => x.behind_main > 0).slice(0, 5)) attention.push({ level: 'info', text: `A session started ${s.behind_main} commits behind main on ${s.ts.slice(0, 10)}.` });
   for (const g of areas.governance.loggingGaps) attention.push({ level: 'warning', text: `Session ${g.session.slice(-8)} made ${g.commits} commit(s) while not being logged${g.lastLogged ? ` (last logged ${g.lastLogged.slice(0, 16).replace('T', ' ')} UTC)` : ''}. Its hooks were not running.` });
+  if (branches.defaultBranch && branches.defaultBranch !== branches.trunk) attention.push({ level: 'warning', text: `The repository's default branch on GitHub is ${branches.defaultBranch}, not ${branches.trunk}: clones and the GitHub page show it. Change it in the repository settings.` });
+  for (const b of branches.branches.filter((x) => x.cls === 'fork')) attention.push({ level: 'warning', text: `Branch ${b.name} is not part of the plan (${b.reasons.join('; ')}). Link it to a board task with --branch, or retire it.` });
+  for (const b of branches.branches.filter((x) => x.flags.some((f) => f.startsWith('no commit')) )) attention.push({ level: 'warning', text: `Branch ${b.name} has unmerged work and ${b.flags.find((f) => f.startsWith('no commit'))}.` });
+  const mergedLeft = branches.branches.filter((x) => x.merged);
+  if (mergedLeft.length) attention.push({ level: 'info', text: `${mergedLeft.length} merged branch(es) are still on GitHub and can be deleted: ${mergedLeft.map((b) => b.name).join(', ')}.` });
+  for (const f of branches.forks) for (const b of f.branches.filter((x) => !x.inSync || x.cls === 'fork')) attention.push({ level: 'warning', text: `Fork ${f.fullName}, branch ${b.name}: ${[...b.flags, ...(b.cls === 'fork' ? ['not part of the plan'] : [])].join('; ')}.` });
+  if (branches.uninspectedForks) attention.push({ level: 'warning', text: `${branches.uninspectedForks} GitHub fork(s) of the repository have not been inspected. Add them to a session so /control-tower can read their branches.` });
   if (economics.unpriced.length) attention.push({ level: 'warning', text: `No price configured for ${economics.unpriced.join(', ')}; its cost is not counted.` });
   for (const a of alerts.filter((x) => x.kind === 'waste' && x.ts >= since(2))) attention.push({ level: 'info', text: `Wasted effort in ${a.session.slice(-8)}: ${a.rule} (${a.key}).` });
 
@@ -365,7 +449,7 @@ export function build(opts = {}) {
       sessions: sessionRows.length, toolCalls: events.filter((e) => e.tool).length, failures: events.filter((e) => e.event === 'PostToolUseFailure').length,
       incidents: incidents.length, openTasks: areas.workload.openTasks,
     },
-    attention, areas, economics, board, incidents, alerts: alerts.slice(0, 50), registry: registry.map(({ costUnits, ...r }) => r),
+    attention, areas, economics, board, incidents, branches, alerts: alerts.slice(0, 50), registry: registry.map(({ costUnits, ...r }) => r),
     prs, lessons,
     sessions: sessionRows.map(({ costUnits, ...s }) => s),
     commits: realCommits.slice(0, 60),

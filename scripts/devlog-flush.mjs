@@ -115,6 +115,8 @@ export function clean(raw) {
     set('attempt', nat(raw.attempt, 99));
     if (typeof raw.tests === 'string' && /^\d{1,6}\/\d{1,6}$/.test(raw.tests)) out.tests = raw.tests;
     set('pr', nat(raw.pr));
+    // A branch linked to a task: this project's branch names as they are, anything else scrubbed.
+    if (typeof raw.branch === 'string') out.branch = /^(main|claude\/[a-z0-9.-]{1,80})$/.test(raw.branch) ? raw.branch : scrub(raw.branch, 100);
   }
   if (raw.event === 'Incident') {
     if (typeof raw.id !== 'string' || !/^INC-\d{8}-[0-9a-f]{4}$/.test(raw.id)) return null;

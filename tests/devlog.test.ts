@@ -371,6 +371,37 @@ describe('usage and cost', () => {
     }
   });
 
+  it('places every message in its own run and prices only what came after that run\'s last checkpoint', () => {
+    // Worked out by hand. Opus output is $20 per million tokens.
+    const { dir } = makeRepo();
+    const at = (hhmm: string) => `2026-10-10T${hhmm}:00Z`;
+    const msg = (id: string, ts: string | undefined) => JSON.stringify({ type: 'assistant', ...(ts ? { timestamp: ts } : {}), message: { id, model: 'claude-opus-5-5', usage: U(0, 1_000_000) } });
+    const cp = (total: number, start: string, lines: number, ms: number) => JSON.stringify({ type: 'cost-state', totalCostUSD: total, startTime: Date.parse(start),
+      totalDuration: ms, totalLinesAdded: lines, modelUsage: { 'claude-opus-5-5': { inputTokens: 1, outputTokens: 1, costUSD: total } } });
+    const folder = path.join(dir, 'projects', '-repo');
+    mkdirSync(folder, { recursive: true });
+    const tp = path.join(folder, 'runs.jsonl');
+    writeFileSync(tp, [
+      msg('pre', '2026-10-09T23:00:00Z'), // before any run started: priced ($20)
+      msg('a1', at('00:01')), cp(5, at('00:00'), 1, 40),   // run A, first checkpoint
+      msg('a2', at('00:02')), cp(10, at('00:00'), 3, 100), // run A, latest checkpoint covers a1 and a2
+      msg('a3', at('00:03')), // run A, after its last checkpoint: priced ($20)
+      msg('b1', at('00:20')), cp(7, at('00:10'), 4, 50),   // run B started 00:10 from zero; covers b1
+      msg('b2', at('00:40')), // run B, after its checkpoint: priced ($20)
+      msg('nots', undefined), // no timestamp: cannot be placed, not priced
+    ].join('\n') + '\n');
+    run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'Stop', session_id: 's', transcript_path: tp }));
+    const u = spoolLines(dir).find((l) => l.event === 'Usage');
+    expect(u.tokens['claude-opus-5-5'].messages).toBe(7);
+    expect(u.runs).toBe(2);
+    expect(u.costUSD).toBe('77.00000000'); // 10 + 7 + 20 (pre) + 20 (a3) + 20 (b2)
+    expect(u.checkpoint).toMatchObject({ costUSD: '17.00000000', linesAdded: 7, durationMs: 150 });
+    expect(u.checkpoint.models['claude-opus-5-5'].costUSD).toBe('17.00000000');
+    run(dir, 'scripts/devlog-flush.mjs', []);
+    const flushed = readdirSync(path.join(dir, 'devlog/activity')).map((f) => readFileSync(path.join(dir, 'devlog/activity', f), 'utf8')).join('');
+    expect(JSON.parse(flushed.trim().split('\n').find((l) => l.includes('"Usage"'))!)).toMatchObject({ runs: 2, costUSD: '77.00000000' });
+  });
+
   it('prices the whole transcript when there is no checkpoint yet, and says so, and never guesses a price', () => {
     const { dir } = makeRepo();
     const tp = transcript(dir, [
@@ -565,5 +596,52 @@ describe('control tower report', () => {
     const out = path.join(dir, 'r.json');
     run(dir, 'scripts/devlog-report.mjs', ['--json', out]);
     expect(JSON.parse(readFileSync(out, 'utf8')).economics.spend).toEqual({ usd: '0.10000000', myr: '0.45000000' });
+  });
+});
+
+describe('branch and fork audit', () => {
+  it('classes every branch as the trunk, part of the plan, or a fork, and flags merged, stale and default-branch problems', () => {
+    const { dir, git } = makeRepo();
+    mkdirSync(path.join(dir, 'src'), { recursive: true });
+    writeFileSync(path.join(dir, 'src/progress.ts'), read('src/progress.ts'));
+    const commit = (msg: string, date = '2026-10-10T00:00:00Z') => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', msg], { cwd: dir, env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } });
+    commit('base');
+    git('add', '-A'); commit('tooling');
+    const origin = freshDir('origin-bare');
+    execFileSync('git', ['init', '-q', '--bare', origin]);
+    git('remote', 'add', 'origin', origin);
+    const branch = (name: string, msg: string, date?: string) => { git('switch', '-q', '-c', name, 'main'); commit(msg, date); git('push', '-q', 'origin', name); };
+    branch('claude/phase-2-workflow', 'phase 2 work');
+    git('switch', '-q', 'main'); git('merge', '-q', '--no-edit', 'claude/phase-2-workflow'); git('push', '-q', 'origin', 'main');
+    branch('claude/phase-9-mystery', 'phase 9?');
+    branch('feature/side-project', 'unplanned', '2026-09-01T00:00:00Z');
+    branch('claude/session-abc', 'task work');
+    branch('claude/old-default', 'old default');
+    git('fetch', '-q', '--prune', 'origin');
+    const unknownSha = 'f'.repeat(40);
+    writeFileSync(path.join(dir, 'devlog/repo.json'), JSON.stringify({ fullName: 'o/r', defaultBranch: 'claude/old-default', forksCount: 2, checkedAt: '2026-10-10T00:00:00Z',
+      forks: [{ fullName: 'someone/r', url: 'https://github.com/someone/r', branches: [{ name: 'main', sha: git('rev-parse', 'origin/main').trim() }, { name: 'hack', sha: unknownSha }] }] }));
+    run(dir, 'scripts/devlog-task.mjs', ['start', 'T-9', '--title', 'Session task', '--branch', 'claude/session-abc']);
+    const out = path.join(dir, 'r.json');
+    expect(run(dir, 'scripts/devlog-report.mjs', ['--json', out]).status).toBe(0);
+    const r = JSON.parse(readFileSync(out, 'utf8'));
+    const by = (n: string) => r.branches.branches.find((b: { name: string }) => b.name === n);
+    expect(by('main')).toMatchObject({ cls: 'trunk' });
+    expect(by('claude/phase-2-workflow')).toMatchObject({ cls: 'plan', merged: true, plan: 'Phase 2: Workflow Skeleton' });
+    expect(by('claude/phase-2-workflow').flags).toContain('merged: can be deleted');
+    expect(by('claude/phase-9-mystery')).toMatchObject({ cls: 'fork' });
+    expect(by('claude/phase-9-mystery').reasons.join(' ')).toContain('not in the plan');
+    expect(by('feature/side-project')).toMatchObject({ cls: 'fork', ahead: 1 });
+    expect(by('feature/side-project').flags.join(' ')).toMatch(/unmerged, no open PR.*no commit for \d+ days/);
+    expect(by('claude/session-abc')).toMatchObject({ cls: 'plan', plan: 'Task T-9' });
+    expect(by('claude/old-default').flags).toContain('default branch is not the trunk');
+    const fork = r.branches.forks[0];
+    expect(fork.branches.find((b: { name: string }) => b.name === 'main')).toMatchObject({ inSync: true, cls: 'trunk' });
+    expect(fork.branches.find((b: { name: string }) => b.name === 'hack')).toMatchObject({ inSync: false, cls: 'fork' });
+    expect(r.branches.uninspectedForks).toBe(1);
+    const text = r.attention.map((a: { text: string }) => a.text).join('\n');
+    for (const want of ['default branch on GitHub is claude/old-default', 'claude/phase-9-mystery is not part of the plan', 'feature/side-project is not part of the plan', 'Fork someone/r, branch hack', '1 GitHub fork(s) of the repository have not been inspected']) {
+      expect(text).toContain(want);
+    }
   });
 });

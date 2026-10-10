@@ -13,6 +13,7 @@ import { chargingAt } from './charging.js';
 import { perUsd } from './costs.js';
 import { evaluateScenario, gateProblems, MAX_REPLIES, MAX_SCENARIOS, type Scenario, type ScenarioResult } from '../workflows/simulate.js';
 import { audit } from './audit.js';
+import { recordStepDecisions } from './ai-decisions.js';
 import { getJourneyConfig } from './journey.js';
 import { recordingIndex } from './recordings.js';
 import { ticketForEscalation } from './tickets.js';
@@ -150,6 +151,8 @@ export async function startRun(d: RunDeps, actorId: string | null, e: { workflow
       [id, ctx.wf.tenant_id, ctx.wf.id, ctx.resolved.entryVersionId, e.environment, e.kind, JSON.stringify(ctx.resolved.pins), JSON.stringify(held.state), held.sealed,
         out.state.status, out.state.outcome ?? null, out.state.error ?? null, e.callId ?? null]);
     await persistSteps(c, id, 1, out.records);
+    await recordStepDecisions(c, { tenantId: ctx.wf.tenant_id, callId: e.callId ?? null, runId: id, records: out.records });
+    if (out.state.escalation) await ticketForEscalation(c, actorId, id);
     await audit(c, actorId, 'workflow.run', 'workflow', ctx.wf.id, { run: id, kind: e.kind, environment: e.environment });
     return view(id, out.state, out.records);
   });
@@ -194,6 +197,7 @@ export async function replyRun(d: RunDeps, runId: string, text: string, expected
     const last = (await c.query('SELECT coalesce(max(seq), 0) AS n FROM workflow_run_steps WHERE run_id = $1', [runId])).rows[0].n as number;
     await persistSteps(c, runId, last + 1, out.records);
     // A call passed to a person gets its ticket in the same step that passed it, so none can be missed.
+    await recordStepDecisions(c, { tenantId: ctx.run.tenant_id, callId: ctx.run.call_id ?? null, runId, records: out.records });
     if (out.state.escalation) await ticketForEscalation(c, null, runId);
     return view(runId, out.state, out.records, ctx.run.state_version + 1);
   });
@@ -372,4 +376,52 @@ export async function handoverPacket(c: pg.PoolClient, runId: string): Promise<H
     .map((s) => ({ role: s.type === 'say' ? 'assistant' as const : 'caller' as const, text: String(s.payload.text ?? '') }));
   const lastLine = [...transcript].reverse().find((t) => t.role === 'assistant')?.text ?? null;
   return { workflow: state.workflow, node: state.node ?? state.awaiting?.node ?? null, status: state.status, variables: state.vars, transcript, lastLine };
+}
+
+export interface VersionMeasure { versionId: string; synthChars: number; recordedChars: number; says: number; steps: number; escalations: number; outcomes: Record<string, number>; costUsd: string | null }
+
+/**
+ * Play the same scripted callers through several versions of a workflow and count what each does: how much is spoken
+ * live, how many lines and steps, how many escalate, how the calls end. Optionally price the live speech at a voice
+ * provider's rate. This is what a proposed change's financial assessment is built from. Nothing is stored.
+ */
+export async function measureVersions(d: RunDeps, e: { workflowId: string; versionIds: string[]; scenarios: Scenario[]; voiceProviderId?: string; at?: Date }): Promise<{ versions: VersionMeasure[]; ratesConfirmed: boolean | null }> {
+  if (e.scenarios.length === 0) throw new AppError(400, 'Give at least one scenario.');
+  if (e.scenarios.length > MAX_SCENARIOS) throw new AppError(400, `At most ${MAX_SCENARIOS} scenarios.`);
+  const at = e.at ?? new Date();
+  const ctx = await asInternal(d, async (c) => {
+    const wf = await getWorkflow(c, e.workflowId);
+    let lines: { unit: Unit; rate: string; currency: string; billing_line: string }[] = []; const perUsds = new Map<string, bigint>(); let confirmed: boolean | null = null;
+    if (e.voiceProviderId) {
+      const provider = (await c.query('SELECT id, kind, name FROM providers WHERE id = $1', [e.voiceProviderId])).rows[0];
+      if (!provider || provider.kind !== 'voice') throw new AppError(400, 'Pick a voice provider: its character rate prices the speech.');
+      const version = await chargingAt(c, e.voiceProviderId, at);
+      if (!version) throw new AppError(409, `${provider.name} has no charging version in force. Capture its rates first.`);
+      lines = version.components.filter((k: { component: string; unit: string }) => k.component === 'tts' && ['per_character', 'per_1k_characters'].includes(k.unit));
+      if (lines.length === 0) throw new AppError(409, `${provider.name} has no per-character speech rate, so the speech cannot be priced.`);
+      confirmed = Boolean(version.confirmed);
+      for (const k of lines) perUsds.set(k.currency, await perUsd(c, k.currency, at));
+    }
+    const resolved = [];
+    for (const vid of e.versionIds) resolved.push(await resolvePins(c, wf, 'staging', vid));
+    return { resolved, recordings: await recordingIndex(c, wf.tenant_id), journey: await getJourneyConfig(c, wf.tenant_id), lines, perUsds, confirmed };
+  });
+  const price = (chars: number): bigint => ctx.lines.reduce((sum, k) => {
+    const q = quantityFor(k.unit, k.billing_line, { characters: chars }, null);
+    return q ? sum + mulDiv(lineAmount(k.rate, q), SCALE, ctx.perUsds.get(k.currency)!) : sum;
+  }, 0n);
+  const versions: VersionMeasure[] = [];
+  for (const [i, resolved] of ctx.resolved.entries()) {
+    const played: Played[] = [];
+    for (const s of e.scenarios) played.push(await playScenario(resolved, s, undefined, ctx.recordings, ctx.journey));
+    const sp = sumSpeech(played);
+    const outcomes: Record<string, number> = {};
+    for (const p of played) { const o = p.state.outcome ?? p.state.status; outcomes[o] = (outcomes[o] ?? 0) + 1; }
+    versions.push({
+      versionId: e.versionIds[i]!, synthChars: sp.synthChars, recordedChars: sp.recordedChars,
+      says: played.reduce((n, p) => n + p.records.filter((r) => r.type === 'say').length, 0), steps: played.reduce((n, p) => n + p.records.length, 0),
+      escalations: played.filter((p) => p.state.escalation).length, outcomes, costUsd: e.voiceProviderId ? fromScaled(price(sp.synthChars)) : null,
+    });
+  }
+  return { versions, ratesConfirmed: ctx.confirmed };
 }

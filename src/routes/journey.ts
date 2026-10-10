@@ -4,10 +4,15 @@ import { z } from 'zod';
 import { withActor, type Actor } from '../db.js';
 import { ackFault, listFaults, sweepFaults } from '../store/call-end.js';
 import { dropLatencySeconds, getJourneyConfig, setDropLatency, setJourneyConfig } from '../store/journey.js';
+import { applyChange, decide, getApprovalPolicy, getChange, listChanges, requestChange, setApprovalPolicy, showcase } from '../store/changes.js';
+import type { RunDeps } from '../store/runs.js';
+import { scenario } from './workflows.js';
+import { listDecisions, listModels, setModel, tokenUsage } from '../store/ai-decisions.js';
+import { addCriteriaSet, listCriteriaSets, listScores, qaSummary, scoreBatch, type QaDeps } from '../store/qa.js';
 import { replayCall, replayRun } from '../store/replay.js';
 import { addTicketEvent, getTicket, listTickets } from '../store/tickets.js';
 
-interface Ctx { pool: pg.Pool; internal(req: FastifyRequest): Promise<{ userId: string; actor: Actor }> }
+interface Ctx { pool: pg.Pool; runDeps: RunDeps; judges?: QaDeps['judges']; internal(req: FastifyRequest): Promise<{ userId: string; actor: Actor }> }
 const id = z.string().uuid();
 
 /** Phase 5: replaying calls, tickets, system-drop faults, and how a client's calls are read. All staff-only. */
@@ -68,5 +73,88 @@ export function registerJourneyRoutes(app: FastifyInstance, ctx: Ctx): void {
   app.put('/internal/journey/drop-latency', async (req) => {
     const b = z.object({ seconds: z.number().int().min(1).max(3600) }).parse(req.body);
     return run(req, async (c, u) => ({ seconds: await setDropLatency(c, u, b.seconds) }));
+  });
+
+  // ---- QA scorecard
+  app.post('/internal/tenants/:tenantId/qa-criteria', async (req, reply) => {
+    const { tenantId } = z.object({ tenantId: id }).parse(req.params);
+    const b = z.object({ useCase: z.string().min(1).max(100), criteria: z.unknown() }).parse(req.body);
+    return reply.status(201).send(await run(req, (c, u) => addCriteriaSet(c, u, tenantId, b.useCase, b.criteria)));
+  });
+  app.get('/internal/tenants/:tenantId/qa-criteria', async (req) => {
+    const { tenantId } = z.object({ tenantId: id }).parse(req.params);
+    return run(req, (c) => listCriteriaSets(c, tenantId));
+  });
+  app.post('/internal/tenants/:tenantId/qa/score', async (req) => {
+    const s = await ctx.internal(req);
+    const { tenantId } = z.object({ tenantId: id }).parse(req.params);
+    const b = z.object({ limit: z.number().int().min(1).max(500).optional() }).parse(req.body ?? {});
+    return scoreBatch({ pool: ctx.pool, judges: ctx.judges }, s.userId, { tenantId, limit: b.limit });
+  });
+  app.get('/internal/qa/scores', async (req) => {
+    const q = z.object({ tenantId: id.optional(), runId: id.optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query);
+    return run(req, (c) => listScores(c, q));
+  });
+  app.get('/internal/tenants/:tenantId/qa/summary', async (req) => {
+    const { tenantId } = z.object({ tenantId: id }).parse(req.params);
+    return run(req, (c) => qaSummary(c, tenantId));
+  });
+
+  // ---- the AI decision audit, and which model does which task
+  app.get('/internal/ai-decisions', async (req) => {
+    const q = z.object({ tenantId: id.optional(), callId: id.optional(), subjectType: z.string().max(40).optional(), subjectId: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(500).default(100) }).parse(req.query);
+    return run(req, (c) => listDecisions(c, q));
+  });
+  app.get('/internal/ai-usage', async (req) => {
+    const q = z.object({ tenantId: id.optional() }).parse(req.query);
+    return run(req, (c) => tokenUsage(c, q));
+  });
+  app.get('/internal/model-config', async (req) => run(req, (c) => listModels(c)));
+  app.put('/internal/model-config/:taskKey', async (req) => {
+    const { taskKey } = z.object({ taskKey: z.string().regex(/^[a-z][a-z0-9_]{0,60}$/) }).parse(req.params);
+    const tier = z.enum(['haiku', 'sonnet', 'opus']);
+    const b = z.object({ tier, modelId: z.string().min(1).max(100), escalateTo: tier.nullable().default(null) }).parse(req.body);
+    return run(req, (c, u) => setModel(c, u, { taskKey, ...b }));
+  });
+
+  // ---- proposed changes: a diff, a financial assessment, and levels of approval
+  app.put('/internal/tenants/:tenantId/approval-policy', async (req) => {
+    const { tenantId } = z.object({ tenantId: id }).parse(req.params);
+    const b = z.object({ levels: z.array(z.string().min(1).max(80)).min(1).max(5) }).parse(req.body);
+    return run(req, (c, u) => setApprovalPolicy(c, u, tenantId, b.levels));
+  });
+  app.get('/internal/tenants/:tenantId/approval-policy', async (req) => {
+    const { tenantId } = z.object({ tenantId: id }).parse(req.params);
+    return run(req, (c) => getApprovalPolicy(c, tenantId));
+  });
+  app.post('/internal/workflows/:workflowId/changes', async (req, reply) => {
+    const s = await ctx.internal(req);
+    const { workflowId } = z.object({ workflowId: id }).parse(req.params);
+    const b = z.object({
+      toVersionId: id, environment: z.enum(['staging', 'production']), reason: z.string().min(1).max(2000),
+      scenarios: z.array(scenario).min(1).max(500), voiceProviderId: id.optional(),
+    }).parse(req.body);
+    return reply.status(201).send(await requestChange(ctx.runDeps, s.userId, { workflowId, ...b, scenarios: b.scenarios as never }));
+  });
+  app.get('/internal/changes', async (req) => {
+    const q = z.object({ tenantId: id.optional(), workflowId: id.optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query);
+    return run(req, (c) => listChanges(c, q));
+  });
+  app.get('/internal/changes/:changeId', async (req) => {
+    const { changeId } = z.object({ changeId: id }).parse(req.params);
+    return run(req, (c) => getChange(c, changeId));
+  });
+  app.post('/internal/changes/:changeId/decision', async (req) => {
+    const { changeId } = z.object({ changeId: id }).parse(req.params);
+    const b = z.object({ decision: z.enum(['approved', 'rejected']), note: z.string().max(2000).optional() }).parse(req.body);
+    return run(req, (c, u) => decide(c, u, changeId, b));
+  });
+  app.post('/internal/changes/:changeId/apply', async (req) => {
+    const { changeId } = z.object({ changeId: id }).parse(req.params);
+    return run(req, (c, u) => applyChange(c, u, changeId));
+  });
+  app.get('/internal/changes/:changeId/showcase', async (req) => {
+    const { changeId } = z.object({ changeId: id }).parse(req.params);
+    return run(req, (c) => showcase(c, changeId));
   });
 }

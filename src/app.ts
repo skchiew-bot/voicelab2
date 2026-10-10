@@ -44,6 +44,8 @@ export interface Deps {
   fetch?: Fetch;
   /** How workflow integrations connect. Only tests change this; production always uses the guarded default. */
   integrationHttp?: HttpDeps;
+  /** Models that judge QA criteria, by tier. None by default: only the rules are applied. */
+  judges?: import('./store/qa.js').QaDeps['judges'];
 }
 
 export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): FastifyInstance {
@@ -356,7 +358,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   });
 
   registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
-  registerJourneyRoutes(app, { pool, internal });
+  registerJourneyRoutes(app, { pool, internal, judges: deps.judges, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
   registerResilienceRoutes(app, { pool, internal, callDeps });
   registerStitchingRoutes(app, { pool, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
 

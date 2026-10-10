@@ -43,7 +43,7 @@ describe('every decision leaves its reason', () => {
     const r = await start('w', {}, { load: () => dyn, speaker: rich });
     const say = r.records.find((x) => x.type === 'say')!.payload;
     expect(say.text).toBe('Good day.');
-    expect(say.ai).toEqual({ model: 'small', reasoning: 'Caller at [number] prefers short greetings.', policy: 'greeting-v2', inputTokens: 40, outputTokens: 5, confidence: 0.9 });
+    expect(say.ai).toEqual({ model: 'small', reasoning: 'Caller at [number] prefers short greetings.', policy: 'greeting-v2', inputTokens: 40, outputTokens: 5, confidence: 0.9, decision: 'proceeded', decisionReason: 'The line passed the checks and was used.' });
     const plain = await start('w', {}, { load: () => dyn, speaker: { generate: async () => 'Hello.' } });
     expect(plain.records.find((x) => x.type === 'say')!.payload).not.toHaveProperty('ai');
   });
@@ -125,5 +125,36 @@ describe('reading each turn: re-routing and escalation', () => {
     const only: WorkflowDefinition = { start: 'a', intentRoutes: [{ when: { kind: 'complaint' }, to: 'b' }], nodes: { a: { type: 'speak', speech: 'fixed', text: 'Hi', listen: { captureAs: 'x' }, transitions: [{ to: 'z' }] }, b: { type: 'end', outcome: 'escalated' }, z: { type: 'end', outcome: 'ok' } } };
     expect(validateDefinition(only).errors).toEqual([]);
     expect(classifyChange(only, { ...only, intentRoutes: [] })).toBe('major');
+  });
+});
+
+describe('a line a model wrote is checked before it is spoken', () => {
+  const dyn: WorkflowDefinition = { start: 'd', nodes: { d: { type: 'speak', speech: 'dynamic', prompt: 'Greet', text: 'Good day.', transitions: [{ to: 'e' }] }, e: { type: 'end', outcome: 'ok' } } };
+  const say = async (g: string | { text: string }) => (await start('w', {}, { load: () => dyn, speaker: { generate: async () => g } })).records.find((x) => x.type === 'say')?.payload;
+
+  it.each([
+    ['empty', '   ', 'wrote nothing'],
+    ['an unfilled slot', 'Hello {{name}}, how are you?', 'unfilled placeholder'],
+    ['a phone number', 'Please call 012-345 6789 to pay.', 'phone number'],
+    ['too long', 'word '.repeat(200), 'too long'],
+  ])('turns down a line that is %s, speaks the fallback instead, and says why', async (_n, line, why) => {
+    const p = await say(line);
+    expect(p!.text).toBe('Good day.');
+    expect(p!.ai).toMatchObject({ decision: 'rejected', decisionReason: expect.stringContaining(why) });
+  });
+  it('tidies stray spaces and line breaks, and says it did', async () => {
+    const p = await say('  Good   morning,\n  how are you?  ');
+    expect(p).toMatchObject({ text: 'Good morning, how are you?', ai: { decision: 'reworked' } });
+  });
+  it('uses a clean line as it is, with nothing added to the record', async () => {
+    const p = await say('Good morning.');
+    expect(p!.text).toBe('Good morning.');
+    expect(p).not.toHaveProperty('ai');
+  });
+  it('stops the call rather than say something unchecked when there is no fallback', async () => {
+    const nofb: WorkflowDefinition = { start: 'd', nodes: { d: { type: 'speak', speech: 'dynamic', prompt: 'Greet', transitions: [{ to: 'e' }] }, e: { type: 'end', outcome: 'ok' } } };
+    const r = await start('w', {}, { load: () => nofb, speaker: { generate: async () => 'Call 012-345 6789' } });
+    expect(r.state).toMatchObject({ status: 'ended', outcome: 'error' });
+    expect(r.records.some((x) => x.type === 'say')).toBe(false);
   });
 });

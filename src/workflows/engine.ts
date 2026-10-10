@@ -115,6 +115,20 @@ function fail(state: RunState, out: StepRecord[], message: string, node?: string
   out.push({ type: 'error', workflow: state.workflow, node, payload: { message } });
 }
 
+/**
+ * What a model wrote is not trusted as it stands. It is turned down if it is empty, still has an unfilled {{slot}},
+ * runs on beyond a spoken line, or contains something that looks like a phone number (a model could invent or repeat
+ * one, and those are never spoken). Stray whitespace is tidied, and the line is marked as reworked.
+ */
+export function checkModelLine(raw: string): { decision: 'proceeded' | 'rejected' | 'reworked'; line?: string; reason: string } {
+  const tidy = raw.replace(/\s+/g, ' ').trim();
+  if (tidy === '') return { decision: 'rejected', reason: 'The model wrote nothing.' };
+  if (/\{\{|\}\}/.test(tidy)) return { decision: 'rejected', reason: 'The line still had an unfilled placeholder.' };
+  if (tidy.length > 600) return { decision: 'rejected', reason: 'The line was too long to be spoken in one go.' };
+  if (redactNumbers(tidy) !== tidy) return { decision: 'rejected', reason: 'The line contained something that looks like a phone number.' };
+  return tidy === raw ? { decision: 'proceeded', line: tidy, reason: 'The line passed the checks.' } : { decision: 'reworked', line: tidy, reason: 'Extra spaces and line breaks were tidied.' };
+}
+
 /** What is kept of a model's account of its own line. Numbers in free text are scrubbed like any other. */
 function aiInfo(g: SpeakerResult): Record<string, Json> {
   const out: Record<string, Json> = {};
@@ -272,8 +286,14 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
             const fallback = node.text !== undefined ? pickText(node.text, lang) : undefined;
             if (deps.speaker) {
               const g = await deps.speaker.generate(node, withoutSensitive(state), lang);
-              line = typeof g === 'string' ? g : g.text;
               if (typeof g !== 'string') ai = aiInfo(g);
+              // A line a model wrote is checked before anyone hears it: used as it is, tidied, or turned down for the fallback.
+              const checked = checkModelLine(typeof g === 'string' ? g : g.text);
+              if (checked.decision !== 'proceeded') ai = { ...(ai ?? {}), decision: checked.decision, decisionReason: checked.reason };
+              else if (ai) ai = { ...ai, decision: 'proceeded', decisionReason: 'The line passed the checks and was used.' };
+              if (checked.line !== undefined) line = checked.line;
+              else if (fallback !== undefined) line = renderText(fallback, state.vars, state.sensitive);
+              else { fail(state, out, `The line written for "${id}" was turned down (${checked.reason}), and there is no fallback text.`, id); return; }
             }
             else if (fallback !== undefined) line = renderText(fallback, state.vars, state.sensitive);
             else { fail(state, out, `"${id}" is dynamic and has no fallback text, and no model is connected to write its line.`, id); return; }

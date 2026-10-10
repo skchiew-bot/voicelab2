@@ -336,3 +336,29 @@ describe('how a client\'s calls are read', () => {
     expect((await must(reply(other.id, 'yes the ombudsman'))).json().outcome).toBe('paid_promise');
   });
 });
+
+import { startRun } from '../src/store/runs.js';
+
+describe('the audit trail of what an AI decided', () => {
+  it('records each model-written line as used, tidied or turned down, with why, the model, its tier and its tokens', async () => {
+    await must(put('/internal/model-config/speak_dynamic', { tier: 'haiku', modelId: 'haiku-model', escalateTo: 'sonnet' }));
+    const dyn: WorkflowDefinition = { start: 'd', nodes: { d: { type: 'speak', speech: 'dynamic', prompt: 'Greet the caller', text: 'Good day.', transitions: [{ to: 'z' }] }, z: { type: 'end', outcome: 'ok' } } };
+    const c = (await must(post(`/internal/tenants/${tenantId}/workflows`, { name: 'dyn_flow', definition: dyn }))).json();
+    await must(post(`/internal/workflows/${c.workflow.id}/deploy`, { versionId: c.version.id, environment: 'staging' }));
+    const key = parseKey(env.config.VOICELAB_SECRET_KEY);
+    const go = async (text: string) => {
+      const speaker = { generate: async () => ({ text, model: 'haiku-model', reasoning: 'Short and polite.', inputTokens: 30, outputTokens: 6, confidence: 0.8 }) };
+      return startRun({ pool: env.pool, key, speaker }, null, { workflowId: c.workflow.id, environment: 'staging', kind: 'test', variables: {} });
+    };
+    const used = await go('Good morning.'); const tidied = await go('Good   morning.'); const rejected = await go('Call 012-345 6789 now');
+    expect(rejected.said).toEqual(['Good day.']);                                            // the fallback was spoken, not the model's line
+    const decisionsFor = async (runId: string) => (await get(`/internal/ai-decisions?subjectType=run_step&subjectId=${runId}:d`)).json();
+    expect((await decisionsFor(used.id))[0]).toMatchObject({ decision: 'proceeded', model: 'haiku-model', tier: 'haiku', input_tokens: 30, output_tokens: 6, task: 'speak_dynamic' });
+    expect((await decisionsFor(tidied.id))[0]).toMatchObject({ decision: 'reworked', reason: expect.stringContaining('tidied') });
+    const rej = (await decisionsFor(rejected.id))[0];
+    expect(rej).toMatchObject({ decision: 'rejected', reason: expect.stringContaining('phone number') });
+    expect(JSON.stringify(rej)).not.toContain('345 6789');
+    await expect(env.pool.query('DELETE FROM ai_decisions')).rejects.toThrow(/append-only/);
+    expect((await get(`/internal/ai-usage?tenantId=${tenantId}`)).json().find((u: { task: string }) => u.task === 'speak_dynamic')).toMatchObject({ rejected: 1, reworked: 1, decisions: 3 });
+  });
+});

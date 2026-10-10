@@ -1076,6 +1076,38 @@ describe.skipIf(!run)('admin UI', () => {
     await page.close();
   });
 
+  it('shows the scheduled jobs and how each last ran, and changes one only with a reason, read strictly', async () => {
+    const ran = await env.app.scheduler.tick();
+    expect(ran.length).toBeGreaterThan(5);
+    const page = await browser.newPage({ viewport: { width: 1200, height: 1000 } });
+    await signIn(page, env.staffToken);
+    await page.getByRole('link', { name: 'Jobs', exact: true }).click();
+    const table = page.getByLabel('Scheduled jobs');
+    const row = table.getByRole('row').filter({ hasText: 'cases-dispatch' });
+    await expect(row).toContainText('Places case callbacks that are due');
+    await expect(row).toContainText('1 minute');
+    await expect(row.locator('.badge')).toHaveText('ok');
+    await row.getByRole('button', { name: 'Change' }).click();
+    const card = page.getByLabel('Change cases-dispatch');
+    await card.getByLabel(/^Every/).fill('1,5');
+    await card.getByLabel(/^Why/).fill('Callbacks are piling up.');
+    await expect(card.getByRole('button', { name: 'Save interval' })).toBeDisabled();       // "1,5" is never read as a default
+    await expect(card.getByRole('alert')).toContainText('digits only');
+    await card.getByLabel(/^Every/).fill('2');
+    await card.getByRole('button', { name: 'Save interval' }).click();
+    await expect(row).toContainText('2 minutes');
+    await card.getByLabel(/^Why/).fill('Paused while the dialler is checked.');
+    await card.getByRole('button', { name: 'Turn off' }).click();
+    await expect(row).toContainText('Off');
+    await card.getByLabel(/^Why/).fill('Dialler checked.');
+    await card.getByRole('button', { name: 'Turn on' }).click();
+    await expect(row).not.toContainText('Off');
+    await page.goto(`${base}#/change-log`);
+    await page.getByLabel('Show').selectOption({ label: 'Platform and scheduled jobs' });
+    await expect(page.getByLabel('Changes')).toContainText('Paused while the dialler is checked.');
+    await page.close();
+  }, 60_000);
+
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();
     await signIn(page, env.staffToken);

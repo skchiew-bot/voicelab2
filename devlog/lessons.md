@@ -40,12 +40,13 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "keeps money out of floating point in the console"
 
 ### L-005: Something that never happened gets no status as if it had
-- **Seen:** 3 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)).
-- **Rule:** Give "never started" its own state (such as `not_applicable`) and keep it out of failure counts, alerts and retries.
+- **Seen:** 4 times. A refused dial was stamped "could not be priced", giving a permanent false alert ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The reconciliation sweep retried calls that never connected ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)). A DID failure could be recorded against a call that never went out ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). The branch audit read a failed comparison with the trunk as "0 commits ahead", so with the trunk missing every branch, `main` included, would have shown as merged and deletable (independent review, 2026-10-10).
+- **Rule:** Give "never started" or "unknown" its own state (such as `not_applicable`, or `null` rather than 0) and keep it out of failure counts, alerts, retries and anything that recommends an action.
 - **Guards:**
   - `tests/phase3.test.ts` › "will not lock a DID because of a call that never went out"
   - `tests/phase3.test.ts` › "does not count a refused dial as the provider failing"
   - `tests/reconcile.test.ts` › "skips calls that never connected"
+  - `tests/devlog.test.ts` › "runs no audit and flags nothing when the trunk cannot be found"
 
 ### L-006: One bad record must not take a whole feature down
 - **Seen:** 3 times. One unreadable secret returned a 500 for the whole Control Tower ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). One provider priced in a currency with no exchange rate made every pooled dial fail ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). A very large number gave a 500 instead of a 400 ([#6](https://github.com/skchiew-bot/voicelab2/pull/6)).
@@ -117,12 +118,13 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "no tracked file holds a token in a real provider's key format"
 
 ### L-016: Check an integration against a real payload, not an assumed one
-- **Seen:** 4 times. Twilio and Telnyx request formats were written from memory and are still unverified against the live services ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)). The dev Control Tower hook assumed the hook's `session_id` was the claude.ai session id; in a cloud session it is a local id, so links broke and one session counted twice (session on 2026-10-10). Session cost was nearly built on the transcript alone; a real transcript showed each message repeated per content block and background calls (the permission classifier) missing, so cost is now Claude Code's own checkpoint plus priced messages after it (session on 2026-10-10). A session resumed in another folder starts a new transcript that copies the earlier messages; summing transcripts double counted (independent review, 2026-10-10).
-- **Rule:** Before building on an outside payload or format, capture one real example and test against its actual shape. Where that is impossible, say so as unverified, in the PR and in `src/progress.ts`.
+- **Seen:** 5 times. Twilio and Telnyx request formats were written from memory and are still unverified against the live services ([#5](https://github.com/skchiew-bot/voicelab2/pull/5)). The dev Control Tower hook assumed the hook's `session_id` was the claude.ai session id; in a cloud session it is a local id, so links broke and one session counted twice (session on 2026-10-10). Session cost was nearly built on the transcript alone; a real transcript showed each message repeated per content block and background calls (the permission classifier) missing, so cost is now Claude Code's own checkpoint plus priced messages after it (session on 2026-10-10). A session resumed in another folder starts a new transcript that copies the earlier messages; summing transcripts double counted (independent review, 2026-10-10). The fix then assumed a resumed run's checkpoints carry the earlier total and called taking the largest "right either way"; real checkpoints showed the resumed run started from zero (it had no checkpoint to restore), so spend fell by a whole run once the new one overtook it; the first wording of that finding then overgeneralised it to every resume (independent review, 2026-10-10) ([#12](https://github.com/skchiew-bot/voicelab2/pull/12), found by the next dashboard run).
+- **Rule:** Before building on an outside payload or format, capture one real example and test against its actual shape. Where that is impossible, say so as unverified, in the PR and in `src/progress.ts`, and do not argue the code is right regardless; check it against real data as soon as the data exists.
 - **Guards:**
   - `tests/devlog.test.ts` › "records the claude.ai session id in a cloud session, and the local id elsewhere"
   - `tests/devlog.test.ts` › "counts each message once, prices tokens exactly, and adds them to Claude Code's own checkpoint"
   - `tests/devlog.test.ts` › "counts a session resumed in another folder once"
+  - `tests/devlog.test.ts` › "places every message in its own run"
 
 ### L-017: Record logs by allowlist; anything logged may be published
 - **Seen:** The dev Control Tower hook scrubbed by blocklist and still let through credentials in URLs, `key=value` secrets, tokens split by digit runs, emails, and other tools' raw error text with a customer's name and email, all bound for git (independent review, 2026-10-10).
@@ -164,3 +166,17 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** Turn every timestamp into one form (`new Date(x).toISOString()`, or milliseconds) at the edge, before comparing or sorting.
 - **Guards:**
   - `tests/devlog.test.ts` › "finds logging gaps"
+
+### L-023: Keep every branch accountable to the plan, and the trunk as the default
+- **Seen:** The repository's default branch on GitHub was still the first session branch (`claude/elegant-fermat-er13o8`), long merged, so clones and the GitHub page showed stale code; seven merged branches were never deleted; and nothing checked that a branch belonged to the plan (found by the dev Control Tower branch audit, 2026-10-10).
+- **Rule:** Every branch is either named for a plan phase or carries a PR titled with one. A branch justified only by a board task is listed for the owner to confirm, and anything else is a fork; never create or link a task just to clear the warning. The default branch is `main`. Deleting branches and changing the default are the owner's calls: report them, never do them unasked.
+- **Guards:**
+  - `tests/devlog.test.ts` › "classes every branch as the trunk, part of the plan, task-only or a fork"
+  - `tests/devlog.test.ts` › "runs no audit and flags nothing when the trunk cannot be found"
+
+### L-024: A check the checked party can pass by itself proves nothing
+- **Seen:** The first branch audit counted any branch linked to a board task as part of the plan, and its instructions told sessions to link a task to clear the fork warning: a session could invent a task and approve its own branch (independent review, 2026-10-10).
+- **Rule:** When a check guards against the agent's own work drifting, the agent must not be able to satisfy it alone. Show self-declared evidence (a task link) as its own class for the owner to confirm, and never create evidence just to clear a warning.
+- **Guards:**
+  - `tests/devlog.test.ts` › "classes every branch as the trunk, part of the plan, task-only or a fork"
+  - `CLAUDE.md` › "never create or link a task just to clear a warning"

@@ -2,7 +2,7 @@
 // Dev Control Tower: the development control board (d3ngineering section 44), task progress
 // (section 12) and the development incident register (section 45).
 //
-//   node scripts/devlog-task.mjs start  <id> --title "…" [--epic …] [--workstream …] [--phase …] [--owner …] [--pr N]
+//   node scripts/devlog-task.mjs start  <id> --title "…" [--epic …] [--workstream …] [--phase …] [--owner …] [--pr N] [--branch …]
 //   node scripts/devlog-task.mjs update <id> [--status …] [--progress 0-100] [--attempt N] [--tests 87/93]
 //                                            [--blocker "…"|--blocker none] [--next "…"] [--phase …] [--pr N]
 //   node scripts/devlog-task.mjs done   <id> [--pr N]
@@ -66,11 +66,12 @@ export function eventFor(argv, now = new Date(), env = process.env) {
   if (command === 'start' || command === 'update' || command === 'done') {
     const id = pos[0];
     if (!id || !ID.test(id)) throw new UsageError('Give a task id: letters, digits, "-", "_" or ".", starting with a letter (e.g. DCT-2).');
-    known(command === 'start' ? ['title', 'epic', 'workstream', 'phase', 'owner', 'pr', 'status']
-      : command === 'update' ? ['status', 'progress', 'attempt', 'tests', 'blocker', 'next', 'phase', 'pr', 'title']
+    known(command === 'start' ? ['title', 'epic', 'workstream', 'phase', 'owner', 'pr', 'status', 'branch']
+      : command === 'update' ? ['status', 'progress', 'attempt', 'tests', 'blocker', 'next', 'phase', 'pr', 'title', 'branch']
         : ['pr', 'next']);
     if (command === 'start' && !opts.title) throw new UsageError('start needs --title.');
     if (opts.tests !== undefined && !/^\d{1,6}\/\d{1,6}$/.test(opts.tests)) throw new UsageError('--tests must look like 87/93 (passed/total).');
+    if (opts.branch !== undefined && !/^[\w.-]+(\/[\w.-]+)*$/.test(opts.branch)) throw new UsageError('--branch must be a branch name, such as claude/phase-5-journey.');
     return strip({
       ...base, event: 'Task', action: command, id,
       title: text(opts.title, 120), epic: text(opts.epic, 80), workstream: text(opts.workstream, 80),
@@ -79,6 +80,7 @@ export function eventFor(argv, now = new Date(), env = process.env) {
       progress: command === 'done' ? 100 : int('progress', opts.progress, 0, 100),
       attempt: int('attempt', opts.attempt, 1, 99), tests: opts.tests,
       blocker: opts.blocker === 'none' ? '' : text(opts.blocker), next: text(opts.next), pr: int('pr', opts.pr, 1, 1_000_000),
+      branch: opts.branch,
     });
   }
   if (command === 'incident') {

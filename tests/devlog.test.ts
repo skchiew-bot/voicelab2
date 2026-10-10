@@ -305,10 +305,10 @@ const spoolLines = (dir: string) => {
 };
 
 /** A transcript in Claude Code's real shape: one line per content block, the same message id and usage on each. */
-type Entry = { id: string; model: string; ts: string; usage: Record<string, unknown>; blocks?: number } | { checkpoint: number; models: Record<string, number> };
+type Entry = { id: string; model: string; ts: string; usage: Record<string, unknown>; blocks?: number } | { checkpoint: number; models: Record<string, number>; start?: string };
 function transcript(dir: string, entries: Entry[], sub?: Entry[], opts: { folder?: string } = {}) {
   const lines = (list: Entry[]) => list.flatMap((e) => ('checkpoint' in e
-    ? [JSON.stringify({ type: 'cost-state', totalCostUSD: e.checkpoint, modelUsage: Object.fromEntries(Object.entries(e.models).map(([m, c]) => [m, { inputTokens: 1, outputTokens: 1, costUSD: c }])) })]
+    ? [JSON.stringify({ type: 'cost-state', totalCostUSD: e.checkpoint, startTime: new Date(e.start ?? '2026-10-09T23:00:00Z').getTime(), modelUsage: Object.fromEntries(Object.entries(e.models).map(([m, c]) => [m, { inputTokens: 1, outputTokens: 1, costUSD: c }])) })]
     : Array.from({ length: e.blocks ?? 2 }, () => JSON.stringify({ type: 'assistant', timestamp: e.ts, requestId: `req_${e.id}`, message: { id: e.id, model: e.model, usage: e.usage } })))).join('\n') + '\n';
   // Claude Code's layout: <projects>/<project folder>/<session id>.jsonl, subagents beside it.
   const name = `t${dirs++}`;
@@ -336,32 +336,70 @@ describe('usage and cost', () => {
     // After the checkpoint: Opus 1M output $20 + 1M cache read $0.20 + 1M 5m write $5 + 1M 1h write $8; Haiku 1M input $0.10.
     expect(u.costBasis).toBe('checkpoint+since');
     expect(u.costUSD).toBe('34.80000000'); // 1.5 + 33.20 + 0.10
-    expect(u.checkpoint.costUSD).toBe('1.500000');
+    expect(u.checkpoint.costUSD).toBe('1.50000000');
   });
 
-  it('counts a session resumed in another folder once: copied messages once, the largest checkpoint, then what came after', () => {
-    const { dir } = makeRepo();
-    const first: Entry[] = [
-      { id: 'm1', model: 'claude-opus-5-5', ts: '2026-10-10T00:00:00Z', usage: U(0, 1_000_000) },
-      { checkpoint: 30, models: { 'claude-opus-5-5': 30 } },
-    ];
-    const a = transcript(dir, first, undefined, { folder: '-repo' });
-    // The resumed transcript has the same name in another folder, copies m1, and has no checkpoint.
-    const b = path.join(path.dirname(path.dirname(a)), '-home', path.basename(a));
-    mkdirSync(path.dirname(b), { recursive: true });
-    // Its own later checkpoint restarted from a smaller figure: the larger, earlier one is used.
-    writeFileSync(b, readFileSync(a, 'utf8').split('\n').filter((l) => !l.includes('cost-state')).join('\n')
-      + JSON.stringify({ type: 'assistant', timestamp: '2026-10-10T00:30:00Z', message: { id: 'm0', model: 'claude-opus-5-5', usage: U(0, 0) } }) + '\n'
-      + JSON.stringify({ type: 'cost-state', totalCostUSD: 2, modelUsage: {} }) + '\n'
-      + JSON.stringify({ type: 'assistant', timestamp: '2026-10-10T01:00:00Z', message: { id: 'm2', model: 'claude-opus-5-5', usage: U(0, 1_000_000) } }) + '\n');
-    // The same answer whichever transcript the hook is given, so file order cannot decide it.
-    for (const tp of [b, a]) run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'Stop', session_id: 's', transcript_path: tp }));
-    const usages = spoolLines(dir).filter((l) => l.event === 'Usage');
-    expect(usages).toHaveLength(2);
-    for (const u of usages) {
-      expect(u.tokens['claude-opus-5-5'].messages).toBe(3);
-      expect(u.costUSD).toBe('50.00000000'); // $30 checkpoint + m2's 1M output at $20; m1 is inside the checkpoint
+  it('counts a session resumed in another folder once: copied messages once, each run\'s checkpoint added, then what came after', () => {
+    // Claude Code keeps one running total per run. A resume starts a new run from zero, in a new
+    // transcript that copies the earlier messages. Checked against real transcripts (lesson L-016).
+    const runTwo = (dir: string, secondRunTotal: number) => {
+      const a = transcript(dir, [
+        { id: 'm1', model: 'claude-opus-5-5', ts: '2026-10-10T00:00:00Z', usage: U(0, 1_000_000) },
+        { checkpoint: 30, models: { 'claude-opus-5-5': 30 }, start: '2026-10-09T23:59:00Z' },
+      ], undefined, { folder: '-repo' });
+      const b = path.join(path.dirname(path.dirname(a)), '-home', path.basename(a));
+      mkdirSync(path.dirname(b), { recursive: true });
+      writeFileSync(b, readFileSync(a, 'utf8').split('\n').filter((l) => !l.includes('cost-state')).join('\n')
+        + JSON.stringify({ type: 'assistant', timestamp: '2026-10-10T00:30:00Z', message: { id: 'm0', model: 'claude-opus-5-5', usage: U(0, 0) } }) + '\n'
+        + JSON.stringify({ type: 'cost-state', totalCostUSD: secondRunTotal, startTime: Date.parse('2026-10-10T00:20:00Z'), modelUsage: {} }) + '\n'
+        + JSON.stringify({ type: 'assistant', timestamp: '2026-10-10T01:00:00Z', message: { id: 'm2', model: 'claude-opus-5-5', usage: U(0, 1_000_000) } }) + '\n');
+      return { a, b };
+    };
+    // A second run below the first, and one above it (the case that once dropped the first run).
+    for (const [second, expected] of [[2, '52.00000000'], [40, '90.00000000']] as const) {
+      const { dir } = makeRepo();
+      const { a, b } = runTwo(dir, second);
+      // The same answer whichever transcript the hook is given, so file order cannot decide it.
+      for (const tp of [b, a]) run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'Stop', session_id: 's', transcript_path: tp }));
+      const usages = spoolLines(dir).filter((l) => l.event === 'Usage');
+      expect(usages).toHaveLength(2);
+      for (const u of usages) {
+        expect(u.tokens['claude-opus-5-5'].messages).toBe(3);
+        expect(u.runs).toBe(2);
+        expect(u.costUSD, `second run ${second}`).toBe(expected); // $30 + the second run + m2's 1M output at $20
+      }
     }
+  });
+
+  it('places every message in its own run and prices only what came after that run\'s last checkpoint', () => {
+    // Worked out by hand. Opus output is $20 per million tokens.
+    const { dir } = makeRepo();
+    const at = (hhmm: string) => `2026-10-10T${hhmm}:00Z`;
+    const msg = (id: string, ts: string | undefined) => JSON.stringify({ type: 'assistant', ...(ts ? { timestamp: ts } : {}), message: { id, model: 'claude-opus-5-5', usage: U(0, 1_000_000) } });
+    const cp = (total: number, start: string, lines: number, ms: number) => JSON.stringify({ type: 'cost-state', totalCostUSD: total, startTime: Date.parse(start),
+      totalDuration: ms, totalLinesAdded: lines, modelUsage: { 'claude-opus-5-5': { inputTokens: 1, outputTokens: 1, costUSD: total } } });
+    const folder = path.join(dir, 'projects', '-repo');
+    mkdirSync(folder, { recursive: true });
+    const tp = path.join(folder, 'runs.jsonl');
+    writeFileSync(tp, [
+      msg('pre', '2026-10-09T23:00:00Z'), // before any run started: priced ($20)
+      msg('a1', at('00:01')), cp(5, at('00:00'), 1, 40),   // run A, first checkpoint
+      msg('a2', at('00:02')), cp(10, at('00:00'), 3, 100), // run A, latest checkpoint covers a1 and a2
+      msg('a3', at('00:03')), // run A, after its last checkpoint: priced ($20)
+      msg('b1', at('00:20')), cp(7, at('00:10'), 4, 50),   // run B started 00:10 from zero; covers b1
+      msg('b2', at('00:40')), // run B, after its checkpoint: priced ($20)
+      msg('nots', undefined), // no timestamp: cannot be placed, not priced
+    ].join('\n') + '\n');
+    run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: 'Stop', session_id: 's', transcript_path: tp }));
+    const u = spoolLines(dir).find((l) => l.event === 'Usage');
+    expect(u.tokens['claude-opus-5-5'].messages).toBe(7);
+    expect(u.runs).toBe(2);
+    expect(u.costUSD).toBe('77.00000000'); // 10 + 7 + 20 (pre) + 20 (a3) + 20 (b2)
+    expect(u.checkpoint).toMatchObject({ costUSD: '17.00000000', linesAdded: 7, durationMs: 150 });
+    expect(u.checkpoint.models['claude-opus-5-5'].costUSD).toBe('17.00000000');
+    run(dir, 'scripts/devlog-flush.mjs', []);
+    const flushed = readdirSync(path.join(dir, 'devlog/activity')).map((f) => readFileSync(path.join(dir, 'devlog/activity', f), 'utf8')).join('');
+    expect(JSON.parse(flushed.trim().split('\n').find((l) => l.includes('"Usage"'))!)).toMatchObject({ runs: 2, costUSD: '77.00000000' });
   });
 
   it('prices the whole transcript when there is no checkpoint yet, and says so, and never guesses a price', () => {
@@ -558,5 +596,107 @@ describe('control tower report', () => {
     const out = path.join(dir, 'r.json');
     run(dir, 'scripts/devlog-report.mjs', ['--json', out]);
     expect(JSON.parse(readFileSync(out, 'utf8')).economics.spend).toEqual({ usd: '0.10000000', myr: '0.45000000' });
+  });
+});
+
+describe('branch and fork audit', () => {
+  /** A throwaway repo with an origin, where each branch is one of the cases the audit must tell apart. */
+  function branchRepo() {
+    const { dir, git } = makeRepo();
+    mkdirSync(path.join(dir, 'src'), { recursive: true });
+    writeFileSync(path.join(dir, 'src/progress.ts'), read('src/progress.ts'));
+    const commit = (msg: string, date = '2026-10-10T00:00:00Z') => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', msg], { cwd: dir, env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } });
+    commit('base'); git('add', '-A'); commit('tooling');
+    const origin = freshDir('origin-bare');
+    execFileSync('git', ['init', '-q', '--bare', origin]);
+    git('remote', 'add', 'origin', origin);
+    git('push', '-q', 'origin', 'main');
+    const branch = (name: string, msg?: string, date?: string) => { git('switch', '-q', '-c', name, 'main'); if (msg) commit(msg, date); git('push', '-q', 'origin', name); git('switch', '-q', 'main'); };
+    branch('claude/phase-2-workflow', 'phase 2 work');
+    branch('claude/old-default', 'old default');
+    git('merge', '-q', '--no-edit', 'claude/phase-2-workflow', 'claude/old-default'); git('push', '-q', 'origin', 'main');
+    branch('claude/phase-9-mystery', 'phase 9?');
+    branch('feature/side-project', 'unplanned', '2026-09-01T00:00:00Z');
+    branch('claude/session-abc', 'task work');
+    branch('claude/by-title', 'titled work');        // plan only through its PR title
+    branch('claude/mentions-phase', 'regression fix'); // PR title only mentions a phase
+    branch('claude/closed-pr', 'abandoned');          // PR titled with a phase but closed unmerged
+    branch('claude/task-pr', 'task via pr');          // linked to a task through the task's PR
+    branch('claude/open-pr', 'in review');            // unmerged, with an open PR
+    branch('claude/squashed', 'squash-merged');       // its PR was squash-merged: not an ancestor of main
+    branch('claude/fresh');                           // just created: no commits of its own
+    branch('claude/phase-CT-console', 'control tower'); // plan id CT, upper case in the name
+    git('switch', '-q', '-c', 'local-only', 'main'); commit('never pushed'); const localSha = git('rev-parse', 'HEAD').trim(); git('switch', '-q', 'main');
+    git('fetch', '-q', '--prune', 'origin');
+    const sha = (b: string) => git('rev-parse', `origin/${b}`).trim();
+    const pr = (number: number, head: string, title: string, state: string, merged = false) => ({ number, head, title, state, html_url: `https://github.com/o/r/pull/${number}`, created_at: '2026-10-10T00:00:00Z', merged_at: merged ? '2026-10-10T00:00:00Z' : null, head_sha: sha(head), findings: [] });
+    writeFileSync(path.join(dir, 'prs.json'), JSON.stringify([
+      pr(1, 'claude/by-title', 'Phase 3: Stitching', 'open'),
+      pr(2, 'claude/mentions-phase', 'Fix regression from Phase 2', 'open'),
+      pr(3, 'claude/closed-pr', 'Phase 1: abandoned attempt', 'closed'),
+      pr(4, 'claude/task-pr', 'Board tooling', 'open'),
+      pr(5, 'claude/open-pr', 'Phase 4: resilience', 'open'),
+      pr(6, 'claude/squashed', 'Phase 5: journey', 'closed', true),
+    ]));
+    writeFileSync(path.join(dir, 'devlog/repo.json'), JSON.stringify({ fullName: 'o/r', defaultBranch: 'claude/old-default', forksCount: 2, checkedAt: '2026-10-10T00:00:00Z',
+      forks: [{ fullName: 'someone/r', url: 'https://github.com/someone/r', branches: [{ name: 'main', sha: sha('main') }, { name: 'hack', sha: 'f'.repeat(40) }, { name: 'odd', sha: 'HEAD' }, { name: 'local', sha: localSha }] }] }));
+    run(dir, 'scripts/devlog-task.mjs', ['start', 'T-9', '--title', 'Session task', '--branch', 'claude/session-abc']);
+    run(dir, 'scripts/devlog-task.mjs', ['start', 'T-10', '--title', 'Tooling', '--pr', '4']);
+    const report = () => {
+      const out = path.join(dir, 'r.json');
+      expect(run(dir, 'scripts/devlog-report.mjs', ['--prs', path.join(dir, 'prs.json'), '--json', out]).status).toBe(0);
+      return JSON.parse(readFileSync(out, 'utf8'));
+    };
+    return { dir, report };
+  }
+
+  it('classes every branch as the trunk, part of the plan, task-only or a fork, and flags merged, stale and default-branch problems', () => {
+    const { report } = branchRepo();
+    const r = report();
+    const by = (n: string) => r.branches.branches.find((b: { name: string }) => b.name === n);
+    expect(by('main')).toMatchObject({ cls: 'trunk', merged: false, flags: [] });
+    expect(by('claude/phase-2-workflow')).toMatchObject({ cls: 'plan', merged: true, plan: 'Phase 2: Workflow Skeleton', flags: ['merged: can be deleted'] });
+    expect(by('claude/phase-9-mystery')).toMatchObject({ cls: 'fork' });
+    expect(by('claude/phase-9-mystery').reasons.join(' ')).toContain('not in the plan');
+    expect(by('feature/side-project')).toMatchObject({ cls: 'fork', ahead: 1 });
+    expect(by('feature/side-project').flags.join(' ')).toMatch(/unmerged, no open PR.*no commit for \d+ days/);
+    expect(by('claude/session-abc')).toMatchObject({ cls: 'task', plan: 'Task T-9' });
+    expect(by('claude/by-title')).toMatchObject({ cls: 'plan', plan: 'Phase 3: Stitching And Outbound Deliverability (#1)' });
+    expect(by('claude/mentions-phase')).toMatchObject({ cls: 'fork' });
+    expect(by('claude/closed-pr')).toMatchObject({ cls: 'fork' });
+    expect(by('claude/task-pr')).toMatchObject({ cls: 'task', plan: 'Task T-10' });
+    expect(by('claude/open-pr').flags).toEqual([]);
+    expect(by('claude/squashed')).toMatchObject({ merged: true, flags: ['merged: can be deleted'] });
+    expect(by('claude/fresh')).toMatchObject({ merged: false, flags: ['no new commits'] });
+    expect(by('claude/phase-CT-console')).toMatchObject({ cls: 'plan', plan: 'Phase CT: Control Tower' });
+    expect(by('claude/old-default')).toMatchObject({ merged: true, flags: ['default branch is not the trunk', 'merged: change the default branch first, then it can be deleted'] });
+    const fork = Object.fromEntries(r.branches.forks[0].branches.map((b: { name: string; inSync: boolean }) => [b.name, b.inSync]));
+    expect(fork).toEqual({ main: true, hack: false, odd: false, local: false }); // a commit only in a local clone is not on any branch here
+    expect(r.branches.uninspectedForks).toBe(1);
+    const text = r.attention.map((a: { text: string }) => a.text).join('\n');
+    for (const want of ['default branch on GitHub is claude/old-default', 'branch(es) are not part of the plan', 'claude/phase-9-mystery (', 'feature/side-project (', 'claude/mentions-phase (', 'claude/closed-pr (', 'justified only by a board task', 'claude/old-default only after the default branch is changed', 'someone/r:hack', '1 GitHub fork(s) of the repository have not been inspected']) {
+      expect(text).toContain(want);
+    }
+    expect(text).not.toMatch(/can be deleted by the owner: [^;]*claude\/old-default/); // never listed for deletion before the default changes
+  });
+
+  it('runs no audit and flags nothing when the trunk cannot be found', () => {
+    const { dir, report } = branchRepo();
+    const cfg = JSON.parse(readFileSync(path.join(dir, 'devlog/control-tower.json'), 'utf8'));
+    cfg.branches.trunk = 'master';
+    writeFileSync(path.join(dir, 'devlog/control-tower.json'), JSON.stringify(cfg));
+    const r = report();
+    expect(r.branches.error).toContain('origin/master is missing');
+    expect(r.branches.branches).toEqual([]);
+    expect(r.attention.map((a: { text: string }) => a.text).join('\n')).not.toContain('can be deleted');
+  });
+
+  it('keeps a branch name out of git when it holds a long number', () => {
+    const { dir } = makeRepo();
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    writeFileSync(path.join(dir, 'devlog/.spool/s.jsonl'), JSON.stringify({ ts: '2026-10-10T00:00:00Z', session: 's', event: 'SessionStart', branch: 'claude/call-60123456789' }) + '\n');
+    run(dir, 'scripts/devlog-flush.mjs', []);
+    const out = readdirSync(path.join(dir, 'devlog/activity')).map((f) => readFileSync(path.join(dir, 'devlog/activity', f), 'utf8')).join('');
+    expect(out).not.toContain('60123456789');
   });
 });

@@ -6,7 +6,9 @@
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/1",
   "created_at": "2026-10-09T10:35:03Z",
   "merged_at": "2026-10-09T10:38:07Z",
-  "findings": []
+  "findings": [],
+  "head": "claude/elegant-fermat-er13o8",
+  "head_sha": "fb4b592bbb6dd9bbf760b55347b98a122d39da6c"
  },
  {
   "number": 2,
@@ -15,7 +17,9 @@
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/2",
   "created_at": "2026-10-09T10:59:16Z",
   "merged_at": "2026-10-09T11:19:23Z",
-  "findings": []
+  "findings": [],
+  "head": "claude/elegant-fermat-er13o8",
+  "head_sha": "cdcac18300fa5d82ebb1c5863c4828da2a7f8671"
  },
  {
   "number": 3,
@@ -24,7 +28,9 @@
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/3",
   "created_at": "2026-10-09T11:30:02Z",
   "merged_at": "2026-10-09T11:32:14Z",
-  "findings": []
+  "findings": [],
+  "head": "claude/elegant-fermat-er13o8",
+  "head_sha": "fbfe350295268ee96cfe3215a7067b54c920fb52"
  },
  {
   "number": 4,
@@ -33,7 +39,9 @@
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/4",
   "created_at": "2026-10-09T11:40:35Z",
   "merged_at": "2026-10-09T11:42:00Z",
-  "findings": []
+  "findings": [],
+  "head": "claude/elegant-fermat-er13o8",
+  "head_sha": "fa5fda4d454508ec767b75d47781cc9eb0a183d8"
  },
  {
   "number": 5,
@@ -42,7 +50,9 @@
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/5",
   "created_at": "2026-10-09T12:38:12Z",
   "merged_at": "2026-10-09T13:31:50Z",
-  "findings": []
+  "findings": [],
+  "head": "claude/elegant-fermat-er13o8",
+  "head_sha": "bd637b5490a9fb16031fac684769bfce6abae05f"
  },
  {
   "number": 6,
@@ -72,7 +82,9 @@
     "severity": "Unrated",
     "fixed": true
    }
-  ]
+  ],
+  "head": "claude/phase-1-completion",
+  "head_sha": "669036668d227f09383bab50a1640e754590090f"
  },
  {
   "number": 7,
@@ -114,7 +126,9 @@
     "severity": "Unrated",
     "fixed": true
    }
-  ]
+  ],
+  "head": "claude/phase-ct-control-tower-v1",
+  "head_sha": "2532e1c70eaed82293aa7a5e5217f321de5baec5"
  },
  {
   "number": 8,
@@ -160,7 +174,9 @@
     "severity": "Low",
     "fixed": true
    }
-  ]
+  ],
+  "head": "claude/phase-2-workflow-skeleton",
+  "head_sha": "adc302c580ecaaa7d839aa3cbb243cfd1aa9b955"
  },
  {
   "number": 9,
@@ -198,7 +214,9 @@
     "severity": "Low",
     "fixed": true
    }
-  ]
+  ],
+  "head": "claude/phase-3-stitching",
+  "head_sha": "43957eb9ddf77c7c9d4b971ae3145092e7079a16"
  },
  {
   "number": 10,
@@ -248,7 +266,9 @@
     "severity": "Low",
     "fixed": false
    }
-  ]
+  ],
+  "head": "claude/phase-4-resilience",
+  "head_sha": "d30f83331b869b50f001360242e3863e619cec12"
  },
  {
   "number": 11,
@@ -256,7 +276,7 @@
   "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/11",
   "created_at": "2026-10-10T00:20:00Z",
-  "merged_at": "2026-10-10T01:11:00Z",
+  "merged_at": "2026-10-10T01:11:19Z",
   "findings": [
    {
     "severity": "Medium",
@@ -314,15 +334,17 @@
     "severity": "Low",
     "fixed": false
    }
-  ]
+  ],
+  "head": "claude/elegant-hopper-6mid2t",
+  "head_sha": "1a92756add478e2347d9bb81ad1cac685e83d7ae"
  },
  {
   "number": 12,
   "title": "Dev Control Tower: replicate the d3ngineering Control Tower",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/12",
   "created_at": "2026-10-10T00:56:00Z",
-  "merged_at": null,
+  "merged_at": "2026-10-10T01:14:33Z",
   "findings": [
    {
     "severity": "High",
@@ -379,6 +401,84 @@
    {
     "severity": "Low",
     "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   }
+  ],
+  "head": "claude/dev-control-tower-v2",
+  "head_sha": "dab99bd176a55a38ddfa9c761a68fd9782e91731"
+ },
+ {
+  "number": 13,
+  "title": "Dev Control Tower: branch and fork audit; fix session cost across resumed runs",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/13",
+  "created_at": "2026-10-10T01:49:00Z",
+  "merged_at": null,
+  "head": "claude/elegant-hopper-6mid2t",
+  "head_sha": "905cff7ecbfa3aac025deaece7d36ac184595e82",
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
    },
    {
     "severity": "Low",

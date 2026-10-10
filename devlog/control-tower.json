@@ -80,5 +80,11 @@
         "cacheRead": "0.25"
       }
     }
+  },
+  "branches": {
+    "_about": "Branch and fork audit. Every branch must be part of the plan (named for a plan phase, a PR titled with a phase, or linked to a board task with --branch) or it is reported as a fork. Plan phases come from src/progress.ts.",
+    "trunk": "main",
+    "phasePattern": "^claude/phase-([0-9a-z]+)-",
+    "staleDays": 7
   }
 }

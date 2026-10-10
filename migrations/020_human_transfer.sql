@@ -21,9 +21,5 @@ ALTER TABLE calls ADD COLUMN transfer_accepted_at timestamptz;
 -- Whether this call's dial screened the agent (the client's setting when the dial began, so a change mid-dial does not
 -- change how its end is read).
 ALTER TABLE calls ADD COLUMN transfer_screened boolean;
--- The agent's leg is a call of its own at the provider: its id (never a number) and length, so it is costed with the
--- caller's call and checked against the provider's figures.
-ALTER TABLE calls ADD COLUMN transfer_leg_sid text;
-ALTER TABLE calls ADD COLUMN transfer_seconds numeric(10,3) CHECK (transfer_seconds >= 0);
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON transfer_settings TO voicelab_internal;

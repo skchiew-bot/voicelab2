@@ -366,3 +366,8 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:**
   - `CLAUDE.md` › "so a failing check stops the commit"
 
+### L-046: Never edit a migration once it is on main
+- **Seen:** A follow-up to the human transfer added two columns to `020_human_transfer.sql` after the owner had merged it, so a database already migrated would never have got them; caught when rebuilding the branch on the merged `main` (human transfer follow-up, 2026-10-10).
+- **Rule:** Before changing a migration, check whether it is on `origin/main`; if it is, add a new migration. Re-check after every merge of `main` into a branch, since a PR can merge while you work on it.
+- **Guards:**
+  - `tests/migrations.test.ts` › "never edits a migration already on main: a follow-up change goes in a new file"

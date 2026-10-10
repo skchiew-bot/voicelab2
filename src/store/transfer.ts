@@ -13,6 +13,7 @@ import { withActor } from '../db.js';
 import { AppError } from '../errors.js';
 import { DEFAULT_FALLBACK } from '../resilience/fallback.js';
 import { dialOutcome, twimlDialAgent, twimlEmpty, twimlHangup, twimlHoldingThenHangup, twimlWhisper, whisperText } from '../telephony/transfer.js';
+export { twimlHangup, twimlHoldingThenHangup };
 import { audit } from './audit.js';
 import { normalizeE164 } from './dnc.js';
 import { recordEvent } from './events.js';
@@ -56,18 +57,26 @@ const OPEN = ['ringing', 'in_progress', 'queued', 'dialing'];
 /** Call statuses that say the caller has gone. Anything else (including a value we do not know) is taken as still there. */
 const GONE = ['completed', 'busy', 'no-answer', 'failed', 'canceled'];
 
-export const transferUrl = (baseUrl: string, providerId: string, step: 'relay-ended' | 'whisper' | 'dialled', callId: string) =>
+export type TransferStep = 'relay-ended' | 'whisper' | 'accept' | 'dialled';
+export const transferUrl = (baseUrl: string, providerId: string, step: TransferStep, callId: string) =>
   `${baseUrl}/webhooks/twilio/${providerId}/transfer/${step}?callId=${callId}`;
 
-type CallRow = { id: string; tenant_id: string; project_id: string | null; provider_id: string; provider_call_id: string | null; direction: string; status: string; from_number_id: string | null; relay_failed: boolean; transfer_status: string | null };
+type CallRow = { id: string; tenant_id: string; project_id: string | null; provider_id: string; provider_call_id: string | null; direction: string; status: string; from_number_id: string | null; relay_failed: boolean; transfer_status: string | null; transfer_accepted_at: Date | null; transfer_screened: boolean | null };
 
 /** The call, locked, if it is the one the request is for: on this provider, with the Twilio call id it names. */
 async function lockCall(c: pg.PoolClient, providerId: string, callId: string, callSid: string | undefined): Promise<CallRow> {
   const call = (await c.query(
-    `SELECT id, tenant_id, project_id, provider_id, provider_call_id, direction, status, from_number_id, relay_failed, transfer_status
+    `SELECT id, tenant_id, project_id, provider_id, provider_call_id, direction, status, from_number_id, relay_failed, transfer_status,
+            transfer_accepted_at, transfer_screened
        FROM calls WHERE id = $1 FOR UPDATE`, [callId])).rows[0] as CallRow | undefined;
   if (!call || call.provider_id !== providerId || !callSid || call.provider_call_id !== callSid) throw new AppError(404, 'Unknown call.');
   return call;
+}
+
+/** An event a retried request must not record twice. */
+async function eventOnce(c: pg.PoolClient, call: CallRow, type: string, payload: Record<string, unknown> = {}) {
+  if ((await c.query('SELECT 1 FROM call_events WHERE call_id = $1 AND type = $2', [call.id, type])).rowCount) return;
+  await event(c, call, type, payload);
 }
 
 const event = (c: pg.PoolClient, call: CallRow, type: string, payload: Record<string, unknown> = {}) =>
@@ -118,8 +127,13 @@ export async function afterRelay(d: TransferDeps, providerId: string, callId: st
     const present = !GONE.includes(params.CallStatus ?? '') && OPEN.includes(call.status);
     if (call.transfer_status === 'dialing') {
       // A retried request: the first answer may never have reached Twilio, so the same dial is given again.
+      if (!present) return twimlHangup();
       const plan = await dialPlan(c, d, call, params);
-      return present && plan.twiml ? plan.twiml : twimlHangup();
+      if (plan.twiml) return plan.twiml;
+      // The agent number (or our own) went away between the two requests: the caller still gets the ladder.
+      await c.query(`UPDATE calls SET transfer_status = 'failed' WHERE id = $1`, [callId]);
+      await event(c, call, 'transfer.failed', { reason: plan.why });
+      return ladder(c, call, 'the caller asked for a person and there was no one to put them through to', true);
     }
     if (call.transfer_status !== null) return twimlHangup();   // already put through, or already fallen back
     const run = (await c.query(`SELECT status, outcome, error FROM workflow_runs WHERE call_id = $1 AND kind = 'live'`, [callId])).rows[0] as
@@ -136,7 +150,7 @@ export async function afterRelay(d: TransferDeps, providerId: string, callId: st
         await event(c, call, 'transfer.unavailable', { reason: plan.why });
         return ladder(c, call, 'the caller asked for a person and there was no one to put them through to', true);
       }
-      await c.query(`UPDATE calls SET transfer_status = 'dialing', transfer_started_at = now() WHERE id = $1`, [callId]);
+      await c.query(`UPDATE calls SET transfer_status = 'dialing', transfer_started_at = now(), transfer_screened = $2 WHERE id = $1`, [callId, plan.whisper]);
       await event(c, call, 'transfer.dialing', { ringSeconds: plan.ringSeconds, whisper: plan.whisper });
       return plan.twiml;
     }
@@ -150,17 +164,44 @@ export async function afterRelay(d: TransferDeps, providerId: string, callId: st
 }
 
 /**
- * The agent has picked up. Before being connected they hear why the call came to them and its ticket reference. A
- * request that is not for a call being put through says nothing, and the agent is simply connected.
+ * The agent's leg of the call, checked: the call this request names, on this provider, being put through now, and the
+ * agent's leg a child of the caller's. A request that does not match ends the agent's leg, so no one is connected
+ * unscreened; the mismatch is recorded once, so a live fault shows.
+ */
+async function agentLeg(c: pg.PoolClient, providerId: string, callId: string, params: Record<string, string>) {
+  const call = await lockCall(c, providerId, callId, params.ParentCallSid).catch(() => null);
+  if (call?.transfer_status === 'dialing') return call;
+  if (!call) {
+    const known = (await c.query('SELECT id, tenant_id, project_id, transfer_status FROM calls WHERE id = $1 AND provider_id = $2', [callId, providerId])).rows[0];
+    if (known?.transfer_status === 'dialing') await eventOnce(c, known as CallRow, 'transfer.agent_leg_unmatched');
+  }
+  return null;
+}
+
+/**
+ * The agent has picked up. Before being connected they hear why the call came to them and its ticket reference, and
+ * press 1 to take it, so a voicemail answering is never taken for a person.
  */
 export async function whisper(d: TransferDeps, providerId: string, callId: string, params: Record<string, string>): Promise<string> {
   return asInternal(d, async (c) => {
-    // The agent's leg is a child of the caller's: its parent must be the call this request names.
-    const call = await lockCall(c, providerId, callId, params.ParentCallSid).catch(() => null);
-    if (!call || call.transfer_status !== 'dialing') return twimlEmpty();
+    const call = await agentLeg(c, providerId, callId, params);
+    if (!call) return twimlHangup();
     const t = (await c.query(`SELECT id, trigger FROM tickets WHERE call_id = $1 AND kind = 'escalation' ORDER BY created_at DESC LIMIT 1`, [callId])).rows[0];
-    await event(c, call, 'transfer.whispered', { ticket: t ? 'found' : 'none' });
-    return twimlWhisper(whisperText({ trigger: t?.trigger ?? null, ticketId: t?.id ?? null }));
+    await eventOnce(c, call, 'transfer.whispered', { ticket: t ? 'found' : 'none' });
+    return twimlWhisper(whisperText({ trigger: t?.trigger ?? null, ticketId: t?.id ?? null }), transferUrl(d.baseUrl, providerId, 'accept', callId));
+  });
+}
+
+/** The agent pressed a key after the whisper. Only 1 takes the call; the caller is then connected. */
+export async function accept(d: TransferDeps, providerId: string, callId: string, params: Record<string, string>): Promise<string> {
+  return asInternal(d, async (c) => {
+    const call = await agentLeg(c, providerId, callId, params);
+    if (!call || params.Digits !== '1') return twimlHangup();
+    if (!call.transfer_accepted_at) {
+      await c.query('UPDATE calls SET transfer_accepted_at = now() WHERE id = $1', [callId]);
+      await event(c, call, 'transfer.accepted');
+    }
+    return twimlEmpty();
   });
 }
 
@@ -171,7 +212,10 @@ export async function whisper(d: TransferDeps, providerId: string, callId: strin
 export async function afterDial(d: TransferDeps, providerId: string, callId: string, params: Record<string, string>): Promise<string> {
   return asInternal(d, async (c) => {
     const call = await lockCall(c, providerId, callId, params.CallSid);
-    const outcome = dialOutcome(params.DialCallStatus);
+    // A screened dial reached a person only if the agent pressed 1; otherwise a voicemail, or an agent who did not
+    // take the call, ended it, and no one was reached.
+    const dialled = dialOutcome(params.DialCallStatus);
+    const outcome = dialled === 'answered' && call.transfer_screened !== false && !call.transfer_accepted_at ? 'unanswered' : dialled;
     const present = !GONE.includes(params.CallStatus ?? '');
     if (call.transfer_status === 'dialing') {
       const next = outcome === 'answered' ? 'answered' : present ? outcome : 'abandoned';
@@ -184,4 +228,17 @@ export async function afterDial(d: TransferDeps, providerId: string, callId: str
     if ((call.transfer_status === 'unanswered' || call.transfer_status === 'failed') && present) return ladder(c, call, '', false);
     return twimlHangup();
   });
+}
+
+/**
+ * The call has ended while its transfer was still dialling, and Twilio never said how the dial ended (our answer to it
+ * may never have arrived). Whether anyone was reached is unknown, so it is recorded as unknown, never as a failure or
+ * an answer, and a callback request is recorded: the caller asked for a person. Nothing is dialled again.
+ */
+export async function settleTransferOnEnd(c: pg.PoolClient, callId: string) {
+  const call = (await c.query(
+    `UPDATE calls SET transfer_status = 'unknown' WHERE id = $1 AND transfer_status = 'dialing' RETURNING id, tenant_id, project_id`, [callId])).rows[0] as CallRow | undefined;
+  if (!call) return;
+  await addCallbackRequest(c, { tenantId: call.tenant_id, callId, reason: 'the caller asked for a person and the transfer did not finish' });
+  await event(c, call, 'transfer.unknown');
 }

@@ -5,7 +5,7 @@ import WebSocket from 'ws';
 import { parseKey } from '../src/secrets.js';
 import { relayCallToken } from '../src/store/relay.js';
 import { twimlRelay } from '../src/telephony/relay.js';
-import { dialOutcome, twimlDialAgent, whisperText } from '../src/telephony/transfer.js';
+import { dialOutcome, twimlDialAgent, twimlWhisper, whisperText } from '../src/telephony/transfer.js';
 import type { WorkflowDefinition } from '../src/workflows/definition.js';
 
 const relayFixture = JSON.parse(readFileSync(new URL('./fixtures/twilio-relay.json', import.meta.url), 'utf8'));
@@ -31,6 +31,9 @@ describe('the TwiML that puts a caller through to a person', () => {
     expect(whisperText({ trigger: 'workflow_handoff', ticketId: null })).toBe('A Voice Lab caller is being put through to you, because the caller asked for a person.');
     // a trigger we do not know, or one named like an inherited property, is never read out (L-003)
     expect(whisperText({ trigger: 'constructor', ticketId: 'not-a-ticket' })).toBe('A Voice Lab caller is being put through to you, because the call was passed to a person.');
+    // the agent must press 1; silence (a voicemail) or any other key ends the agent's leg
+    expect(twimlWhisper('Hi <there>.', 'https://v.test/a?callId=c1&b=2')).toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Gather action="https://v.test/a?callId=c1&amp;b=2" method="POST" numDigits="1" timeout="8">'
+      + '<Say>Hi &lt;there&gt;. Press 1 to take the call.</Say></Gather><Hangup/></Response>');
   });
 
   it('counts only an answered dial as reaching a person; anything else, even a value never seen, did not', () => {
@@ -119,7 +122,14 @@ async function converse(callSid: string, callId: string, expectMessages: number)
   ws.send(JSON.stringify({ ...relayFixture.inbound.setup, callSid, customParameters: { callId, token: relayCallToken(parseKey(env.config.VOICELAB_SECRET_KEY), callId) } }));
   for (let i = 0; i < 200 && got.length < expectMessages; i++) await new Promise((r) => setTimeout(r, 10));
   const closed = new Promise<void>((r) => ws.on('close', () => r()));
-  return { got, close: async () => { ws.close(); await closed; await new Promise((r) => setTimeout(r, 50)); } };
+  return {
+    got, close: async () => { ws.close(); await closed; await new Promise((r) => setTimeout(r, 50)); },
+    say: async (words: string) => {
+      const before = got.length;
+      ws.send(JSON.stringify({ type: 'prompt', voicePrompt: words, lang: 'en-US', last: true }));
+      for (let i = 0; i < 200 && (got.length === before || got.at(-1)?.type !== 'end'); i++) await new Promise((r) => setTimeout(r, 10));
+    },
+  };
 }
 
 const path = (step: string, callId: string) => `/webhooks/twilio/${twilioId}/transfer/${step}?callId=${callId}`;
@@ -127,6 +137,9 @@ const relayEnded = (callSid: string, callId: string, extra: Record<string, strin
   twilioPost(path('relay-ended', callId), { ...fixture.relayEnded, CallSid: callSid, From: CUSTOMER, To: to, ...extra });
 const whisperReq = (callSid: string, callId: string, extra: Record<string, string> = {}) =>
   twilioPost(path('whisper', callId), { ...fixture.whisper, ParentCallSid: callSid, From: OUR, To: AGENT, ...extra });
+const acceptReq = (callSid: string, callId: string, digits: string) =>
+  twilioPost(path('accept', callId), { ...fixture.whisper, ParentCallSid: callSid, From: OUR, To: AGENT, Digits: digits });
+const HANGUP = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
 const dialled = (callSid: string, callId: string, extra: Record<string, string> = {}) =>
   twilioPost(path('dialled', callId), { ...fixture.dialled, CallSid: callSid, From: CUSTOMER, To: OUR, ...extra });
 const callRow = async (callId: string) => (await env.pool.query('SELECT transfer_status, relay_failed FROM calls WHERE id = $1', [callId])).rows[0];
@@ -169,14 +182,20 @@ describe('a live caller passed to a person', () => {
     const ticket = (await env.pool.query(`SELECT id FROM tickets WHERE call_id = $1 AND kind = 'escalation'`, [callId])).rows[0].id as string;
     const w = await whisperReq(callSid, callId);
     expect(w.statusCode).toBe(200);
-    expect(w.body).toBe(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>A Voice Lab caller is being put through to you, because the caller asked for a person. Ticket reference ${ticket.slice(0, 8).toUpperCase().split('').join(' ')}.</Say></Response>`);
+    expect(w.body).toContain(`<Gather action="${BASE}/webhooks/twilio/${twilioId}/transfer/accept?callId=${callId}" method="POST" numDigits="1" timeout="8">`);
+    expect(w.body).toContain(`<Say>A Voice Lab caller is being put through to you, because the caller asked for a person. Ticket reference ${ticket.slice(0, 8).toUpperCase().split('').join(' ')}. Press 1 to take the call.</Say>`);
+    expect(w.body).not.toContain('123456789');
+    expect((await whisperReq(callSid, callId)).statusCode).toBe(200);              // a retried whisper is recorded once
+    expect((await acceptReq(callSid, callId, '9')).body).toBe(HANGUP);              // any other key: not taken
+    expect((await acceptReq(callSid, callId, '1')).body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response/>');
 
     const d = await dialled(callSid, callId);
     expect(d.body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
     expect(await callRow(callId)).toMatchObject({ transfer_status: 'answered' });
     expect(await callbacks(callId)).toEqual([]);
     const ev = await events(callId);
-    expect(ev.map((e) => e.type)).toEqual(expect.arrayContaining(['transfer.dialing', 'transfer.whispered', 'transfer.answered']));
+    expect(ev.map((e) => e.type)).toEqual(expect.arrayContaining(['transfer.dialing', 'transfer.whispered', 'transfer.accepted', 'transfer.answered']));
+    expect(ev.filter((e) => e.type === 'transfer.whispered')).toHaveLength(1);
     // the caller's number is in every request Twilio sent; it is kept nowhere
     const kept = JSON.stringify([ev, (await env.pool.query('SELECT * FROM calls WHERE id = $1', [callId])).rows, (await env.pool.query('SELECT * FROM audit_log')).rows]);
     expect(kept).not.toContain('123456789');
@@ -226,10 +245,10 @@ describe('a live caller passed to a person', () => {
     expect(await callbacks(callId)).toHaveLength(1);
   });
 
-  it('dials the agent once when Twilio asks twice at the same moment', async () => {
+  it('records the dial once when Twilio asks three times at the same moment, giving each the same answer', async () => {
     const { callSid, callId } = await handedOver();
     const rs = await Promise.all([relayEnded(callSid, callId), relayEnded(callSid, callId), relayEnded(callSid, callId)]);
-    // a retry is given the same dial, since the first answer may never have reached Twilio; it is recorded once
+    // Twilio asks once per session, and again only if our answer never reached it; so each is given the same dial, and it is recorded once
     for (const r of rs) expect(r.body).toContain('<Dial ');
     expect((await events(callId)).filter((e) => e.type === 'transfer.dialing')).toHaveLength(1);
   });
@@ -288,10 +307,77 @@ describe('a live caller passed to a person', () => {
     expect((await dialled(callSid, callId, { DialCallStatus: 'no-answer' })).body).toContain('<Hangup/>');   // not dialling: nothing to fall back on
     expect(await callRow(callId)).toMatchObject({ transfer_status: null });
     expect(await callbacks(callId)).toEqual([]);
-    // a whisper for a call that is not being put through, or whose parent is another call, says nothing
-    expect((await whisperReq(callSid, callId)).body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response/>');
+  });
+
+  it('does not take a voicemail on the agent phone for a person: a dial no one took with 1 runs the callback ladder', async () => {
+    const { callSid, callId } = await handedOver();
     await relayEnded(callSid, callId);
-    expect((await whisperReq('CA_someone_else', callId)).body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response/>');
-    expect((await whisperReq(callSid, callId)).body).toContain('<Say>');
+    expect((await whisperReq(callSid, callId)).body).toContain('<Gather ');
+    // the voicemail picks up and says its greeting; no key is pressed, so Twilio ends the agent's leg after the Gather
+    const d = await dialled(callSid, callId, { DialCallStatus: 'completed' });
+    expect(d.body).toContain('<Say>'); expect(d.body).toContain('<Hangup/>');
+    expect(await callRow(callId)).toMatchObject({ transfer_status: 'unanswered' });
+    expect(await callbacks(callId)).toEqual(['the caller asked for a person and no one answered']);
+  });
+
+  it('ends the agent leg when its request is not for the call being put through, and records the mismatch once', async () => {
+    const { callSid, callId } = await handedOver();
+    expect((await whisperReq(callSid, callId)).body).toBe(HANGUP);                  // not being put through yet
+    await relayEnded(callSid, callId);
+    expect((await whisperReq('CA_someone_else', callId)).body).toBe(HANGUP);
+    expect((await acceptReq('CA_someone_else', callId, '1')).body).toBe(HANGUP);
+    expect((await whisperReq(callSid, callId, { ParentCallSid: '' })).body).toBe(HANGUP);
+    expect((await events(callId)).filter((e) => e.type === 'transfer.agent_leg_unmatched')).toHaveLength(1);
+    expect(await callRow(callId)).toMatchObject({ transfer_status: 'dialing' });
+  });
+
+  it('records a callback once when the call ends while the dial is under way and Twilio never says how it ended', async () => {
+    const { callSid, callId } = await handedOver();
+    await relayEnded(callSid, callId);
+    const end = { CallSid: callSid, CallStatus: 'completed', CallDuration: '90', Direction: 'inbound', From: CUSTOMER, To: OUR };
+    expect((await twilioPost(`/webhooks/twilio/${twilioId}/status`, end)).statusCode).toBe(204);
+    expect(await callRow(callId)).toMatchObject({ transfer_status: 'unknown' });
+    expect(await callbacks(callId)).toEqual(['the caller asked for a person and the transfer did not finish']);
+    // a late dial-ended request, or the end reported again, changes nothing
+    expect((await dialled(callSid, callId, { CallStatus: 'completed', DialCallStatus: 'no-answer' })).body).toBe(HANGUP);
+    await twilioPost(`/webhooks/twilio/${twilioId}/status`, end);
+    expect(await callbacks(callId)).toHaveLength(1);
+    // a call that ends with no transfer under way records nothing
+    const plain = await ring(ASK);
+    await twilioPost(`/webhooks/twilio/${twilioId}/status`, { ...end, CallSid: plain.callSid, To: ASK });
+    expect(await callbacks(plain.callId)).toEqual([]);
+  });
+
+  it('runs the ladder when Twilio asks again after the agent number was removed', async () => {
+    const { callSid, callId } = await handedOver();
+    expect((await relayEnded(callSid, callId)).body).toContain('<Dial ');
+    await must(env.call(env.staffToken, 'DELETE', `/internal/tenants/${tenantId}/transfer`));
+    try {
+      const r = await relayEnded(callSid, callId);
+      expect(r.body).not.toContain('<Dial'); expect(r.body).toContain('<Say>');
+      expect(await callRow(callId)).toMatchObject({ transfer_status: 'failed' });
+      expect(await callbacks(callId)).toHaveLength(1);
+    } finally { await must(put(`/internal/tenants/${tenantId}/transfer`, { agentNumber: AGENT, ringSeconds: 20 })); }
+  });
+
+  it('puts a caller the workflow escalated (severe sentiment) through, and tells the agent why', async () => {
+    const { callSid, callId } = await ring(ASK);
+    const line = await converse(callSid, callId, 1);
+    line.got.length = 0;
+    // the caller is upset: the workflow escalates and passes the call to a person
+    await line.say('I will call my lawyer');
+    expect(line.got.at(-1)).toEqual({ type: 'end', handoffData: JSON.stringify({ reason: 'handoff_human' }) });
+    await line.close();
+    expect((await relayEnded(callSid, callId, {}, ASK)).body).toContain(`callerId="${ASK}"`);
+    expect((await whisperReq(callSid, callId)).body).toContain('because the caller sounded upset.');
+  });
+
+  it('runs the ladder when the relay closed first, abandoning the run, and the caller is still on the line', async () => {
+    const { callSid, callId } = await ring(ASK);
+    const line = await converse(callSid, callId, 1);
+    await line.close();
+    expect((await env.pool.query(`SELECT outcome FROM workflow_runs WHERE call_id = $1`, [callId])).rows[0].outcome).toBe('abandoned');
+    expect((await relayEnded(callSid, callId, {}, ASK)).body).toContain('<Say>');
+    expect(await callbacks(callId)).toEqual(['the live call could not carry on']);
   });
 });

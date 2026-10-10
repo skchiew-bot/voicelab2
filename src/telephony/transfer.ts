@@ -6,7 +6,8 @@
  * published package (`twilio` 6.1.2, lib/twiml/VoiceResponse.d.ts); the end-of-session request and its fields from
  * Twilio's `twilio-agent-connect` 2.4.0 (ConversationRelayCallbackPayloadSchema). The values `DialCallStatus` takes are
  * not in either package: they are taken to match the call statuses in that schema. Kept in
- * `tests/fixtures/twilio-transfer.json`; not yet checked against a live call (lesson L-016).
+ * `tests/fixtures/twilio-transfer.json`; not yet checked against a live call (lesson L-016). `<Gather action numDigits
+ * timeout>` is from the same TwiML package.
  */
 
 const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
@@ -48,7 +49,12 @@ export function whisperText(w: { trigger: string | null; ticketId: string | null
   const ref = w.ticketId && /^[0-9a-f]{8}/.test(w.ticketId) ? ` Ticket reference ${w.ticketId.slice(0, 8).toUpperCase().split('').join(' ')}.` : '';
   return `A Voice Lab caller is being put through to you, because ${why}.${ref}`;
 }
-export const twimlWhisper = (text: string) => `${DOC}<Response><Say>${xml(text)}</Say></Response>`;
+/**
+ * The whisper, and the screen: the agent must press 1 to take the call. Anything else, or nothing (a voicemail picking
+ * up), ends the agent's leg, so the caller is never put through to a machine.
+ */
+export const twimlWhisper = (text: string, acceptUrl: string) =>
+  `${DOC}<Response><Gather action="${xml(acceptUrl)}" method="POST" numDigits="1" timeout="8"><Say>${xml(text)} Press 1 to take the call.</Say></Gather><Hangup/></Response>`;
 
 /**
  * How the dial to the agent ended. Only a dial that was answered put the caller through to a person; anything else,

@@ -65,7 +65,7 @@ export async function setupDb(opts: { integrationHttp?: import('../src/workflows
   }
 
   /** Call the API as a given token. */
-  const call = (token: string, method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown) =>
+  const call = (token: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: unknown) =>
     app.inject({ method, url, payload: payload as object, headers: { authorization: `Bearer ${token}` } });
 
   return { pool, app, config, provider, staffToken: staff.token, call, teardown };

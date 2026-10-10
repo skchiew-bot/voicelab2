@@ -214,5 +214,72 @@ describe('what the bot says', () => {
     expect(asked).toBe(1);
     expect(out.records.find((r) => r.type === 'say')!.payload.text).toBe('We will be in touch soon.');
     expect(out.records.find((r) => r.type === 'say')!.payload.promotion).toBeUndefined();
+    expect((out.records.find((r) => r.type === 'say')!.payload.ai as { scriptBlocked: string }).scriptBlocked).toContain('rule "r"');     // the block is on the step, not silent
   });
 });
+
+describe('what a review found', () => {
+  const pol = (t = tenantId) => `/internal/tenants/${t}/policy`;
+  const propose = (rs: object[], summary: string, extra: object = {}) => A.post(`${pol()}/proposals`, { rules: rs, summary, ...extra });
+
+  it('lets a wrong proposal be withdrawn, with a reason, so it never blocks every later change; and a refused number is free again', async () => {
+    const B = as(tokenB);
+    const p = (await must(propose(rules([{ id: 'x', kind: 'action', action: 'x', effect: 'allow' }], 'court'), 'Wrong.'))).json();
+    expect(p.version).toBe('3.0');                                                                      // the refused and withdrawn numbers are not held
+    await must(B.post(`/internal/policy-versions/${p.id}/decision`, { decision: 'approved' }));
+    expect((await A.put(`${pol()}/levels`, { levels: ['One', 'Two', 'Three'] })).statusCode).toBe(409);   // the levels cannot move under a waiting proposal
+    expect((await B.post(`/internal/policy-versions/${p.id}/withdraw`, { note: '' })).statusCode).toBe(400);
+    expect((await must(B.post(`/internal/policy-versions/${p.id}/withdraw`, { note: 'Found a mistake.' }))).json().status).toBe('withdrawn');
+    expect((await B.post(`/internal/policy-versions/${p.id}/withdraw`, { note: 'again' })).statusCode).toBe(409);
+    expect((await B.post(`/internal/policy-versions/${p.id}/decision`, { decision: 'approved' })).statusCode).toBe(409);
+  });
+
+  it('keeps the levels a proposal was made under, even when they are changed after it is settled', async () => {
+    await must(A.put(`${pol()}/levels`, { levels: ['One', 'Two', 'Three'] }));
+    const p = (await must(propose(rules([{ id: 'y', kind: 'action', action: 'y', effect: 'allow' }], 'court'), 'Three levels.'))).json();
+    expect(p.progress.map((l: { name: string }) => l.name)).toEqual(['One', 'Two', 'Three']);
+    await must(as(tokenB).post(`/internal/policy-versions/${p.id}/decision`, { decision: 'approved' })); await must(as(tokenC).post(`/internal/policy-versions/${p.id}/decision`, { decision: 'approved' }));
+    expect((await as(tokenD).post(`/internal/policy-versions/${p.id}/activate`)).statusCode).toBe(409);   // two of three is not enough
+    await must(as(tokenB).post(`/internal/policy-versions/${p.id}/withdraw`, { note: 'Done with this.' }));
+    await must(A.put(`${pol()}/levels`, { levels: ['Policy owner', 'Compliance'] }));
+    expect((await A.get(`/internal/policy-versions/${p.id}`)).json().progress).toHaveLength(3);
+  });
+
+  it('accepts a rollback only to a replaced policy, with exactly its rules', async () => {
+    const hist = (await A.get(pol())).json().history as { id: string; version: string; rules: object[] }[];
+    const old = hist.find((v) => v.version === '1.0')!; const live = hist.find((v) => v.version === '2.0')!;
+    const changed = old.rules.map((r) => ({ ...r })); (changed[0] as { id: string }).id = 'renamed';
+    expect((await propose(changed, 'Not really a rollback.', { rollbackOf: old.id })).statusCode).toBe(400);
+    expect((await propose(old.rules, 'Back to the live one.', { rollbackOf: live.id })).statusCode).toBe(400);
+  });
+
+  it('does not store a number or a stranger\'s call in a policy answer, and takes only an action name', async () => {
+    expect((await A.post(`${pol()}/check`, { action: '60123456789', variables: {} })).statusCode).toBe(400);
+    expect((await A.post(`${pol()}/check`, { action: 'waive_fee', callId: '00000000-0000-4000-8000-000000000000' })).statusCode).toBe(404);
+    const r = await A.post(`${pol()}/check`, { action: 'offer_discount', variables: { discount_percent: '60123456789' } });
+    expect(r.json()).toMatchObject({ allowed: false });
+    expect(JSON.stringify((await env.pool.query('SELECT reason FROM policy_decisions')).rows)).not.toContain('60123456789');
+    expect((await createArticleRaw({ slug: 'a60123456789' })).statusCode).toBe(400);
+  });
+
+  it('does not let who reviewed or who put live be rewritten, or a version go backwards', async () => {
+    await expect(env.pool.query(`UPDATE knowledge_versions SET reviewed_by = NULL WHERE status = 'published'`)).rejects.toThrow(/kept for good/);
+    await expect(env.pool.query(`UPDATE knowledge_versions SET status = 'draft' WHERE status = 'published'`)).rejects.toThrow(/cannot go from/);
+    await expect(env.pool.query(`UPDATE knowledge_articles SET slug = 'other'`)).rejects.toThrow(/keeps its identity/);
+    await expect(env.pool.query(`UPDATE knowledge_articles SET retired_at = NULL WHERE retired_at IS NOT NULL`)).rejects.toThrow(/stays retired|keeps its identity/);
+    await expect(env.pool.query(`UPDATE policy_versions SET activated_by = NULL WHERE status = 'live'`)).rejects.toThrow(/kept for good/);
+    await expect(env.pool.query(`UPDATE policy_versions SET status = 'pending' WHERE status = 'live'`)).rejects.toThrow(/cannot go from/);
+    await expect(env.pool.query(`UPDATE policy_versions SET status = 'live' WHERE status = 'rejected'`)).rejects.toThrow(/cannot go from/);
+  });
+
+  it('gives a run for another client none of this client\'s policy or articles', async () => {
+    const wf = (await must(A.post(`/internal/tenants/${otherTenantId}/workflows`, { name: 'other_flow', definition: { start: 'ask', nodes: { ask: { type: 'speak', speech: 'dynamic', prompt: 'Explain the late payment fee', text: 'Hello.', listen: { captureAs: 'a' }, transitions: [{ to: 'done' }] }, done: { type: 'end', outcome: 'ok' } } } }))).json();
+    await must(A.post(`/internal/workflows/${wf.workflow.id}/deploy`, { versionId: wf.version.id, environment: 'staging' }));
+    let seen: SpeakContext | undefined;
+    const d: RunDeps = { pool: env.pool, key: parseKey(env.config.VOICELAB_SECRET_KEY), speaker: { generate: async (_n, _v, _l, ctx) => { seen = ctx; return 'Hello there.'; } } };
+    await startRun(d, null, { workflowId: wf.workflow.id, environment: 'staging', kind: 'test', variables: {} });
+    expect(seen).toEqual({ knowledge: [], policy: null });
+  });
+});
+
+const createArticleRaw = (b: object) => A.post(`/internal/tenants/${tenantId}/knowledge`, { title: 'T', body: 'Body text.', ...b });

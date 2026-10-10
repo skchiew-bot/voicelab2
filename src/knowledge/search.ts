@@ -27,19 +27,23 @@ export function score(a: Article, q: string): number {
 
 /** A form of the article that can be said aloud: its first sentences, with no web address or long run of digits. */
 export function speakable(body: string, maxChars = 300): string {
-  const clean = body.replace(/https?:\/\/\S+/g, '').replace(/\b\S+@\S+\b/g, '').replace(/\s+/g, ' ').trim();
+  const clean = body.replace(/https?:\/\/\S+/g, '').replace(/\b\S+@\S+\b/g, '').replace(/\d{6,}/g, '').replace(/\s+/g, ' ').trim();
   const sentences = clean.match(/[^.!?]+[.!?]*/g) ?? [clean];
   let out = '';
   for (const s of sentences) { if ((out + s).length > maxChars && out) break; out += s; }
-  return out.trim().slice(0, maxChars);
+  out = out.trim();
+  if (out.length > maxChars) { out = out.slice(0, maxChars); const sp = out.lastIndexOf(' '); if (sp > 0) out = out.slice(0, sp); }   // never cut a word in half
+  return out;
 }
 
-/** The best matches for a question, in the language asked for (else English), in the form for the channel. */
+/** The best matches for a question, in the language asked for (English where that language has no match), in the form for the channel. */
 export function rank(articles: Article[], q: string, o: { language?: string; channel: Channel; limit?: number; minScore?: number }): Snippet[] {
   const lang = o.language ?? 'en';
-  const pool = articles.filter((a) => a.language === lang);
-  const use = pool.length > 0 ? pool : articles.filter((a) => a.language === 'en');
-  return use.map((a) => ({ a, s: score(a, q) })).filter((x) => x.s >= (o.minScore ?? 1)).sort((x, y) => y.s - x.s || x.a.slug.localeCompare(y.a.slug)).slice(0, o.limit ?? 3)
+  const best = (pool: Article[]) => pool.map((a) => ({ a, s: score(a, q) })).filter((x) => x.s >= (o.minScore ?? 1)).sort((x, y) => y.s - x.s || x.a.slug.localeCompare(y.a.slug)).slice(0, o.limit ?? 3);
+  // The asked language first; English only when nothing in that language matches the question.
+  let use = best(articles.filter((a) => a.language === lang));
+  if (use.length === 0 && lang !== 'en') use = best(articles.filter((a) => a.language === 'en'));
+  return use
     .map(({ a, s }) => o.channel === 'voice'
       ? { slug: a.slug, title: a.title, text: a.voiceText ?? speakable(a.body), derived: a.voiceText === null, score: s }
       : { slug: a.slug, title: a.title, text: a.body.length > 1500 ? `${a.body.slice(0, 1500)}…` : a.body, derived: false, score: s });

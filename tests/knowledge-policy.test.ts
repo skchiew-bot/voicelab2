@@ -19,7 +19,7 @@ describe('finding what the bot should know', () => {
   });
   it('gives the language asked for, and English when there is nothing in it', () => {
     expect(rank(A, 'ansuran', { channel: 'text', language: 'ms' }).map((s) => s.slug)).toEqual(['bm-bayaran']);
-    expect(rank(A, 'late fee', { channel: 'text', language: 'ms' })).toEqual([]);                       // the language asked for has nothing on it: no English fallback when there are articles in it
+    expect(rank(A, 'late fee', { channel: 'text', language: 'ms' }).map((s) => s.slug)).toEqual(['late-fees']);   // nothing in Malay matches this question, so English answers
     expect(rank([A[0]!], 'late fee', { channel: 'text', language: 'fr' }).map((s) => s.slug)).toEqual(['late-fees']);
   });
   it('speaks a short form on a call and the full text in a message', () => {
@@ -96,5 +96,33 @@ describe('how a change is versioned and described', () => {
       'Added rule "verify": allow "disclose_balance".',
     ]));
     expect(diffPolicy(rules, rules.map((r) => (r.id === 'wording' ? { ...r, message: 'Be kind.' } : r)) as Rule[])).toEqual(['Reworded the message of rule "wording".']);
+  });
+});
+
+describe('doubt is a no', () => {
+  const rs = [
+    { id: 'ok', kind: 'action', action: 'refund', effect: 'allow' },
+    { id: 'big', kind: 'action', action: 'refund', effect: 'deny', when: { var: 'amount', op: 'gt', value: 1000 } },
+    { id: 'clean', kind: 'action', action: 'close', effect: 'allow', when: { not: { var: 'status', op: 'eq', value: 'fraud' } } },
+  ] as Rule[];
+  it('denies when the variable a deny rule depends on is missing or unreadable, and does not allow on a condition it cannot judge', () => {
+    expect(evaluate(rs, 'refund', { amount: 50 }).allowed).toBe(true);
+    expect(evaluate(rs, 'refund', { amount: 5000 })).toMatchObject({ allowed: false, ruleId: 'big' });
+    expect(evaluate(rs, 'refund', {})).toMatchObject({ allowed: false, ruleId: 'big' });
+    expect(evaluate(rs, 'refund', { amount: 'lots' })).toMatchObject({ allowed: false, ruleId: 'big' });
+    expect(evaluate(rs, 'close', { status: 'ok' }).allowed).toBe(true);
+    expect(evaluate(rs, 'close', { status: 'fraud' }).allowed).toBe(false);
+    expect(evaluate(rs, 'close', {}).allowed).toBe(false);                    // "not (unknown)" is unknown, which does not allow
+  });
+  it('never puts the value of a variable into the reason it gives', () => {
+    const v = evaluate([{ id: 'lim', kind: 'action', action: 'discount', effect: 'allow', limit: { variable: 'amt', max: '10' } }] as Rule[], 'discount', { amt: '60123456789' });
+    expect(v.allowed).toBe(false); expect(v.reason).not.toContain('60123456789'); expect(v.reason).toContain('over the limit');
+  });
+  it('catches a banned phrase written with a curly apostrophe or zero-width marks, and refuses a phrase with no words', () => {
+    const r = [{ id: 'threat', kind: 'must_not_say', phrases: ["we'll sue"] }] as Rule[];
+    expect(phraseViolation(r, 'Pay or we\u2019ll sue.')?.ruleId).toBe('threat');
+    expect(phraseViolation(r, 'Pay or we\u200B\u2019ll sue.')?.ruleId).toBe('threat');
+    expect(phraseViolation([{ id: 't', kind: 'must_not_say', phrases: ['we\u2019ll sue'] }] as Rule[], "we'll sue you")?.ruleId).toBe('t');
+    expect(ruleProblems([{ id: 'p', kind: 'must_not_say', phrases: ['$$'] }]).join(' ')).toContain('no words');
   });
 });

@@ -24,7 +24,7 @@ function check(e: { title: string; body: string; voiceText?: string; tags?: stri
 }
 
 export async function createArticle(c: pg.PoolClient, actorId: string | null, tenantId: string, e: z.infer<typeof articleSchema>) {
-  check(e);
+  check(e); noNumber(e.slug.replace(/[-_]/g, ' '), 'name');
   const a = (await c.query('INSERT INTO knowledge_articles (tenant_id, slug, language) VALUES ($1,$2,$3) ON CONFLICT (tenant_id, slug, language) DO NOTHING RETURNING id', [tenantId, e.slug, e.language])).rows[0];
   if (!a) throw new AppError(409, 'An article with that name already exists in that language.');
   await c.query('INSERT INTO knowledge_versions (article_id, version, title, body, voice_text, tags, created_by) VALUES ($1,1,$2,$3,$4,$5,$6)', [a.id, e.title, e.body, e.voiceText ?? null, e.tags, actorId]);

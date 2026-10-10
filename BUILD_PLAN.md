@@ -384,7 +384,7 @@ Not built or not proven:
 - No client number lookup or payment system is connected; messages on other channels are queued, not sent.
 - The dispatcher, payment check and ageing sweep must be scheduled by the deployment.
 - A workflow does not yet record a promise from what a caller says.
-- Appointments and the knowledge base and policy module have not been started.
+- All three modules (cases, appointments, knowledge base and policy) are built; see the status blocks above.
 
 - **Appointments**
   - Diaries per individual or per group.

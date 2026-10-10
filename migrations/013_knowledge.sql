@@ -13,6 +13,17 @@ CREATE TABLE knowledge_articles (
 );
 
 -- What an article says, version by version. The words never change once written; only the review status does.
+CREATE FUNCTION knowledge_articles_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'knowledge articles are append-only'; END IF;
+  IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id OR NEW.slug IS DISTINCT FROM OLD.slug OR NEW.language IS DISTINCT FROM OLD.language OR NEW.created_at IS DISTINCT FROM OLD.created_at
+     OR (OLD.retired_at IS NOT NULL AND NEW.retired_at IS DISTINCT FROM OLD.retired_at) THEN
+    RAISE EXCEPTION 'an article keeps its identity, and a retired one stays retired';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER knowledge_articles_guard BEFORE UPDATE OR DELETE ON knowledge_articles FOR EACH ROW EXECUTE FUNCTION knowledge_articles_guard();
+
 CREATE TABLE knowledge_versions (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   article_id  uuid NOT NULL REFERENCES knowledge_articles(id),
@@ -38,6 +49,13 @@ BEGIN
      OR NEW.voice_text IS DISTINCT FROM OLD.voice_text OR NEW.tags IS DISTINCT FROM OLD.tags OR NEW.created_by IS DISTINCT FROM OLD.created_by OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
     RAISE EXCEPTION 'what a knowledge version says is append-only; only its review status changes';
   END IF;
+  -- Who reviewed it is kept once written, and a version only moves forward: draft, then published or rejected, then retired.
+  IF OLD.reviewed_by IS NOT NULL AND (NEW.reviewed_by IS DISTINCT FROM OLD.reviewed_by OR NEW.reviewed_at IS DISTINCT FROM OLD.reviewed_at OR NEW.review_note IS DISTINCT FROM OLD.review_note) THEN
+    RAISE EXCEPTION 'who reviewed a knowledge version is kept for good';
+  END IF;
+  IF NEW.status IS DISTINCT FROM OLD.status AND NOT ((OLD.status = 'draft' AND NEW.status IN ('published', 'rejected', 'retired')) OR (OLD.status = 'published' AND NEW.status = 'retired')) THEN
+    RAISE EXCEPTION 'a knowledge version cannot go from % to %', OLD.status, NEW.status;
+  END IF;
   RETURN NEW;
 END $$;
 CREATE TRIGGER knowledge_versions_guard BEFORE UPDATE OR DELETE ON knowledge_versions FOR EACH ROW EXECUTE FUNCTION knowledge_versions_guard();
@@ -60,13 +78,18 @@ CREATE TABLE policy_versions (
   diff          jsonb NOT NULL DEFAULT '[]',
   from_version_id uuid REFERENCES policy_versions(id),
   rollback_of   uuid REFERENCES policy_versions(id),
-  status        text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'live', 'retired', 'rejected')),
+  status        text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'live', 'retired', 'rejected', 'withdrawn')),
   proposed_by   uuid REFERENCES users(id),
   created_at    timestamptz NOT NULL DEFAULT now(),
   activated_by  uuid REFERENCES users(id),
   activated_at  timestamptz,
-  UNIQUE (tenant_id, major, minor)
+  withdrawn_by  uuid REFERENCES users(id),
+  withdrawn_at  timestamptz,
+  withdrawn_note text,
+  levels_at_proposal text[] NOT NULL CHECK (cardinality(levels_at_proposal) BETWEEN 2 AND 5)
 );
+-- A version number is taken only by a version that was not turned down or withdrawn, so a refused 2.0 does not hold the number.
+CREATE UNIQUE INDEX policy_version_number ON policy_versions (tenant_id, major, minor) WHERE status NOT IN ('rejected', 'withdrawn');
 CREATE UNIQUE INDEX policy_one_live ON policy_versions (tenant_id) WHERE status = 'live';
 CREATE UNIQUE INDEX policy_one_pending ON policy_versions (tenant_id) WHERE status IN ('pending', 'approved');
 
@@ -77,6 +100,14 @@ BEGIN
      OR NEW.summary IS DISTINCT FROM OLD.summary OR NEW.diff IS DISTINCT FROM OLD.diff OR NEW.proposed_by IS DISTINCT FROM OLD.proposed_by
      OR NEW.from_version_id IS DISTINCT FROM OLD.from_version_id OR NEW.rollback_of IS DISTINCT FROM OLD.rollback_of THEN
     RAISE EXCEPTION 'what a policy version says is append-only; only its status changes';
+  END IF;
+  IF NEW.levels_at_proposal IS DISTINCT FROM OLD.levels_at_proposal
+     OR (OLD.activated_by IS NOT NULL AND (NEW.activated_by IS DISTINCT FROM OLD.activated_by OR NEW.activated_at IS DISTINCT FROM OLD.activated_at))
+     OR (OLD.withdrawn_by IS NOT NULL AND (NEW.withdrawn_by IS DISTINCT FROM OLD.withdrawn_by OR NEW.withdrawn_at IS DISTINCT FROM OLD.withdrawn_at OR NEW.withdrawn_note IS DISTINCT FROM OLD.withdrawn_note)) THEN
+    RAISE EXCEPTION 'who put a policy live or withdrew it, and the levels it was proposed under, are kept for good';
+  END IF;
+  IF NEW.status IS DISTINCT FROM OLD.status AND NOT ((OLD.status = 'pending' AND NEW.status IN ('approved', 'rejected', 'withdrawn')) OR (OLD.status = 'approved' AND NEW.status IN ('live', 'withdrawn')) OR (OLD.status = 'live' AND NEW.status = 'retired')) THEN
+    RAISE EXCEPTION 'a policy version cannot go from % to %', OLD.status, NEW.status;
   END IF;
   RETURN NEW;
 END $$;

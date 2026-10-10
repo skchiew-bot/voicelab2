@@ -297,6 +297,7 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         let plan: SpeechPlan | undefined;
         let ai: Record<string, Json> | undefined;
         let promotedId: string | undefined;
+        let scriptBlocked: string | undefined;
         try {
           const lastTurn = state.journey?.turns.at(-1);
           const promo = node.speech === 'dynamic' ? deps.promoted?.(wf, node, id, lang ?? 'en', { kind: lastTurn?.kind ?? 'start', topic: lastTurn?.topic ?? '' }) : undefined;
@@ -304,7 +305,8 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
             // Same stitching as any frame: the fixed words play from their recordings, slots are spoken live. A slot with no value falls back to the model.
             try {
               const spoken = renderText(promo.script, state.vars, state.sensitive);
-              if (deps.policy?.violation(spoken)) throw new MissingVariable('policy');    // a script the policy now forbids is not spoken: the model (also held to the policy) writes the line
+              const forbidden = deps.policy?.violation(spoken);
+              if (forbidden) { scriptBlocked = `The promoted script was not spoken: it breaks the policy (rule "${forbidden.ruleId}").`; throw new MissingVariable('policy'); }    // a script the policy now forbids is not spoken: the model (also held to the policy) writes the line
               line = spoken; plan = planSpeech(promo.script, state.vars, state.sensitive, lang ?? 'en', deps.recordings); promotedId = promo.id;
             }
             catch (e) { if (!(e instanceof MissingVariable || e instanceof SensitiveVariable)) throw e; line = undefined; plan = undefined; }
@@ -326,6 +328,7 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
               if (banned) checked = { decision: 'rejected', reason: `The line broke the policy (rule "${banned.ruleId}"): it said “${banned.phrase}”.${banned.message ? ` ${banned.message}` : ''}` };
               if (checked.decision !== 'proceeded') ai = { ...(ai ?? {}), decision: checked.decision, decisionReason: checked.reason };
               else ai = { ...(ai ?? {}), decision: 'proceeded', decisionReason: 'The line passed the checks and was used.' };
+              if (scriptBlocked) ai = { ...(ai ?? {}), scriptBlocked };
               if (checked.line !== undefined) line = checked.line;
               else if (fallback !== undefined) line = renderText(fallback, state.vars, state.sensitive);
               else { fail(state, out, `The line written for "${id}" was turned down (${checked.reason}), and there is no fallback text.`, id); return; }

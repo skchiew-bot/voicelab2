@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { withActor, type Actor } from '../db.js';
 import { addVersion, articleSchema, createArticle, getArticle, listArticles, publish, reject, retireArticle, searchKnowledge, versionSchema } from '../store/knowledge.js';
-import { activate, check, checkSchema, decide, decisionSchema, getLevels, getVersion, levelsSchema, listDecisions, policyOverview, propose, proposeSchema, setLevels } from '../store/policy.js';
+import { activate, check, checkSchema, decide, decisionSchema, getLevels, getVersion, levelsSchema, listDecisions, policyOverview, propose, proposeSchema, setLevels, withdraw, withdrawSchema } from '../store/policy.js';
 
 interface Ctx { pool: pg.Pool; internal(req: FastifyRequest): Promise<{ userId: string; actor: Actor }> }
 const id = z.string().uuid();
@@ -37,6 +37,7 @@ export function registerKnowledgeRoutes(app: FastifyInstance, ctx: Ctx): void {
   app.post('/internal/tenants/:tenantId/policy/proposals', async (req, reply) => { const { tenantId } = tenant.parse(req.params); const b = proposeSchema.parse(req.body); return reply.code(201).send(await run(req, (c, u) => propose(c, u, tenantId, b))); });
   app.get('/internal/policy-versions/:versionId', async (req) => { const { versionId } = z.object({ versionId: id }).parse(req.params); return run(req, (c) => getVersion(c, versionId)); });
   app.post('/internal/policy-versions/:versionId/decision', async (req) => { const { versionId } = z.object({ versionId: id }).parse(req.params); const b = decisionSchema.parse(req.body); return run(req, (c, u) => decide(c, u, versionId, b)); });
+  app.post('/internal/policy-versions/:versionId/withdraw', async (req) => { const { versionId } = z.object({ versionId: id }).parse(req.params); const b = withdrawSchema.parse(req.body); return run(req, (c, u) => withdraw(c, u, versionId, b)); });
   app.post('/internal/policy-versions/:versionId/activate', async (req) => { const { versionId } = z.object({ versionId: id }).parse(req.params); return run(req, (c, u) => activate(c, u, versionId)); });
   app.post('/internal/tenants/:tenantId/policy/check', async (req) => { const { tenantId } = tenant.parse(req.params); const b = checkSchema.parse(req.body); return run(req, (c) => check(c, tenantId, b)); });
   app.get('/internal/tenants/:tenantId/policy/decisions', async (req) => { const { tenantId } = tenant.parse(req.params); return run(req, (c) => listDecisions(c, tenantId)); });

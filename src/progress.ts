@@ -143,7 +143,10 @@ export const PHASES: PhaseProgress[] = [
       'Appointments: travel time is supplied by the client, not computed from a map; customers do not book or cancel for themselves; a fee is recorded and told to the customer, never charged; a flagged appointment is not rebooked automatically; daylight saving is untested (the tests use Kuala Lumpur); appointments are not part of a case\'s read-back',
       'Policy is enforced on the words a model writes and a promoted script speaks (banned phrases) and on questions put to `POST /internal/tenants/:id/policy/check`; the text a client writes into a workflow, and actions a workflow takes, are not yet checked against it, and a workflow does not call the check by itself',
       'Knowledge reaches a model that writes a line (ranked by word overlap against the node\'s prompt, not by embeddings); no model is connected, so nothing has shown that it uses what it is given',
-      'The number of approval levels for a policy is read when a change is decided: changing the levels while a proposal waits changes what it needs',
+      'A policy proposal keeps the approval levels it was made under; levels cannot be changed while a proposal waits (withdraw it first)',
+      'Policy conditions compare numbers as ordinary numbers (the workflow condition language), and a numeric limit variable arrives through JSON, so a limit check on a value with more digits than a number holds is not exact; give limit variables as text',
+      'A promoted script blocked by the policy is recorded on the step but not as a row in the policy answers, and does not demote the promotion; nothing yet records a model line turned down as a policy answer',
+      'Knowledge is ranked against the node\'s prompt, the same snippets every turn, not against what the caller just said',
     ],
   },
   {

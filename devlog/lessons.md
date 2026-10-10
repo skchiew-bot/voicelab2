@@ -83,13 +83,14 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/phase3.test.ts` › "locks the caller ID the contact sees, even when the same number is registered at two providers"
 
 ### L-009: A privacy rule must hold across every boundary
-- **Seen:** A child workflow could speak or send a parent's sensitive value. Phone numbers nested in values, or written in local form, got through ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). Free text a person types (a decision note, a close reason, a callback note) could have stored a customer's number in an append-only table (Phase 7 independent review, 2026-10-10).
+- **Seen:** A child workflow could speak or send a parent's sensitive value. Phone numbers nested in values, or written in local form, got through ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). Free text a person types (a decision note, a close reason, a callback note) could have stored a customer's number in an append-only table (Phase 7 independent review, 2026-10-10). A policy answer's reason repeated the value of a call variable (a phone number passing as an amount) into an append-only table (Phase 7 knowledge independent review, 2026-10-10).
 - **Rule:** Enforce sensitivity and number rules across workflows, nesting levels and every input path (start variables, integration replies), both at publish time and at run time.
 - **Guards:**
   - `tests/workflow-hardening.test.ts` › "a parent's sensitive variable cannot be spoken by the workflow it hands over to"
   - `tests/workflow-hardening.test.ts` › "are refused in the starting record, however deep, and in the local form"
   - `tests/workflow-hardening.test.ts` › "are refused in what an integration returns, nested or not"
   - `tests/cases.test.ts` › "refuses a customer's number in a note, a reason or a callback note, and an impossible date"
+  - `tests/knowledge-policy.test.ts` › "never puts the value of a variable into the reason it gives"
 
 ### L-010: A test that cannot fail proves nothing
 - **Seen:** 5 times. The Control Tower drift test passed with wrong data ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The Phase 2 production gate accepted scenarios that asserted nothing ([#8](https://github.com/skchiew-bot/voicelab2/pull/8)). The guard for L-015 pointed at a code comment, not a test, so it could never fail (independent review, 2026-10-10). A report test asserted the sum of two transcripts' costs and so locked in a double count; three new tests passed with the code they protect broken (independent review and mutation checks, 2026-10-10).
@@ -241,3 +242,11 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** A fee that depends on who changed something must look at who made the change necessary: a time the business moved or broke is free for the customer to give up, whatever the notice.
 - **Guards:**
   - `tests/appointments.test.ts` › "never charges a customer for a time the business broke"
+
+### L-032: A rule that cannot be judged is a refusal, not a pass
+- **Seen:** A policy "deny when over 1000" let an action through when the amount was missing or unreadable, because the workflow condition language reads an unknown variable as false, so the deny was skipped and a plain allow won; banned phrases slipped past a curly apostrophe; an approved policy nobody could withdraw blocked every later change (Phase 7 knowledge independent review, 2026-10-10).
+- **Rule:** Where a check guards something (a policy, a gate), judge conditions three-valued: unknown on a deny counts as deny, unknown on an allow counts as not allowed. Normalise text before matching it, and give every stuck state a recorded way out.
+- **Guards:**
+  - `tests/knowledge-policy.test.ts` › "denies when the variable a deny rule depends on is missing or unreadable, and does not allow on a condition it cannot judge"
+  - `tests/knowledge-policy.test.ts` › "catches a banned phrase written with a curly apostrophe or zero-width marks, and refuses a phrase with no words"
+  - `tests/knowledge.test.ts` › "lets a wrong proposal be withdrawn, with a reason, so it never blocks every later change; and a refused number is free again"

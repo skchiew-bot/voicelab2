@@ -50,6 +50,7 @@ function PolicyCard({ v, onChange }: { v: PolicyVersion; onChange: () => void })
         <button disabled={act.pending || !note.trim()} onClick={() => go(`/internal/policy-versions/${v.id}/decision`, { decision: 'rejected', note })}>Turn down</button>
       </>}
       {v.status === 'approved' && <button disabled={act.pending} onClick={() => go(`/internal/policy-versions/${v.id}/activate`)}>Put live</button>}
+      {(v.status === 'pending' || v.status === 'approved') && <>{' '}<button disabled={act.pending || !note.trim()} onClick={() => go(`/internal/policy-versions/${v.id}/withdraw`, { note })}>Withdraw</button></>}
     </div>
   );
 }

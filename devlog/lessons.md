@@ -169,17 +169,18 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "writes to the spool, which git ignores, so the working tree stays clean"
 
 ### L-020: Check that monitoring is running, not just installed
-- **Seen:** 2 times. After a restart, Claude Code reopened a session with `/home/user` as its project folder, outside the repository, so the repository's hooks never loaded and nothing was logged for half an hour, silently (session on 2026-10-10). The drift screen swallowed errors and said nothing about nodes it could not judge (Phase 6 independent review, 2026-10-10).
+- **Seen:** 3 times. After a restart, Claude Code reopened a session with `/home/user` as its project folder, outside the repository, so the repository's hooks never loaded and nothing was logged for half an hour, silently (session on 2026-10-10). The drift screen swallowed errors and said nothing about nodes it could not judge (Phase 6 independent review, 2026-10-10). The first fallback hook for that gap could itself be missing or stale with nobody told, and stopped logging on any branch from before it existed (fallback hook independent review, 2026-10-10).
 - **Rule:** A monitor must report its own gaps. The dev Control Tower flags any session that commits while not being logged; when you see that warning, say so and record what ran by hand instead of leaving the gap. Usage can be recorded by running the hook with a Stop event for the session's transcript; it gathers every transcript of the session and counts each message once. A session opened outside the repository is logged by the user-level fallback hook (`.claude/hooks/devlog-fallback.mjs`), which the cloud environment's setup script copies to `~/.claude/hooks/` and registers with `scripts/install-devlog-fallback.mjs`. It steps aside whenever the session's own project runs the devlog hook, so nothing is logged twice, and leaves other projects' sessions alone. Each cloud session start checks that it is in place and up to date, and the dashboard says when it is not.
 - **Guards:**
   - `tests/devlog.test.ts` › "folds the board, splits a session's cost between its tasks exactly, links incidents to guarded lessons, and finds logging gaps"
   - `tests/devlog.test.ts` › "logs a session opened outside the repository to the repository, and tells Claude where its instructions are"
   - `tests/devlog.test.ts` › "steps aside when the session's own project runs the devlog hook, so each event is logged once"
   - `tests/devlog.test.ts` › "warns a cloud session that starts without the fallback in place, and records what it found"
+  - `tests/devlog.test.ts` › "passes a stop-loss on to Claude, keeps logging on a branch from before the fallback, and never blocks or errors when it cannot log"
   - `tests/learning.test.ts` › "does not stop the sweep when one script's audio fails, and names what it could not judge"
 
 ### L-021: A guardrail that fires on normal work is worse than none
-- **Seen:** 2 times. The first stop-loss rules told Claude to stop after three unrelated commands that shared a description, a `grep` that mentioned `vitest`, a large file read in chunks, and test runs broken on purpose to prove a test can fail (independent review, 2026-10-10). The Phase 5 turn reader treated a plain "no" and "no, thank you" as upset, so two declined questions handed a call to a person; the drop watchdog treated a reply still being worked on as dropped (Phase 5 independent review, 2026-10-10).
+- **Seen:** 3 times. The first stop-loss rules told Claude to stop after three unrelated commands that shared a description, a `grep` that mentioned `vitest`, a large file read in chunks, and test runs broken on purpose to prove a test can fail (independent review, 2026-10-10). The Phase 5 turn reader treated a plain "no" and "no, thank you" as upset, so two declined questions handed a call to a person; the drop watchdog treated a reply still being worked on as dropped (Phase 5 independent review, 2026-10-10). The fallback hook's check warned "out of date" on every session for days after a merge, and on any branch that changed it, telling the owner to add a setup line they already had (fallback hook independent review, 2026-10-10).
 - **Rule:** Before a guardrail can stop work, test it against normal work as well as the failure it targets: count consecutive failures of the same thing, reset on success, and give deliberate exceptions a way through (`DEVLOG_EXPECT_RED=1`).
 - **Guards:**
   - `tests/devlog.test.ts` › "does not count test runs expected to fail, or commands that only mention a test runner"
@@ -187,6 +188,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "but not about reading it in chunks"
   - `tests/devlog.test.ts` › "counts only successful edits since the last passing check"
   - `tests/tracker.test.ts` › "reads a plain "no" or "no, thank you" as neutral or kind, and two declined questions do not hand the call to a person"
+  - `tests/devlog.test.ts` › "warns a cloud session that starts without the fallback in place, and records what it found"
 
 ### L-022: Compare times as times, not as text
 - **Seen:** 4 times. The report compared git commit dates written with a +08:00 offset against UTC log timestamps as strings, so logging gaps, audit completeness and session times were wrong for anyone outside UTC (independent review, 2026-10-10). A date column read on a server east of UTC came back as the day before, so a promise was judged broken a day early (Phase 7 independent review, 2026-10-10). A group booking counted an officer's busy-ness by the server's UTC day, so early-morning work in Kuala Lumpur counted towards the wrong day (Phase 7 appointments independent review, 2026-10-10). The alert sweep judged an email claim's age by its own clock against a time the database had stamped, so a second sweep took a send still under way for a crash and marked it "may not have arrived" (found by repeated full runs, 2026-10-10).
@@ -322,3 +324,10 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** When a provider's signature does not cover the thing being acted on, add a key of your own for that thing (here, one made for each call and handed to the provider in the TwiML), and refuse anything without it.
 - **Guards:**
   - `tests/relay.test.ts` › "serves no call it is not: the id of another call, the wrong Twilio call, a malformed id, or a missing or wrong call key ends the line and starts nothing"
+
+### L-042: A hook that runs in every session acts only on what is its own, and changing one is the owner's call
+- **Seen:** The first user-level fallback hook logged any session whose project did not run the devlog hook, so another repository's session in the same environment would have been logged into Voice Lab and told to follow its rules; its session-start text then told Claude to install the hook into the user settings on its own (fallback hook independent review, 2026-10-10).
+- **Rule:** A user-level or environment-wide hook first decides whether the session is its business (here: the repository, a folder inside it, or a folder that holds it) and does nothing otherwise. Installing or changing anything outside the repository that runs in every session needs the owner's go-ahead; say what it changes when asking.
+- **Guards:**
+  - `tests/devlog.test.ts` › "leaves another project's session alone, and judges by the event's folder only when the project folder is unknown"
+  - `CLAUDE.md` › "do it only with the owner's go-ahead"

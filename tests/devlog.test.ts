@@ -239,9 +239,11 @@ describe('fallback hook for a session opened outside the repository (lesson L-02
     encoding: 'utf8', env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: undefined },
   });
   const state = (checkout: string, home: string) => install(checkout, home, '--check').stdout.trim();
-  const commandsFor = (file: string, event: string): string[] => (existsSync(file)
-    ? (JSON.parse(readFileSync(file, 'utf8')).hooks?.[event] ?? []).flatMap((e: { hooks: { command: string }[] }) => e.hooks.map((h) => h.command))
-    : []);
+  const commandsFor = (file: string, event: string): string[] => {
+    try {
+      return (JSON.parse(readFileSync(file, 'utf8')).hooks?.[event] ?? []).flatMap((e: { hooks: { command: string }[] }) => e.hooks.map((h) => h.command));
+    } catch { return []; } // no file, or one Claude Code could not read either: no hooks from it
+  };
   /**
    * One event as Claude Code delivers it: the handlers in the project folder's settings (shared and
    * local) and in the user's, a handler found twice run once, all given the same input.
@@ -484,6 +486,7 @@ describe('fallback hook for a session opened outside the repository (lesson L-02
     const missing = start(cloud);
     expect(missing.stdout).toContain('the user-level fallback hook is not installed');
     expect(missing.stdout).toContain(`node ${path.join(checkout, 'scripts/install-devlog-fallback.mjs')} || true`);
+    expect(missing.stdout).toContain("only with the owner's go-ahead"); // changing user-level settings is the owner's call
     expect(missing.line).toMatchObject({ event: 'SessionStart', fallback: 'missing' });
     // On the owner's own machine the user settings are theirs: nothing is checked.
     const local = start({});
@@ -493,10 +496,15 @@ describe('fallback hook for a session opened outside the repository (lesson L-02
     const installed = start(cloud);
     expect(installed.stdout).not.toContain('fallback hook');
     expect(installed.line).toMatchObject({ event: 'SessionStart', fallback: 'installed' });
-    writeFileSync(copyOf(home), '// an older copy\n');
+    // A copy from another branch, as for a while after a merge, still logs: recorded, not warned about.
+    writeFileSync(copyOf(home), readFileSync(copyOf(home), 'utf8') + '// an older copy\n');
     const outdated = start(cloud);
-    expect(outdated.stdout).toContain('the user-level fallback hook is out of date');
+    expect(outdated.stdout).not.toContain('fallback hook');
     expect(outdated.line).toMatchObject({ fallback: 'outdated' });
+    writeFileSync(userSettings(home), '{ "hooks": ');
+    const unreadable = start(cloud);
+    expect(unreadable.stdout).toContain('the user settings file is not valid JSON');
+    expect(unreadable.line).toMatchObject({ fallback: 'unreadable' });
   });
 });
 
@@ -877,6 +885,11 @@ describe('control tower report', () => {
     expect(r.attention.map((a: { text: string }) => a.text).join(' ')).toContain('while not being logged');
     expect(r.attention.filter((a: { text: string }) => a.text.includes('was opened outside the repository'))).toEqual([{ level: 'info', text: 'Session sion_01A was opened outside the repository on 2026-10-10; the fallback hook logged it (lesson L-020).' }]);
     expect(r.attention.filter((a: { text: string }) => a.text.includes('found the fallback hook'))).toEqual([expect.objectContaining({ level: 'warning', text: expect.stringContaining('(sion_01C, 2026-10-10) found the fallback hook missing') })]);
+    // A later start that found an install from another branch: still logging, so information, not a warning.
+    writeFileSync(path.join(dir, 'devlog/.spool/b.jsonl'), JSON.stringify({ ts: '2026-10-10T00:01:10Z', session: 'session_01E', event: 'SessionStart', fallback: 'outdated' }) + '\n');
+    run(dir, 'scripts/devlog-report.mjs', ['--json', out]);
+    const later = JSON.parse(readFileSync(out, 'utf8')).attention.filter((a: { text: string }) => a.text.includes('latest cloud session'));
+    expect(later).toEqual([expect.objectContaining({ level: 'info', text: expect.stringContaining('(sion_01E, 2026-10-10) found the installed fallback hook differs') })]);
   });
 
   it('shows RM only from a configured rate, computed exactly', () => {

@@ -359,10 +359,14 @@ function main() {
       let state = '';
       try { state = execFileSync(process.execPath, [installer, '--check'], { cwd: root, encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* unknown */ }
       if (['installed', 'missing', 'outdated', 'unreadable'].includes(state)) line.fallback = state;
-      if (line.fallback && line.fallback !== 'installed') {
-        const what = { missing: 'is not installed', outdated: 'is out of date', unreadable: 'cannot be checked, because the user settings file is not valid JSON' }[line.fallback];
-        context += `WARNING (dev Control Tower, lesson L-020): the user-level fallback hook ${what}, so a session Claude Code opens outside the repository may not be logged. `
-          + `Tell the owner the cloud environment's setup script should run \`node ${installer} || true\`. To cover this container now, run \`node scripts/install-devlog-fallback.mjs\`.\n`;
+      // An install that differs from this branch's (outdated) still logs, and is normal for a
+      // while after a merge or on a branch that changes the fallback: recorded, not warned about.
+      if (line.fallback === 'missing') {
+        context += `WARNING (dev Control Tower, lesson L-020): the user-level fallback hook is not installed, so a session Claude Code opens outside the repository would not be logged. `
+          + `Tell the owner the cloud environment's setup script should run \`node ${installer} || true\`. `
+          + 'Installing it for this container changes the user settings, outside the repository: do it only with the owner\'s go-ahead (`node scripts/install-devlog-fallback.mjs`).\n';
+      } else if (line.fallback === 'unreadable') {
+        context += 'WARNING (dev Control Tower, lesson L-020): the user settings file is not valid JSON, so the fallback hook that logs a session opened outside the repository cannot be checked or installed. Tell the owner.\n';
       }
     }
     context += 'Dev Control Tower: this session is logged to devlog/.spool/. Before each commit run '

@@ -461,7 +461,10 @@ export function build(opts = {}) {
   for (const s of starts.filter((x) => x.via === 'fallback')) if (!outside.has(s.session)) outside.set(s.session, s);
   for (const s of [...outside.values()].slice(0, 5)) attention.push({ level: 'info', text: `Session ${s.session.slice(-8)} was opened outside the repository on ${s.ts.slice(0, 10)}; the fallback hook logged it (lesson L-020).` });
   const checked = starts.find((x) => x.fallback);
-  if (checked && checked.fallback !== 'installed') attention.push({ level: 'warning', text: `The latest cloud session (${checked.session.slice(-8)}, ${checked.ts.slice(0, 10)}) found the fallback hook ${checked.fallback}, so a session opened outside the repository may not be logged. Add \`node /home/user/voicelab2/scripts/install-devlog-fallback.mjs || true\` to the cloud environment's setup script (lesson L-020).` });
+  const when = checked ? `(${checked.session.slice(-8)}, ${checked.ts.slice(0, 10)})` : '';
+  if (checked?.fallback === 'missing') attention.push({ level: 'warning', text: `The latest cloud session ${when} found the fallback hook missing, so a session opened outside the repository would not be logged. Add \`node /home/user/voicelab2/scripts/install-devlog-fallback.mjs || true\` to the cloud environment's setup script (lesson L-020).` });
+  if (checked?.fallback === 'unreadable') attention.push({ level: 'warning', text: `The latest cloud session ${when} could not read the user settings file, so the fallback hook could not be checked (lesson L-020).` });
+  if (checked?.fallback === 'outdated') attention.push({ level: 'info', text: `The latest cloud session ${when} found the installed fallback hook differs from its branch's. It still logs, and is refreshed when the environment's setup script next runs (lesson L-020).` });
   for (const g of areas.governance.loggingGaps) attention.push({ level: 'warning', text: `Session ${g.session.slice(-8)} made ${g.commits} commit(s) while not being logged${g.lastLogged ? ` (last logged ${g.lastLogged.slice(0, 16).replace('T', ' ')} UTC)` : ''}. Its hooks were not running.` });
   // Branch findings, summarised so a repository with many branches stays readable.
   const capped = (list, max = 8) => (list.length > max ? `${list.slice(0, max).join(', ')} and ${list.length - max} more` : list.join(', '));

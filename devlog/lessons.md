@@ -327,3 +327,10 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:**
   - `tests/transfer.test.ts` › "does not take a voicemail on the agent phone for a person: a dial no one took with 1 runs the callback ladder"
   - `tests/transfer.test.ts` › "runs the ladder when Twilio asks again after the agent number was removed"
+
+### L-043: A failing check must stop the commit
+- **Seen:** A test run, the board update and the commit were joined with `;`, so a broken `src/progress.ts` (an unescaped apostrophe) was committed and pushed while the run reported a failure (human transfer, 2026-10-10).
+- **Rule:** Join the checks and the commit with `&&`, never `;`, and read the result before pushing. A failure you cannot explain is read from its kept output before anything else (L-038).
+- **Guards:**
+  - `CLAUDE.md` › "so a failing check stops the commit"
+

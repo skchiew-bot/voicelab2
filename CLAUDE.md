@@ -6,6 +6,7 @@ Provider-agnostic voice orchestration platform. The blueprint is the source of t
 
 - Build `BUILD_PLAN.md` phase by phase **without asking to continue**. Stop only for live credentials or a decision only the owner can make. Say what is unverified instead of stopping for it.
 - **One PR per phase**, on a branch named `claude/phase-<n>-<name>` (owner-approved; the designated session branch is also allowed). When a phase depends on an unmerged one, branch from it and set the PR's base to that branch; say so in the PR.
+- **Before each commit:** run the checks you changed things for and chain them to the commit with `&&`, so a failing check stops the commit.
 - **Before each PR:** tests and typecheck green, then an **independent Opus review**: a helper agent on Opus, given the diff and the invariants but not my conclusions, asked for bugs, invariant violations and missing tests. Treat its findings as claims to verify, fix the real ones, and list findings and outcomes in the PR description.
 - **The owner merges.** Never merge a PR unless told to in that message.
 - Be honest in PR descriptions about what was only tested against fakes.

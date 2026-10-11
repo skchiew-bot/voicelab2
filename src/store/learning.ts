@@ -81,7 +81,9 @@ export async function logLearningTurns(
   c: pg.PoolClient,
   e: { tenantId: string; runId: string; callId: string | null; kind: string; records: Rec[]; vars: Record<string, unknown>; sensitive: readonly string[]; context: { kind: string; topic: string | null } },
 ) {
-  if (e.kind === 'simulation') return;                    // a rehearsal is not evidence
+  // Only real callers are evidence: a rehearsal or a staging test call is someone trying the flow out, not the people
+  // the script would be spoken to (and a test may run a version that was never put live).
+  if (e.kind !== 'live') return;
   for (const r of e.records) {
     if (r.type !== 'say' || r.payload.strategy !== 'dynamic' || r.payload.promotion !== undefined || !r.node) continue;
     const line = String(r.payload.text ?? '');
@@ -103,11 +105,11 @@ const STATUS: Record<string, PromotionStatus> = {
 const LIVE: PromotionStatus[] = ['in_review', 'approved', 'promoted'];
 
 const PROMO_COLS = `p.id, p.tenant_id, p.workflow, p.node, p.language, p.context_kind, p.context_topic, p.script, p.slots, p.support, p.variants,
-  p.avg_synth_chars, p.avg_slot_chars, p.distilled_by, p.supersedes, p.created_at,
+  p.avg_synth_chars, p.avg_slot_chars, p.distilled_by, p.supersedes, p.created_at, p.created_by,
   (SELECT e.kind FROM promotion_events e WHERE e.promotion_id = p.id AND e.kind <> 'regenerated' ORDER BY e.id DESC LIMIT 1) AS last_kind`;
 export interface PromotionRow {
   id: string; tenant_id: string; workflow: string; node: string; language: string; context_kind: string; context_topic: string; script: string; slots: string[];
-  support: number; variants: number; avg_synth_chars: number; avg_slot_chars: number; distilled_by: string; supersedes: string | null; created_at: Date; last_kind: string; status: PromotionStatus;
+  support: number; variants: number; avg_synth_chars: number; avg_slot_chars: number; distilled_by: string; supersedes: string | null; created_at: Date; created_by: string | null; last_kind: string; status: PromotionStatus;
 }
 const shape = (r: Record<string, unknown>): PromotionRow => ({ ...r, status: STATUS[r.last_kind as string] ?? 'in_review', avg_synth_chars: Number(r.avg_synth_chars), avg_slot_chars: Number(r.avg_slot_chars) }) as PromotionRow;
 
@@ -351,6 +353,8 @@ export async function decidePromotion(d: LearnDeps, actorId: string, promotionId
     await lock(c, `promo:${promotionId}`);
     const p = await getPromotion(c, promotionId);
     if (p.status !== 'in_review') throw new AppError(409, `This script is ${p.status}; it is not waiting for a decision.`);
+    // The person who drew the script up does not decide it: someone else hears it first.
+    if (p.created_by !== null && p.created_by === actorId) throw new AppError(403, 'You drew this script up, so someone else must decide it.');
     if (e.decision === 'approved') {
       const { checks } = await scriptChecks(c, p);
       if (!checks.ok) throw new AppError(409, `This script fails the rule checks, so it cannot be approved: ${checks.problems.join(' ')}`);
@@ -437,7 +441,7 @@ async function reactions(
                     (r.state->'escalation'->>'node' = s.node) AS escalated
                FROM workflow_run_steps s JOIN workflow_runs r ON r.id = s.run_id
                JOIN LATERAL (SELECT payload FROM workflow_run_steps h WHERE h.run_id = s.run_id AND h.seq > s.seq AND h.type = 'heard' AND h.node = s.node AND h.workflow = s.workflow ORDER BY h.seq LIMIT 1) h ON true
-              WHERE r.tenant_id = $1 AND r.kind IN ('live', 'test') AND s.type = 'say' AND s.workflow = $2 AND s.node = $3
+              WHERE r.tenant_id = $1 AND r.kind = 'live' AND s.type = 'say' AND s.workflow = $2 AND s.node = $3
                 AND coalesce(s.payload->>'lang', 'en') = $4
                 AND (CASE WHEN $5::text IS NULL THEN NOT (s.payload ? 'promotion') ELSE s.payload->>'promotion' = $5 END)
                 AND h.payload ? 'analysis'
@@ -466,7 +470,7 @@ export async function driftVerdict(c: pg.PoolClient, promotionId: string): Promi
   const reasons: string[] = [];
   const latest = (await c.query(
     `SELECT s.run_id FROM workflow_run_steps s JOIN workflow_runs r ON r.id = s.run_id
-      WHERE r.tenant_id = $1 AND r.kind IN ('live', 'test') AND s.workflow = $2 AND s.node = $3 AND s.type = 'say' AND s.created_at > $4 ORDER BY r.started_at DESC, s.id DESC LIMIT 1`, [p.tenant_id, p.workflow, p.node, at])).rows[0];
+      WHERE r.tenant_id = $1 AND r.kind = 'live' AND s.workflow = $2 AND s.node = $3 AND s.type = 'say' AND s.created_at > $4 ORDER BY r.started_at DESC, s.id DESC LIMIT 1`, [p.tenant_id, p.workflow, p.node, at])).rows[0];
   if (latest) {
     const def = await definitionFor(c, latest.run_id, p.workflow as string);
     const stored = (await c.query('SELECT node_hash FROM promotions WHERE id = $1', [promotionId])).rows[0].node_hash as string;
@@ -490,7 +494,7 @@ async function replaysFor(c: pg.PoolClient, p: { tenant_id: string; workflow: st
     `SELECT s.run_id AS "runId", r.call_id AS "callId", (h.payload->'analysis'->>'sentiment')::numeric AS sentiment
        FROM workflow_run_steps s JOIN workflow_runs r ON r.id = s.run_id
        JOIN LATERAL (SELECT payload FROM workflow_run_steps h WHERE h.run_id = s.run_id AND h.seq > s.seq AND h.type = 'heard' AND h.node = s.node ORDER BY h.seq LIMIT 1) h ON true
-      WHERE r.tenant_id = $1 AND s.workflow = $2 AND s.node = $3 AND s.type = 'say' AND s.payload ? 'promotion' AND s.created_at > $4 AND h.payload ? 'analysis'
+      WHERE r.tenant_id = $1 AND r.kind = 'live' AND s.workflow = $2 AND s.node = $3 AND s.type = 'say' AND s.payload ? 'promotion' AND s.created_at > $4 AND h.payload ? 'analysis'
       ORDER BY sentiment ASC LIMIT 5`, [p.tenant_id, p.workflow, p.node, since])).rows.map((r) => ({ runId: r.runId as string, callId: r.callId as string | null, sentiment: Number(r.sentiment) }));
 }
 

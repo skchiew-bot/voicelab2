@@ -342,9 +342,9 @@ Goal: promote nodes from live TTS to pre-recorded audio based on evidence, never
 **Status (in progress)**
 
 Built and tested against fakes (no real call, council model or voice provider has been involved):
-- **Every dynamic line is logged** with its node, the journey context it was said in (the kind and topic of the caller's last turn), and the values of the call's own variables put back as slots. Simulations are not evidence; a sensitive value can never be a slot.
+- **Every dynamic line is logged** with its node, the journey context it was said in (the kind and topic of the caller's last turn), and the values of the call's own variables put back as slots. Only live calls are evidence: rehearsals and staging test calls are neither turns to learn from nor reactions to judge drift by, nor among the replays; a sensitive value can never be a slot.
 - **Clustering** groups lines that say the same thing within one node and context, by word overlap and a threshold (no model). A cluster past the frequency threshold gets one canonical script with its slots marked: its medoid by rule, or a distiller model's version (the configured tier first, a stronger one when unsure, recorded). A script must pass rule checks first: it is a speakable line, every slot is a variable of the workflow and none is sensitive, and enough of it is fixed words to be worth recording.
-- **The Quality Council and the Customer Experience Council** each review the script (the configured tier, with tokens and any concerns in the audit trail). Both passing with high confidence approves it automatically; either clearly failing turns it down; anything else waits for a person in the Learning screen.
+- **The Quality Council and the Customer Experience Council** each review the script (the configured tier, with tokens and any concerns in the audit trail). Both passing with high confidence approves it automatically; either clearly failing turns it down; anything else waits for a person in the Learning screen. A person deciding a script that waits for one must not be the person who drew it up (who ran the scan); one drawn up by the scheduled sweep has no author, so any admin may decide it.
 - **Promotion** is complete only when every fixed phrase has a recording of exactly those words (found by the words, as in Phase 3). The recorder makes missing ones; without one the script stays approved and is still spoken live until audio is added. A promoted node plays its script, stitched like any other line, and the model is not asked.
 - **Drift screening** compares callers' reactions (mood, being understood, escalating) after promotion with the live line before it, by rule. A fall past the thresholds, or a change to the node's own definition, demotes the node to live speech, assembles replays of its worst calls, and starts again from fresh live turns only. A force-demote is available to a person.
 - **The cost change** for promotion and demotion is recorded in exact money at the voice provider's rate: per use, the one-off recording, the pay-back, and what was saved while promoted.
@@ -354,7 +354,7 @@ Not built or not proven:
 - Clustering is by word overlap, not embeddings, and every threshold is an untuned default.
 - The sweep that finishes approved scripts and screens for drift runs every hour as a scheduled job.
 - Drift cannot tell a worse script from a change in who is calling.
-- Evidence is not yet kept apart by environment (staging test calls count), simulations do not use promoted scripts, and a script change reaches a call already under way at its next line.
+- A promoted script is spoken in every environment of the client, so a staging test hears what live callers hear (only while the node is unchanged); simulations do not use promoted scripts, and a script change reaches a call already under way at its next line.
 
 **Exit criteria**
 - At least one node is promoted automatically, with an audit trail.

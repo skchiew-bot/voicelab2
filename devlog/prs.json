@@ -1919,10 +1919,10 @@
  {
   "number": 46,
   "title": "Phase 3: record the callback time a person asks for on the call",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/46",
   "created_at": "2026-10-11T00:33:01Z",
-  "merged_at": null,
+  "merged_at": "2026-10-11T04:19:40Z",
   "findings": [
    {
     "severity": "Med",
@@ -2851,5 +2851,16 @@
   "findings": [],
   "head": "claude/phase-3-board-wrapup",
   "head_sha": "a7b1c8387d5f277d3f1156af5a50e568543e567c"
+ },
+ {
+  "number": 68,
+  "title": "Dev Control Tower refresh: PR data to #67",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/68",
+  "created_at": "2026-10-11T04:18:09Z",
+  "merged_at": "2026-10-11T04:18:38Z",
+  "findings": [],
+  "head": "claude/phase-CT-dashboard-refresh-2",
+  "head_sha": "552eec84eb4526df625ed72df5040953a2beaeb0"
  }
 ]

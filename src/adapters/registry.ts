@@ -1,8 +1,8 @@
 import type { Adapter, ParamDef, ParamValues } from './types.js';
-import { elevenlabs, openai, telnyx, twilio } from './definitions.js';
+import { anthropic, elevenlabs, openai, telnyx, twilio } from './definitions.js';
 
 const adapters = new Map<string, Adapter>(
-  [twilio, telnyx, openai, elevenlabs].map((a) => [a.key, a]),
+  [twilio, telnyx, openai, elevenlabs, anthropic].map((a) => [a.key, a]),
 );
 
 export const listAdapters = (): Adapter[] => [...adapters.values()];

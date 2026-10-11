@@ -48,6 +48,8 @@ export const twilio: Adapter = {
       help: "The voice to speak with, as that service names it. Twilio's default if empty." },
     { key: 'relayTranscriptionProvider', label: 'Live call speech recognition', type: 'string', required: false,
       help: "Which of Twilio's speech services hears the caller, e.g. Deepgram or Google. Twilio's default if empty." },
+    { key: 'relayPricingProviderId', label: 'Live call speech pricing', type: 'string', required: false,
+      help: "The voice provider whose rates price Twilio's speech relay on a live call: its minutes and the characters it speaks. A live call cannot be costed without one." },
   ],
   defaultCapabilities: {
     inbound_calls: 'native', outbound_calls: 'native', call_transfer: 'native', call_recording: 'native',
@@ -127,5 +129,25 @@ export const elevenlabs: Adapter = {
   defaultCapabilities: {
     inbound_calls: 'unsupported', outbound_calls: 'unsupported', call_transfer: 'composable', call_recording: 'composable',
     stt: 'native', llm: 'composable', tts: 'native', realtime_conversation: 'native',
+  },
+};
+
+/**
+ * An AI model the platform calls, priced by its own dated rates (input and output tokens). One provider per model: the
+ * model id is the one the platform's model settings name, so each decision a call logs is priced by the model it used.
+ */
+export const anthropic: Adapter = {
+  key: 'anthropic',
+  kind: 'model',
+  displayName: 'Anthropic model',
+  docsUrl: 'https://docs.anthropic.com',
+  params: [
+    { key: 'model', label: 'Model id', type: 'string', required: true,
+      help: 'Exactly as the model settings name it, e.g. claude-haiku-5-5. Every decision logged with this model is priced by this provider\'s rates.' },
+    { key: 'apiKey', label: 'API key', type: 'secret', required: false },
+  ],
+  defaultCapabilities: {
+    inbound_calls: 'unsupported', outbound_calls: 'unsupported', call_transfer: 'unsupported', call_recording: 'unsupported',
+    stt: 'unsupported', llm: 'native', tts: 'unsupported', realtime_conversation: 'unsupported',
   },
 };

@@ -15,6 +15,7 @@ import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.
 import { recordCallEnd } from './call-end.js';
 import { caseCallEnded, recogniseInbound, safely } from './cases.js';
 import { settleTransferOnEnd } from './transfer.js';
+import { speechAndModelUsage } from './usage.js';
 import { recordEvent } from './events.js';
 import { healthMap, logFailover, recordSample } from './resilience.js';
 import { dialPace, drainedSet, routingHealth } from './control-actions.js';
@@ -348,7 +349,8 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
       // waited and was then served pays credits only from the moment they were.
       drawCredits: !call.no_credit,
       creditSkipSeconds: call.credit_from && call.answered_at ? Math.max(0, (new Date(call.credit_from).getTime() - new Date(call.answered_at).getTime()) / 1000) : 0,
-      usage: [{ providerId: call.provider_id, usage: { seconds: Number(call.duration_seconds ?? 0), burst: call.burst } }],
+      // The phone line first (credits follow it), then what else the call used: the speech relay and the models.
+      usage: [{ providerId: call.provider_id, usage: { seconds: Number(call.duration_seconds ?? 0), burst: call.burst } }, ...await speechAndModelUsage(c, call)],
     });
     await c.query(`UPDATE calls SET cost_status = 'recorded', cost_error = NULL WHERE id = $1`, [callId]);
     return 'recorded';

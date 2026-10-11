@@ -1,6 +1,6 @@
 import { redactNumbers } from '../telephony/types.js';
 import { evalCondition, type Vars } from './conditions.js';
-import { CONTACT_OUTCOMES, validTimeZone, type CallbackAsked, type CallbackTime, own, RESERVED_NAMES, SLOT_RE, type ApiNode, type Json, type SpeakNode, type WorkflowDefinition, type WorkflowNode } from './definition.js';
+import { canonicalTimeZone, CONTACT_OUTCOMES, validTimeZone, type CallbackAsked, type CallbackTime, own, RESERVED_NAMES, SLOT_RE, type ApiNode, type Json, type SpeakNode, type WorkflowDefinition, type WorkflowNode } from './definition.js';
 import { interpretDetail } from './interpret.js';
 import { analyseTurn, intentChanged, observeTurn, type JourneyConfig, type JourneyState } from '../journey/tracker.js';
 import { planSpeech, synthOnly, type RecordingIndex, type Segment, type SpeechPlan } from './stitch.js';
@@ -183,7 +183,7 @@ function callbackFrom(cb: CallbackAsked | undefined, state: RunState): CallbackT
     return typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= max ? n : undefined;
   };
   const day = part(cb.day, 6); const hour = part(cb.hour, 23);
-  return day === undefined || hour === undefined ? undefined : { day, hour, timeZone: cb.timeZone };
+  return day === undefined || hour === undefined ? undefined : { day, hour, timeZone: canonicalTimeZone(cb.timeZone) };
 }
 
 function withoutSensitive(state: RunState): Vars {

@@ -214,7 +214,13 @@ export function validateDefinition(input: unknown): ValidationResult {
             }
             for (const [k, v] of Object.entries(p.map)) {
               if (k.length === 0 || k.length > 100 || !Number.isInteger(v) || (v as number) < 0 || (v as number) > max) nodeErr('bad_callback', `callback.${part}.map: "${k}" must map to a whole number from 0 to ${max}.`);
+              // An answer nobody understood is not a time: mapping it to one would be a guess.
+              if (k === 'unknown' || k === 'ambiguous') nodeErr('bad_callback', `callback.${part}.map: "${k}" means the answer was not understood, so it cannot stand for a time.`);
             }
+            // An answer's intent can only be one of its intents: a key that is none of them can never match.
+            const capture = p.var.endsWith('_intent') ? p.var.slice(0, -'_intent'.length) : null;
+            const asked = capture === null ? undefined : Object.values(def.nodes as Record<string, unknown>).map((x) => (isObj(x) && isObj(x.listen) && x.listen.captureAs === capture && isObj(x.listen.intents) ? x.listen.intents : null)).find((x) => x !== null);
+            if (asked) for (const k of Object.keys(p.map)) if (!own(asked, k) && k !== 'unknown' && k !== 'ambiguous') warn('callback_never_matches', `callback.${part}.map: "${k}" is not one of the intents of "${capture}", so it can never match.`, id);
             recorded.push({ name: p.var, nodeId: id });
             used.push({ name: p.var, nodeId: id });
           }

@@ -6,6 +6,7 @@ import type { WorkflowDefinition } from '../src/workflows/definition.js';
 import { reply, start, type Deps } from '../src/workflows/engine.js';
 import { evaluateScenario } from '../src/workflows/simulate.js';
 import { validateDefinition } from '../src/workflows/validate.js';
+import { checkReferences } from '../src/workflows/refs.js';
 
 // A workflow can record the callback time a person asks for, read from what the call captured, never guessed.
 const callback = {
@@ -45,6 +46,40 @@ describe('a callback time read from the call', () => {
     // A sensitive answer, or its intent, is forgotten after routing and is never recorded.
     const secret = { ...flow, nodes: { ...flow.nodes, time: { ...flow.nodes.time, listen: { ...(flow.nodes.time as { listen: object }).listen, sensitive: true } } } };
     expect(errs(secret)).toEqual([['sensitive_in_record', 'later']]);
+    // An answer nobody understood is not a time, and an empty map or key says nothing.
+    expect(errs(withEnd({ contact: 'contacted', callback: { ...callback, hour: { var: 'time_intent', map: { morning: 10, unknown: 12 } } } }))).toEqual([['bad_callback', 'later']]);
+    expect(errs(withEnd({ contact: 'contacted', callback: { ...callback, day: { var: 'day_intent', map: { ambiguous: 1 } } } }))).toEqual([['bad_callback', 'later']]);
+    expect(errs(withEnd({ contact: 'contacted', callback: { ...callback, day: { var: 'day_intent', map: {} } } }))).toEqual([['bad_callback', 'later']]);
+    expect(errs(withEnd({ contact: 'contacted', callback: { ...callback, day: { var: 'day_intent', map: { '': 1 } } } }))).toEqual([['bad_callback', 'later']]);
+    // A key the answer's intents can never produce is flagged, not silently never matched.
+    const typo = validateDefinition(withEnd({ contact: 'contacted', callback: { ...callback, day: { var: 'day_intent', map: { tues: 2, mon: 1 } } } }) as WorkflowDefinition);
+    expect(typo.errors).toEqual([]);
+    expect(typo.warnings.map((w) => [w.code, w.nodeId])).toEqual([['callback_never_matches', 'later']]);
+  });
+
+  it('is never read from a value another workflow of the call marks sensitive, at publish time or when the call runs', async () => {
+    const parent: WorkflowDefinition = { start: 'go', variables: ['dob', 'h'], sensitiveVariables: ['dob'], nodes: { go: { type: 'handoff', target: { workflow: 'child' } } } };
+    const child: WorkflowDefinition = { start: 'x', variables: ['dob', 'h'], nodes: { x: { type: 'end', outcome: 'asked', contact: 'contacted',
+      callback: { day: { var: 'dob', map: { mon: 1 } }, hour: { var: 'h', map: { am: 9 } }, timeZone: 'UTC' } } } };
+    expect(validateDefinition(child).errors).toEqual([]);                         // alone, the child cannot know dob is sensitive
+    const issues = checkReferences('parent', parent, (n) => (n === 'child' ? child : 'absent'));
+    expect(issues.map((i) => i.code)).toEqual(['sensitive_across_workflows']);
+    // An answer marked sensitive in one workflow is caught through its intent in another, too.
+    const viaIntent: WorkflowDefinition = { ...child, variables: ['dob_intent', 'h'], nodes: { x: { ...child.nodes.x, callback: { day: { var: 'dob_intent', map: { mon: 1 } }, hour: { var: 'h', map: { am: 9 } }, timeZone: 'UTC' } } as never } };
+    const carries = { ...parent, variables: ['dob', 'dob_intent', 'h'] };
+    expect(checkReferences('parent', carries, (n) => (n === 'child' ? viaIntent : 'absent')).map((i) => i.code)).toEqual(['sensitive_across_workflows']);
+    // And should it run anyway, the call records no time from it.
+    const r = await start('parent', { dob: 'mon', h: 'am' }, { load: (n) => ({ parent, child } as Record<string, WorkflowDefinition>)[n] });
+    expect(endOf(r)).toEqual({ outcome: 'asked', contact: 'contacted' });
+  });
+
+  it('looks a value up in the map as the map\'s own entry only, and stores a time zone in its one standard spelling', async () => {
+    const inherited = Object.create({ mon: 1 }) as Record<string, number>;
+    const def = { start: 'x', variables: ['d', 'h'], nodes: { x: { type: 'end', outcome: 'asked', contact: 'contacted',
+      callback: { day: { var: 'd', map: inherited }, hour: { var: 'h', map: { am: 9 } }, timeZone: 'UTC' } } } } as WorkflowDefinition;
+    expect(endOf(await start('x', { d: 'mon', h: 'am' }, { load: () => def }))).toEqual({ outcome: 'asked', contact: 'contacted' });
+    const lower = { ...def, nodes: { x: { type: 'end', outcome: 'asked', contact: 'contacted', callback: { day: { var: 'd', map: { mon: 1 } }, hour: { var: 'h', map: { am: 9 } }, timeZone: 'asia/kuala_lumpur' } } } } as WorkflowDefinition;
+    expect(endOf(await start('x', { d: 'mon', h: 'am' }, { load: () => lower }))).toMatchObject({ callback: { day: 1, hour: 9, timeZone: 'Asia/Kuala_Lumpur' } });
   });
 
   it('records the day and hour the person asked for, mapped from what they said, in their time zone', async () => {
@@ -132,6 +167,13 @@ describe('a live outbound call that ends with a callback time', () => {
     const call = await liveCall();
     await talk(call, 'one day', 'morning');
     expect(await outcomeOf(call)).toEqual([{ outcome: 'contacted', callback_day: null, callback_hour: null, callback_tz: null }]);
+  });
+
+  it('stores a time zone given through the API in its one standard spelling too', async () => {
+    const call = await liveCall();
+    await env.pool.query(`UPDATE calls SET status = 'completed', ended_at = now() WHERE id = $1`, [call]);
+    await must(post(`/internal/calls/${call}/outcome`, { outcome: 'contacted', callback: { day: 3, hour: 11, timeZone: 'asia/kuala_lumpur' } }));
+    expect(await outcomeOf(call)).toEqual([{ outcome: 'contacted', callback_day: 3, callback_hour: 11, callback_tz: 'Asia/Kuala_Lumpur' }]);
   });
 
   it('refuses a rehearsal expecting an impossible time', async () => {

@@ -5,7 +5,7 @@ import { AppError } from '../errors.js';
 import { lineAmount, quantityFor, type Unit } from '../billing.js';
 import { fromScaled, mulDiv, SCALE } from '../money.js';
 import { decryptSecrets, encryptSecrets } from '../secrets.js';
-import { CONTACT_OUTCOMES, own, validTimeZone, type ContactOutcome, type Json, type WorkflowDefinition } from '../workflows/definition.js';
+import { canonicalTimeZone, CONTACT_OUTCOMES, own, validTimeZone, type ContactOutcome, type Json, type WorkflowDefinition } from '../workflows/definition.js';
 import { PhoneInVariable, reply as engineReply, start as engineStart, type Deps, type RunState, type StepRecord } from '../workflows/engine.js';
 import { callIntegration, type HttpDeps } from '../workflows/integrations.js';
 import { referencesOf } from '../workflows/refs.js';
@@ -154,8 +154,10 @@ async function recordContact(c: pg.PoolClient, kind: string, callId: string | nu
   const contact = end?.contact;
   if (typeof contact !== 'string' || !(CONTACT_OUTCOMES as readonly string[]).includes(contact)) return;
   const cb = end?.callback as { day?: unknown; hour?: unknown; timeZone?: unknown } | undefined;
-  const callback = cb && Number.isInteger(cb.day) && Number.isInteger(cb.hour) && validTimeZone(cb.timeZone) && contact !== 'wrong_number'
-    ? { day: cb.day as number, hour: cb.hour as number, timeZone: cb.timeZone } : undefined;
+  // Checked again here, so a callback time that could not be stored loses only itself, never the outcome or the step (L-006).
+  const inRange = (v: unknown, max: number) => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= max;
+  const callback = cb && inRange(cb.day, 6) && inRange(cb.hour, 23) && validTimeZone(cb.timeZone) && contact !== 'wrong_number'
+    ? { day: cb.day as number, hour: cb.hour as number, timeZone: canonicalTimeZone(cb.timeZone) } : undefined;
   await recordWorkflowOutcome(c, { callId, runId, contact: contact as ContactOutcome, callback });
 }
 

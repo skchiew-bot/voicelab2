@@ -72,6 +72,8 @@ export interface CallbackAsked {
 }
 /** A callback time read from a call: the parts of `CallbackAsked`, resolved. */
 export interface CallbackTime { day: number; hour: number; timeZone: string }
+/** A time zone's one standard spelling (`asia/kuala_lumpur` is `Asia/Kuala_Lumpur`), so one zone is never counted under two names. */
+export const canonicalTimeZone = (tz: string): string => new Intl.DateTimeFormat('en', { timeZone: tz }).resolvedOptions().timeZone;
 export const validTimeZone = (tz: unknown): tz is string => {
   if (typeof tz !== 'string' || tz.length === 0 || tz.length > 64) return false;
   try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch { return false; }

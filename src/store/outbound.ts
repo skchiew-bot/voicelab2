@@ -2,7 +2,7 @@ import type pg from 'pg';
 import { AppError } from '../errors.js';
 import { audit } from './audit.js';
 
-import { CONTACT_OUTCOMES, validTimeZone, type CallbackTime, type ContactOutcome } from '../workflows/definition.js';
+import { canonicalTimeZone, CONTACT_OUTCOMES, validTimeZone, type CallbackTime, type ContactOutcome } from '../workflows/definition.js';
 
 export const OUTCOMES = CONTACT_OUTCOMES;
 export type Outcome = ContactOutcome;
@@ -28,7 +28,7 @@ export async function recordOutcome(
   const row = (await c.query(
     `INSERT INTO outbound_outcomes (tenant_id, project_id, call_id, outcome, callback_day, callback_hour, callback_tz, recorded_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, call_id, outcome, callback_day, callback_hour, callback_tz, created_at`,
-    [call.tenant_id, call.project_id, callId, e.outcome, e.callback?.day ?? null, e.callback?.hour ?? null, e.callback?.timeZone ?? null, actorId])).rows[0];
+    [call.tenant_id, call.project_id, callId, e.outcome, e.callback?.day ?? null, e.callback?.hour ?? null, e.callback ? canonicalTimeZone(e.callback.timeZone) : null, actorId])).rows[0];
   await audit(c, actorId, 'outbound.outcome', 'call', callId, { outcome: e.outcome, callback: Boolean(e.callback) });
   return row;
 }

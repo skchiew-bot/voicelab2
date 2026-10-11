@@ -87,7 +87,7 @@ export const PHASES: PhaseProgress[] = [
     ], open: [
       'No voice provider is connected to live calls, so voice failover runs on a model of a provider and the bridge and replayed lines are not heard',
       'An outbound dial held back is not queued here: the dialler keeps its list and retries after the time given (a queue would have to keep the customer\'s number)',
-      'A caller waiting in the inbound queue hears a hold message; nothing yet starts the workflow when their turn comes',
+      'A caller waiting in the inbound queue is served the moment a channel frees, billed only from then: on Twilio the hold is cut short and the workflow begins (the redirect request is unchecked against the live service); a Telnyx caller hears the test message, as Telnyx has no voice link yet. Tested against fakes',
       'Funding is drawn down by each call\'s cost as it is recorded, tested only against fakes; the balance is our own estimate, not read back from any provider',
       'Failures are detected from errors at dial time and from reported samples, not yet from provider webhooks',
       'A failed provider recovers only through probes (`probeProviders` is not a scheduled job yet, because no voice provider is connected to probe; a telephony provider has no probe yet)',
@@ -109,7 +109,7 @@ export const PHASES: PhaseProgress[] = [
       'Mood and intent are read by word lists (English and Bahasa Malaysia, extendable per client); a model for turns the lists cannot read is not connected',
       'QA judgement questions need a model; none is connected, so they are left out of the score and the scorecard says it is incomplete',
       'The council (Phase 6) does not exist, so ticket council notes are empty and changes are not reviewed by it',
-      'Changes can be proposed, approved and put live; a change to a live flow made some other way is not stopped from skipping this path',
+      'A workflow version is put live in production only through an approved change, except by the deployers the owner names in PRODUCTION_DEPLOYERS (owner\'s decision, 2026-10-11), and only once each holds a token they chose; none is named until the owner sets it, so until then every production deploy and rollback needs a change. A rollback by anyone else means proposing the earlier version as a change, which needs it live in staging and rehearsed again. Which workflow a number answers with, and a client\'s approval levels, are changed by any admin without approval',
     ],
   },
   {

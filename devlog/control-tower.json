@@ -134,7 +134,7 @@
       },
       "check": {
         "label": "Check",
-        "work": "Routine checks and logs",
+        "work": "Routine checks, research and exploration",
         "activity": "Running and reading routine checks",
         "floor": "low",
         "ceiling": "mid"
@@ -162,17 +162,18 @@
       "overPercent": 30,
       "items": 20,
       "_about": "Amber when more than overPercent of the last items finished-at-floor items climbed above their floor. Needs at least that many items first.",
-      "_confirm": "d3ngineering owner answer 2026-10-11; to be confirmed for Voice Lab"
+      "_decided": "owner decision 2026-10-11 (DEC-20261011-ce39)"
     },
     "shadowReview": {
-      "enabled": false,
+      "enabled": true,
       "every": 5,
       "excludes": [
         "security-review"
       ],
       "_about": "Not running: shows how a cheaper tier would have judged one in every N reviews. Starts only on the owner decision.",
-      "_confirm": "d3ngineering owner answer 2026-10-11; to be confirmed for Voice Lab"
-    }
+      "_decided": "owner decision 2026-10-11 (DEC-20261011-a1bd)"
+    },
+    "_decided": "owner decision 2026-10-11: tiers confirmed; research and exploration count as check (DEC-20261011-f71f)"
   },
   "throttle": {
     "_about": "PROPOSED; not in use: no runner; interactive sessions are not bound. Percentages of the usage windows.",
@@ -183,6 +184,46 @@
     },
     "weeklyStop": 80,
     "todayLow": 40,
-    "_confirm": "d3ngineering owner answer 2026-10-11; to be confirmed for Voice Lab"
+    "_decided": "owner decision 2026-10-11 (DEC-20261011-0e8e)"
+  },
+  "integrity": {
+    "acceptedChanges": {
+      "devlog/activity/2026-10-10-r3qdkdUfMTUR-20261010T221519702.jsonl": {
+        "blob": "a8a53b61e687a2df469c3a919af73ed949bda571",
+        "decision": "DEC-20261011-ac67"
+      },
+      "devlog/activity/2026-10-10-r3qdkdUfMTUR-20261011T000317700.jsonl": {
+        "blob": "e724f648ca8ee9343e23f25aafee96fd279fbb96",
+        "decision": "DEC-20261011-ac67"
+      },
+      "devlog/activity/2026-10-10-xgGH5D1gB5C1-20261010T203654614.jsonl": {
+        "blob": "181939509df107eeba73d4e8f64c2df5a75621ad",
+        "decision": "DEC-20261011-ac67"
+      },
+      "devlog/activity/2026-10-10-zsbGnmLH93Wq-20261010T205037451.jsonl": {
+        "blob": "42117c5477fe65686a403fbe69e7d5ffa8877200",
+        "decision": "DEC-20261011-ac67"
+      },
+      "devlog/activity/2026-10-10-zsbGnmLH93Wq-20261010T205357502.jsonl": {
+        "blob": "d1ccd82bb451d980fd1a763d06b90ea4a2c8f999",
+        "decision": "DEC-20261011-ac67"
+      },
+      "devlog/activity/2026-10-10-zsbGnmLH93Wq-20261010T205623475.jsonl": {
+        "blob": "dc45fc9a2254859ee1953ed2295d8c3c55af11a7",
+        "decision": "DEC-20261011-ac67"
+      },
+      "devlog/activity/2026-10-11-r3qdkdUfMTUR-20261011T002606236.jsonl": {
+        "blob": "9f755178669d3cc047b9fff29669827ebb05d0c9",
+        "decision": "DEC-20261011-ac67"
+      },
+      "devlog/activity/2026-10-11-zsbGnmLH93Wq-20261011T003650782.jsonl": {
+        "blob": "ada68c6caa49fa304b93df917ffd64f01cafac7d",
+        "decision": "DEC-20261011-ac67"
+      },
+      "devlog/activity/2026-10-11-zsbGnmLH93Wq-20261011T004301467.jsonl": {
+        "blob": "85c1bc0ea541a4bdc5fc48681f28e65727d28b5c",
+        "decision": "DEC-20261011-ac67"
+      }
+    }
   }
 }

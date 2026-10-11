@@ -63,6 +63,8 @@ describe('lessons register', () => {
       }
       const sentences = (/^- \*\*Seen:\*\* (.*)$/m.exec(l.body)?.[1] ?? '').split(/(?<=\.) (?=[A-Z])/).filter((x) => x.length > 40);
       expect(sentences.length, `${l.id} repeats a sentence in its Seen line`).toBe(new Set(sentences).size);
+      // Where it happened belongs on the Seen line: a dated case on the Rule line is a merge that put it in the wrong place.
+      expect(/^- \*\*Rule:\*\* .*\b20\d\d-\d\d-\d\d\b/m.test(l.body), `${l.id} dates a case on its Rule line`).toBe(false);
     }
   });
 

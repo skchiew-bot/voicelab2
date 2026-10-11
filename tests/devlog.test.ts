@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { devNull, tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { fmtDecimal } from '../admin/src/format.js';
@@ -14,6 +14,11 @@ const scratch = mkdtempSync(path.join(tmpdir(), 'devlog-'));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 let dirs = 0;
 const freshDir = (name = 'p') => { const d = path.join(scratch, `${name}${dirs++}`); mkdirSync(d, { recursive: true }); return d; };
+// Git for the throwaway repositories, without the machine's own git config: a cloud container signs every
+// commit through an outside program, which made one test take 7.8 s under load (lesson L-038).
+const gitEnv = (extra: Record<string, string> = {}) => ({ ...process.env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', ...extra });
+// Tests that build repositories spawn dozens of processes; their time follows the machine's load, so give them room.
+const REPO_TIMEOUT = 20_000;
 
 // Tokens are assembled at run time from obviously fake parts, so no file holds one (lesson L-015).
 const fake = (...parts: string[]) => parts.join('');
@@ -214,7 +219,7 @@ describe('activity hook', () => {
   });
 
   it('warns at session start when the branch is behind origin/main', () => {
-    const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: 'pipe' });
+    const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: 'pipe', env: gitEnv() });
     const origin = freshDir('origin');
     git(origin, 'init', '-q', '-b', 'main');
     git(origin, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'one');
@@ -224,7 +229,7 @@ describe('activity hook', () => {
     const r = hook(clone, { hook_event_name: 'SessionStart', session_id: 's1', source: 'startup' });
     expect(r.stdout).toContain('1 commits behind origin/main');
     expect(lines(clone)[0]).toMatchObject({ event: 'SessionStart', behind_main: 1 });
-  });
+  }, REPO_TIMEOUT);
 
   it('never blocks the session, whatever it is given', () => {
     const dir = freshDir();
@@ -590,7 +595,7 @@ function makeRepo(config?: (c: Record<string, any>) => void) {
   const cfg = JSON.parse(read('devlog/control-tower.json'));
   config?.(cfg);
   writeFileSync(path.join(dir, 'devlog/control-tower.json'), JSON.stringify(cfg));
-  const git = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: 'pipe', env: gitEnv() });
   git('init', '-q', '-b', 'main');
   return { dir, git };
 }
@@ -860,7 +865,7 @@ describe('control tower report', () => {
     const commit = (date: string, session: string, msg: string) => {
       writeFileSync(path.join(dir, `f${date}`), date);
       git('add', '-A');
-      execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', `${msg}\n\nClaude-Session: https://claude.ai/code/${session}`], { cwd: dir, env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } });
+      execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', `${msg}\n\nClaude-Session: https://claude.ai/code/${session}`], { cwd: dir, env: gitEnv({ GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) });
     };
     mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
     const ev = (o: object) => JSON.stringify({ session: 'session_01A', ...o });
@@ -904,7 +909,7 @@ describe('control tower report', () => {
     run(dir, 'scripts/devlog-report.mjs', ['--json', out]);
     const later = JSON.parse(readFileSync(out, 'utf8')).attention.filter((a: { text: string }) => a.text.includes('latest cloud session'));
     expect(later).toEqual([expect.objectContaining({ level: 'info', text: expect.stringContaining('(sion_01E, 2026-10-10) found the installed fallback hook differs') })]);
-  });
+  }, REPO_TIMEOUT);
 
   it('shows RM only from a configured rate, computed exactly', () => {
     const { dir } = makeRepo((c) => { c.currency.myrPerUsd = '4.5'; c.currency.asOf = '2026-10-10'; });
@@ -922,16 +927,17 @@ describe('branch and fork audit', () => {
     const { dir, git } = makeRepo();
     mkdirSync(path.join(dir, 'src'), { recursive: true });
     writeFileSync(path.join(dir, 'src/progress.ts'), read('src/progress.ts'));
-    const commit = (msg: string, date = '2026-10-10T00:00:00Z') => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', msg], { cwd: dir, env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } });
+    // Few processes: a branch is one commit-tree and one ref, and every branch goes to origin in one push.
+    const commit = (msg: string, date = '2026-10-10T00:00:00Z') => execFileSync('git', ['commit', '-q', '--allow-empty', '-m', msg], { cwd: dir, env: gitEnv({ GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) });
     commit('base'); git('add', '-A'); commit('tooling');
     const origin = freshDir('origin-bare');
-    execFileSync('git', ['init', '-q', '--bare', origin]);
+    execFileSync('git', ['init', '-q', '--bare', origin], { env: gitEnv() });
     git('remote', 'add', 'origin', origin);
-    git('push', '-q', 'origin', 'main');
-    const branch = (name: string, msg?: string, date?: string) => { git('switch', '-q', '-c', name, 'main'); if (msg) commit(msg, date); git('push', '-q', 'origin', name); git('switch', '-q', 'main'); };
+    const onMain = (msg: string, date = '2026-10-10T00:00:00Z') => execFileSync('git', ['commit-tree', 'main^{tree}', '-p', 'main', '-m', msg], { cwd: dir, encoding: 'utf8', env: gitEnv({ GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) }).trim();
+    const branch = (name: string, msg?: string, date?: string) => git('branch', name, msg ? onMain(msg, date) : 'main');
     branch('claude/phase-2-workflow', 'phase 2 work');
     branch('claude/old-default', 'old default');
-    git('merge', '-q', '--no-edit', 'claude/phase-2-workflow', 'claude/old-default'); git('push', '-q', 'origin', 'main');
+    git('merge', '-q', '--no-edit', 'claude/phase-2-workflow', 'claude/old-default');
     branch('claude/phase-9-mystery', 'phase 9?');
     branch('feature/side-project', 'unplanned', '2026-09-01T00:00:00Z');
     branch('claude/session-abc', 'task work');
@@ -943,7 +949,8 @@ describe('branch and fork audit', () => {
     branch('claude/squashed', 'squash-merged');       // its PR was squash-merged: not an ancestor of main
     branch('claude/fresh');                           // just created: no commits of its own
     branch('claude/phase-CT-console', 'control tower'); // plan id CT, upper case in the name
-    git('switch', '-q', '-c', 'local-only', 'main'); commit('never pushed'); const localSha = git('rev-parse', 'HEAD').trim(); git('switch', '-q', 'main');
+    git('push', '-q', 'origin', '--all');
+    const localSha = onMain('never pushed'); git('branch', 'local-only', localSha);
     git('fetch', '-q', '--prune', 'origin');
     const sha = (b: string) => git('rev-parse', `origin/${b}`).trim();
     const pr = (number: number, head: string, title: string, state: string, merged = false) => ({ number, head, title, state, html_url: `https://github.com/o/r/pull/${number}`, created_at: '2026-10-10T00:00:00Z', merged_at: merged ? '2026-10-10T00:00:00Z' : null, head_sha: sha(head), findings: [] });
@@ -995,7 +1002,7 @@ describe('branch and fork audit', () => {
       expect(text).toContain(want);
     }
     expect(text).not.toMatch(/can be deleted by the owner: [^;]*claude\/old-default/); // never listed for deletion before the default changes
-  });
+   }, REPO_TIMEOUT);
 
   it('runs no audit and flags nothing when the trunk cannot be found', () => {
     const { dir, report } = branchRepo();
@@ -1006,7 +1013,22 @@ describe('branch and fork audit', () => {
     expect(r.branches.error).toContain('origin/master is missing');
     expect(r.branches.branches).toEqual([]);
     expect(r.attention.map((a: { text: string }) => a.text).join('\n')).not.toContain('can be deleted');
-  });
+   }, REPO_TIMEOUT);
+
+  it('builds its repositories without the machine\'s git config, so no commit waits on a signing program', () => {
+    // A config like a cloud container's, with a signer that fails: a commit that read it would fail outright.
+    const cfg = path.join(freshDir('gitconfig'), 'config');
+    writeFileSync(cfg, '[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n');
+    const was = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = cfg;
+    try {
+      expect(() => execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'x'], { cwd: makeRepo().dir, stdio: 'pipe', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } })).toThrow(); // the config bites
+      const { report } = branchRepo();
+      expect(report().branches.branches).toHaveLength(14);
+    } finally {
+      if (was === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = was;
+    }
+  }, REPO_TIMEOUT);
 
   it('keeps a branch name out of git when it holds a long number', () => {
     const { dir } = makeRepo();

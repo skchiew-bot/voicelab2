@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { parseKey } from '../src/secrets.js';
-import { failed, mediaLink, mediaLinkValid, MEDIA_LINK_SECONDS, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, STARTING_GRACE_MS, STUCK_REPLY_MS } from '../src/store/relay.js';
+import { failed, mediaLink, mediaLinkValid, MEDIA_LINK_SECONDS, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, STARTING_GRACE_MS, STUCK_REPLY_MS, DEFAULT_WAIT_LINE, WAIT_LINE_MS, waitLine } from '../src/store/relay.js';
+import { DEFAULT_FALLBACK } from '../src/resilience/fallback.js';
 import { replyRunSpoken, startRunSpoken } from '../src/store/runs.js';
 import { parseRelay, relaySettings, sayMessages, twimlRelay } from '../src/telephony/relay.js';
 import type { WorkflowDefinition } from '../src/workflows/definition.js';
@@ -613,6 +614,127 @@ describe('a live call through the speech relay', () => {
       expect(await onRelayMessage(d, b, prompt('no') as never, b.version)).toEqual([{ type: 'end' }]);
       expect((await runOf(callId))[0]).toMatchObject({ status: 'ended', outcome: 'ok' });
     }
+  });
+
+  it('says a short wait line once to a caller left waiting on a standing-by line, and the holding line still follows when the call cannot carry on', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    const waitEvents = async (callId: string) => (await env.pool.query(`SELECT payload FROM call_events WHERE call_id = $1 AND type = 'relay.wait_line'`, [callId])).rows;
+    // The start died with its server: the caller hears the wait line after a few seconds, once, then the holding line.
+    {
+      const { callSid, callId } = await ring();
+      await someoneStarting(callId);
+      const b = await connect(); const opened = Date.now();
+      b.send(setup(callSid, callId));
+      expect(await waitFor(() => b.got.length >= 1, WAIT_LINE_MS + 2_000)).toBe(true);
+      expect(Date.now() - opened).toBeGreaterThanOrEqual(WAIT_LINE_MS - 50);
+      expect(b.got).toEqual([{ type: 'text', token: DEFAULT_WAIT_LINE, last: true }]);
+      await sleep(STANDBY_POLL_MS * 2);                                                            // looks go on; the line is not said again
+      expect(b.got).toHaveLength(1);
+      await env.pool.query(`UPDATE calls SET relay_claimed_at = now() - make_interval(secs => $2) WHERE id = $1`, [callId, STARTING_GRACE_MS / 1000 + 5]);
+      expect(await waitFor(() => b.got.length >= 3)).toBe(true);
+      expect(b.got.slice(1)).toEqual([{ type: 'text', token: DEFAULT_FALLBACK.holdingMessage, last: true }, { type: 'end' }]);
+      expect(await callbacks(callId)).toBe(1);
+      expect(await waitEvents(callId)).toEqual([{ payload: { synthChars: DEFAULT_WAIT_LINE.length, at: null } }]);
+      b.ws.close(); await b.closed; await settle();
+    }
+    // A client's own wait line; the start then lands, and the caller hears the call's lines after it, the wait line not again.
+    await must(put(`/internal/tenants/${tenantId}/fallback`, { holdingMessage: DEFAULT_FALLBACK.holdingMessage, offerCallback: true, humanTransfer: false, voicemail: false, waitMessage: 'Sekejap ya.' }));
+    try {
+      const { callSid, callId } = await ring();
+      await someoneStarting(callId);
+      const b = await connect();
+      b.send(setup(callSid, callId));
+      expect(await waitFor(() => b.got.length >= 1, WAIT_LINE_MS + 2_000)).toBe(true);
+      expect(b.got).toEqual([{ type: 'text', token: 'Sekejap ya.', last: true }]);
+      await startRunSpoken(relayDeps().runs, null, { workflowId: wfId, environment: 'production', kind: 'live', variables: {}, callId });
+      expect(await waitFor(() => b.got.length >= 3)).toBe(true);
+      await sleep(STANDBY_POLL_MS + 500);
+      expect(b.got.map((m) => m.type)).toEqual(['text', 'play', 'text']);
+      expect(b.got[2]).toEqual({ type: 'text', token: 'Can you pay this week?', last: true });
+      expect(await waitEvents(callId)).toEqual([{ payload: { synthChars: 'Sekejap ya.'.length, at: null } }]);
+      expect(await callbacks(callId)).toBe(0);
+      b.ws.close(); await b.closed; await settle();
+    } finally {
+      await must(put(`/internal/tenants/${tenantId}/fallback`, { holdingMessage: DEFAULT_FALLBACK.holdingMessage, offerCallback: true, humanTransfer: false, voicemail: false }));
+    }
+    // A wait line must be a short line of words.
+    for (const waitMessage of ['', '   ', 'x'.repeat(201)]) {
+      const r = await put(`/internal/tenants/${tenantId}/fallback`, { holdingMessage: 'Sorry.', offerCallback: true, humanTransfer: false, voicemail: false, waitMessage });
+      expect(r.statusCode, JSON.stringify(waitMessage)).toBe(400);
+    }
+  }, 40_000);
+
+  it('says the wait line to a reconnected caller whose answer is still being applied, but never to one who has heard the question, or after it', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    // a starts the call and says its question; then its reply is under way when the line drops, and b reconnects.
+    const one = await ring();
+    const a = await connect();
+    a.send(setup(one.callSid, one.callId)); await a.until(2);
+    const [run] = await runOf(one.callId);
+    const v = (await env.pool.query('SELECT state_version FROM workflow_runs WHERE id = $1', [run.id])).rows[0].state_version as number;
+    await env.pool.query(`UPDATE workflow_runs SET status = 'processing', claimed_at = now() WHERE id = $1`, [run.id]);
+    const b = await connect();
+    b.send(setup(one.callSid, one.callId));
+    // c reconnects to a call waiting for the caller's answer to a question they heard: the caller is to speak, not wait.
+    const two = await ring();
+    await startRunSpoken(relayDeps().runs, null, { workflowId: wfId, environment: 'production', kind: 'live', variables: {}, callId: two.callId });
+    const c = await connect();
+    c.send(setup(two.callSid, two.callId));
+    await sleep(WAIT_LINE_MS + 1_500);
+    expect(a.got.map((m) => m.type)).toEqual(['play', 'text']);                                  // a said its question: no wait line after it
+    expect(c.got).toEqual([]);
+    expect(b.got).toEqual([{ type: 'text', token: DEFAULT_WAIT_LINE, last: true }]);
+    a.ws.close(); await a.closed;
+    // the reply lands; b says the question it moved on to, and nothing more
+    await env.pool.query(`UPDATE workflow_runs SET status = 'awaiting_reply', claimed_at = NULL WHERE id = $1`, [run.id]);
+    await startReply(run.id, v);
+    expect(await waitFor(() => b.got.length >= 2)).toBe(true);
+    expect(b.got.slice(1)).toEqual([{ type: 'text', token: 'Please say your secret word.', last: true }]);
+    expect(await callbacks(one.callId)).toBe(0);
+    for (const l of [b, c]) { l.ws.close(); await l.closed; }
+    await settle();
+  }, 30_000);
+
+  it('looks again before the wait line, so a caller who could hear the question hears it instead, and the line is said once', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    const d = relayDeps();
+    const { callSid, callId } = await ring();
+    await someoneStarting(callId);
+    const o = await openRelay(d, twilioId, setup(callSid, callId));
+    await startRunSpoken(d.runs, null, { workflowId: wfId, environment: 'production', kind: 'live', variables: {}, callId });   // lands just before the wait line is due
+    const said = await waitLine(d, o.session!);
+    expect(said.map((m) => m.type)).toEqual(['play', 'text']);
+    expect(said[1]).toEqual({ type: 'text', token: 'Can you pay this week?', last: true });
+    expect(await waitLine(d, o.session!)).toEqual([]);                                             // a question was said: never the wait line after it
+    // one standing by is said the line once, however often it is asked
+    const two = await ring();
+    await someoneStarting(two.callId);
+    const p = await openRelay(d, twilioId, setup(two.callSid, two.callId));
+    expect(await waitLine(d, p.session!)).toEqual([{ type: 'text', token: DEFAULT_WAIT_LINE, last: true }]);
+    expect(await waitLine(d, p.session!)).toEqual([]);
+    // a line that reconnects while the same start is still stuck does not hear it again: once per question, never in a loop
+    const p2 = await openRelay(d, twilioId, setup(two.callSid, two.callId));
+    expect(p2.send).toEqual([]);
+    expect(await waitLine(d, p2.session!)).toEqual([]);
+    expect((await env.pool.query(`SELECT count(*)::int AS n FROM call_events WHERE call_id = $1 AND type = 'relay.wait_line'`, [two.callId])).rows[0].n).toBe(1);
+    expect((await env.pool.query(`SELECT count(*)::int AS n FROM call_events WHERE call_id = $1 AND type = 'relay.wait_line'`, [callId])).rows[0].n).toBe(0);
+  });
+
+  it('never says the wait line after a question this line said, even when the answer to it is then still being applied', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    const d = relayDeps();
+    const { callSid, callId } = await ring();
+    await someoneStarting(callId);
+    const o = await openRelay(d, twilioId, setup(callSid, callId));
+    await startRunSpoken(d.runs, null, { workflowId: wfId, environment: 'production', kind: 'live', variables: {}, callId });
+    expect((await standbyCheck(d, o.session!)).send.map((m) => m.type)).toEqual(['play', 'text']);   // the look takes the call over and asks
+    // the caller answers, and the answer is being applied (by a server that may since have died): the call must wait
+    const [run] = await runOf(callId);
+    await env.pool.query(`UPDATE workflow_runs SET status = 'processing', claimed_at = now() WHERE id = $1`, [run.id]);
+    expect(await standbyCheck(d, o.session!)).toEqual({ send: [], again: true });
+    expect(await waitLine(d, o.session!)).toEqual([]);
+    expect((await env.pool.query(`SELECT count(*)::int AS n FROM call_events WHERE call_id = $1 AND type = 'relay.wait_line'`, [callId])).rows[0].n).toBe(0);
+    await env.pool.query(`UPDATE workflow_runs SET status = 'awaiting_reply', claimed_at = NULL WHERE id = $1`, [run.id]);
   });
 
   it('ends a run the caller hung up on, wiping what it held sensitive', async () => {

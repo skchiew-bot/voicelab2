@@ -25,9 +25,10 @@ export interface RelayDeps { runs: RunDeps; baseUrl: string; now?: () => Date }
  * `owner` names this connection: the call is served by the connection that last took it over, and only that one may end
  * its run on closing. `asking` says this connection itself said the question the call is on (it started the run, or
  * took the call over or caught up and said it again), so words that arrived before it did are no answer to it.
- * `closed` says the socket has gone, so it must not take the call over from anyone.
+ * `closed` says the socket has gone, so it must not take the call over from anyone. `spoke` says something has been said on
+ * this connection (a line of the workflow, or the wait line), so the wait line is never said after it.
  */
-export interface RelaySession { providerId: string; callId: string; tenantId: string; projectId: string | null; runId: string | null; version: number; ended: boolean; owner: string; asking?: boolean; closed?: boolean }
+export interface RelaySession { providerId: string; callId: string; tenantId: string; projectId: string | null; runId: string | null; version: number; ended: boolean; owner: string; asking?: boolean; closed?: boolean; spoke?: boolean }
 
 const asInternal = <T>(d: RelayDeps, fn: (c: pg.PoolClient) => Promise<T>) => withActor(d.runs.pool, { kind: 'internal' }, fn);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -67,7 +68,11 @@ export function mediaLinkValid(key: Buffer, recordingId: string, exp: string | u
 }
 
 // ------------------------------------------------------------------ the conversation
-const say = (d: RelayDeps, lines: SpokenLine[]) => sayMessages(lines, (id) => mediaLink(d.baseUrl, d.runs.key, id, (d.now ?? (() => new Date()))()));
+const say = (d: RelayDeps, session: RelaySession, lines: SpokenLine[]) => {
+  if (lines.length) session.spoke = true;
+  return speak(d, lines);
+};
+const speak = (d: RelayDeps, lines: SpokenLine[]) => sayMessages(lines, (id) => mediaLink(d.baseUrl, d.runs.key, id, (d.now ?? (() => new Date()))()));
 
 /** What a finished run leaves to say: nothing more, then the end. A call passed to a person says so to whatever runs next. */
 const endMessage = (outcome: string | null): RelayOutbound => (outcome === 'handoff_human' ? { type: 'end', handoffData: JSON.stringify({ reason: 'handoff_human' }) } : { type: 'end' });
@@ -82,6 +87,15 @@ export const STARTING_GRACE_MS = 60_000;
 export const STUCK_REPLY_MS = 90_000;
 /** How often a connection standing by looks for the run another is starting. The verdict that the start died still waits for STARTING_GRACE_MS. */
 export const STANDBY_POLL_MS = 3_000;
+
+/**
+ * A connection with nothing to say this long after it opened (standing by while another starts the call, or waiting on a
+ * reply another server was applying) says the wait line, once, so the caller does not sit in silence while the slow
+ * verdicts above run their course.
+ */
+export const WAIT_LINE_MS = 5_000;
+/** The wait line a client with no line of its own gets. Short: it only says that someone is still there. */
+export const DEFAULT_WAIT_LINE = 'One moment, please.';
 
 /** A run that ended this way did not finish the call: it broke, or it was abandoned (by a connection that closed, or a sweep). */
 const brokenEnd = (run: { outcome: string | null; error: string | null }) => run.outcome === 'error' || run.outcome === 'abandoned' || run.error !== null;
@@ -272,6 +286,30 @@ async function catchUp(d: RelayDeps, session: RelaySession): Promise<{ send: Rel
 }
 
 /**
+ * The connection has had nothing to say for WAIT_LINE_MS. It looks once more first (as the timer above does), so anything
+ * that is now ready is said instead. Only if it must still wait, and nothing has been said on this connection, does the
+ * caller hear the client's wait line: once per question the call is on, never after a question, and recorded on the call with the
+ * characters the voice provider speaks. The holding line and callback still follow if the call cannot carry on.
+ */
+export async function waitLine(d: RelayDeps, session: RelaySession): Promise<RelayOutbound[]> {
+  if (session.ended || session.closed || session.spoke) return [];
+  // A failed look is left to the timer above, which falls back if it fails too: the wait line is never worth ending a call for.
+  const r = await standbyCheck(d, session).catch(() => null);
+  if (!r || r.send.length || !r.again || session.ended || session.closed || session.spoke) return r?.send ?? [];
+  // Once per question, not once per connection: a line that keeps reconnecting while the same start or reply is stuck
+  // hears it once, never in a loop. The question is the run's version, or none while the call has not started.
+  const at = session.runId ? session.version : null;
+  const text = await asInternal(d, async (c) => {
+    const said = (await c.query(`SELECT 1 FROM call_events WHERE call_id = $1 AND type = 'relay.wait_line' AND payload->'at' = $2::jsonb LIMIT 1`, [session.callId, JSON.stringify(at)])).rowCount;
+    return said ? null : (await getFallbackPlan(c, session.tenantId))?.waitMessage ?? DEFAULT_WAIT_LINE;
+  }).catch(() => null);
+  if (text === null || session.ended || session.closed) return [];   // said already, or the line has gone: nothing is spoken or recorded
+  session.spoke = true;
+  await event(d, session, 'relay.wait_line', { synthChars: text.length, at }).catch(() => undefined);
+  return [{ type: 'text', token: text, last: true }];
+}
+
+/**
  * Say lines again. They are new speech for the voice provider, so the characters it speaks are recorded on the call (the
  * lines themselves are in the run's steps already); recordings cost nothing to play again.
  */
@@ -279,7 +317,7 @@ async function sayAgain(d: RelayDeps, session: RelaySession, lines: SpokenLine[]
   session.asking = true;
   const synthChars = lines.flatMap((l) => l.segments).reduce((n, s) => n + (s.kind === 'synth' ? s.characters : 0), 0);
   await event(d, session, 'relay.said_again', { lines: lines.length, synthChars }).catch(() => undefined);
-  return say(d, lines);
+  return say(d, session, lines);
 }
 
 /**
@@ -300,7 +338,7 @@ export async function closeRelay(d: RelayDeps, session: RelaySession): Promise<v
 }
 
 function afterTurn(d: RelayDeps, session: RelaySession, view: { status: string; outcome: string | null; error: string | null }, speech: SpokenLine[]) {
-  const send = say(d, speech);
+  const send = say(d, session, speech);
   if (view.status !== 'ended') return Promise.resolve({ session, send });
   // A workflow that broke part-way (whatever its outcome is called, e.g. a client's system failing) is not a finished
   // call: the caller gets the fallback, never silence.

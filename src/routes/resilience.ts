@@ -51,7 +51,7 @@ export function registerResilienceRoutes(app: FastifyInstance, ctx: Ctx): void {
   });
   app.put('/internal/tenants/:tenantId/fallback', async (req) => {
     const { tenantId } = z.object({ tenantId: id }).parse(req.params);
-    const b = z.object({ holdingMessage: z.string().min(1).max(500), offerCallback: z.boolean(), humanTransfer: z.boolean(), voicemail: z.boolean() }).parse(req.body);
+    const b = z.object({ holdingMessage: z.string().min(1).max(500), offerCallback: z.boolean(), humanTransfer: z.boolean(), voicemail: z.boolean(), waitMessage: z.string().trim().min(1).max(200).nullable().optional() }).parse(req.body);
     return run(req, (c, u) => setFallbackPlan(c, u, tenantId, b));
   });
   app.get('/internal/tenants/:tenantId/fallback', async (req) => {

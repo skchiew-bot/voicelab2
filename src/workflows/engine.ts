@@ -1,6 +1,6 @@
 import { redactNumbers } from '../telephony/types.js';
 import { evalCondition, type Vars } from './conditions.js';
-import { own, RESERVED_NAMES, SLOT_RE, type ApiNode, type Json, type SpeakNode, type WorkflowDefinition, type WorkflowNode } from './definition.js';
+import { CONTACT_OUTCOMES, own, RESERVED_NAMES, SLOT_RE, type ApiNode, type Json, type SpeakNode, type WorkflowDefinition, type WorkflowNode } from './definition.js';
 import { interpretDetail } from './interpret.js';
 import { analyseTurn, intentChanged, observeTurn, type JourneyConfig, type JourneyState } from '../journey/tracker.js';
 import { planSpeech, synthOnly, type RecordingIndex, type Segment, type SpeechPlan } from './stitch.js';
@@ -266,9 +266,9 @@ export async function reply(state: RunState, text: string, deps: Deps): Promise<
 }
 
 /** The current workflow ended cleanly (or by an end node): finish the call, or return to the parent of a subflow. */
-function leave(state: RunState, out: StepRecord[], outcome: string, deps: Deps): void {
+function leave(state: RunState, out: StepRecord[], outcome: string, deps: Deps, contact?: string): void {
   const frame = state.stack.pop();
-  if (!frame) { state.status = 'ended'; state.outcome = outcome; state.node = null; scrub(state); out.push({ type: 'end', workflow: state.workflow, payload: { outcome } }); return; }
+  if (!frame) { state.status = 'ended'; state.outcome = outcome; state.node = null; scrub(state); out.push({ type: 'end', workflow: state.workflow, payload: { outcome, ...(contact ? { contact } : {}) } }); return; }
   out.push({ type: 'subflow_exit', workflow: state.workflow, node: frame.node, payload: { outcome } });
   state.vars[`${frame.node}_outcome`] = outcome;
   state.workflow = frame.workflow;
@@ -404,10 +404,13 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         state.stack = []; addSensitive(state, target.sensitiveVariables); state.workflow = node.target.workflow; state.node = target.start;
         break;
       }
-      case 'end':
-        out.push({ type: 'reached_end', workflow: wf, node: id, payload: { outcome: node.outcome } });
-        leave(state, out, node.outcome, deps);
+      case 'end': {
+        // Only a known call outcome is carried (a version saved before outcomes were checked may hold anything there).
+        const contact = (CONTACT_OUTCOMES as readonly unknown[]).includes(node.contact) ? node.contact : undefined;
+        out.push({ type: 'reached_end', workflow: wf, node: id, payload: { outcome: node.outcome, ...(contact ? { contact } : {}) } });
+        leave(state, out, node.outcome, deps, contact);
         break;
+      }
     }
   }
 }

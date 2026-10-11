@@ -7,6 +7,7 @@ import { abandonStaleRuns, getRun, listRuns, replyRun, simulate, startRun, type 
 import * as wf from '../store/workflows.js';
 import { instantiate, templateFor, TEMPLATES } from '../workflows/templates.js';
 import { validateDefinition } from '../workflows/validate.js';
+import { CONTACT_OUTCOMES } from '../workflows/definition.js';
 import { AppError } from '../errors.js';
 
 interface Ctx {
@@ -25,7 +26,7 @@ export const scenario = z.object({
   integrations: z.record(z.string(), json).optional(),
   expect: z.object({
     outcome: z.string().optional(), says: z.array(z.string()).optional(),
-    doesNotSay: z.array(z.string()).optional(), handoff: z.string().optional(),
+    doesNotSay: z.array(z.string()).optional(), handoff: z.string().optional(), contact: z.enum([...CONTACT_OUTCOMES, 'none']).optional(),
   }).optional(),
 });
 

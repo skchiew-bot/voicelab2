@@ -1,6 +1,6 @@
 import { conditionVars } from './conditions.js';
 import {
-  ID_RE, isName, LIMITS, OPERATORS, own, SLOT_RE, type Condition, type Json, type LocalText, type WorkflowDefinition, type WorkflowNode,
+  CONTACT_OUTCOMES, ID_RE, isName, LIMITS, OPERATORS, own, SLOT_RE, type Condition, type Json, type LocalText, type WorkflowDefinition, type WorkflowNode,
 } from './definition.js';
 import { isWorkflowName } from './refs.js';
 import { slotsIn } from './render.js';
@@ -198,6 +198,9 @@ export function validateDefinition(input: unknown): ValidationResult {
       }
       case 'end':
         if (typeof n.outcome !== 'string' || !n.outcome.trim()) nodeErr('missing_outcome', 'An end node needs an outcome, such as "paid" or "wrong_person".');
+        if (n.contact !== undefined && !(CONTACT_OUTCOMES as readonly unknown[]).includes(n.contact)) {
+          nodeErr('unknown_contact', `"${String(n.contact)}" is not a call outcome (${CONTACT_OUTCOMES.join(', ')}). Leave it out when this end does not say.`);
+        }
         break;
       default: nodeErr('unknown_node_type', `"${String((n as { type: unknown }).type)}" is not a node type (speak, api, subflow, handoff, end).`);
     }

@@ -103,7 +103,7 @@ const debtCollectionMy: Template = {
             },
             transitions: [{ to: 'end_promise' }],
           },
-          end_promise: { type: 'end', outcome: 'promise_to_pay', contact: 'contacted' },
+          end_promise: { type: 'end', outcome: 'promise_to_pay', contact: 'contacted', promise: { amount: { var: 'balance' }, due: { days: 0 } } },
           to_partial: { type: 'handoff', target: { workflow: 'partial_payment' }, label: 'Offer a payment plan' },
           to_human: { type: 'handoff', target: { workflow: 'human_transfer' }, label: 'Pass to a person' },
         },

@@ -1,8 +1,10 @@
 import type pg from 'pg';
+import { unknownTokensOf } from './usage.js';
 import { billedSeconds, lineAmount, quantityFor, type Unit, type Usage } from '../billing.js';
 import { AppError } from '../errors.js';
 import { fromScaled, mulDiv, SCALE, toScaled } from '../money.js';
 import { audit } from './audit.js';
+import { drawFundingForCall } from './ledgers.js';
 
 // ----------------------------------------------------------------- FX
 export async function addFxRate(
@@ -65,9 +67,10 @@ export interface CallCostInput {
   /**
    * One entry per provider that served part of the call, and one for the agent's leg of a transfer to a person. That
    * leg is a separate call at the provider (priced at its own direction's rates and rounded on its own), and draws no
-   * credits: the client pays for the caller's time, which already covers the transfer.
+   * credits: the client pays for the caller's time, which already covers the transfer. `relay` marks the speech relay's
+   * use on the call, priced only by the provider's "relay" billing lines and drawing no credits either.
    */
-  usage: { providerId: string; usage: Usage; leg?: 'caller' | 'agent'; direction?: 'inbound' | 'outbound' }[];
+  usage: { providerId: string; usage: Usage; leg?: 'caller' | 'agent'; direction?: 'inbound' | 'outbound'; relay?: boolean }[];
 }
 
 interface Line {
@@ -109,22 +112,25 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
       rounding: version.rounding,
     });
     const leg = item.leg ?? 'caller';
-    if (leg === 'caller' && provider.kind === 'telephony' && billed !== null && creditSeconds === null) creditSeconds = input.drawCredits === false ? null : Math.max(0, billed - Math.ceil(input.creditSkipSeconds ?? 0));
+    if (leg === 'caller' && !item.relay && provider.kind === 'telephony' && billed !== null && creditSeconds === null) creditSeconds = input.drawCredits === false ? null : Math.max(0, billed - Math.ceil(input.creditSkipSeconds ?? 0));
 
     const burst = item.usage.burst && version.burst_premium_multiplier ? version.burst_premium_multiplier : null;
     const comps = (await c.query(
       `SELECT component, unit, rate, currency, billing_line FROM charging_components
-        WHERE charging_version_id = $1 AND direction IN ('any', $2) ORDER BY id`,
-      [version.id, item.direction ?? input.direction],
+        WHERE charging_version_id = $1 AND direction IN ('any', $2) AND (billing_line = 'relay') = $3 ORDER BY id`,
+      [version.id, item.direction ?? input.direction, item.relay === true],
     )).rows;
 
     // The agent's leg is a plain call leg: only the telephony leg's own rate applies to it, never a per-call fee or a
     // per-minute charge for something it does not use (the speech relay ended before the dial began).
     const own = leg === 'agent' ? comps.filter((x) => x.component === 'telephony_leg') : comps;
     const before = lines.length;
+    // Every part of the usage must meet a rate: a part no rate covers would be costed as nothing, which is a guess.
+    const covered = new Set<string>();
     for (const comp of own) {
       const q = quantityFor(comp.unit as Unit, comp.billing_line, item.usage, billed);
       if (!q) continue;
+      for (const part of partsOf(comp.unit as Unit, comp.billing_line)) covered.add(part);
       let amount = lineAmount(comp.rate, q);
       if (burst) amount = mulDiv(amount, toScaled(burst), SCALE);
       const fx = await perUsd(c, comp.currency, input.occurredAt);
@@ -138,6 +144,11 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
     // A leg with time on it and no rate to price it is refused, never recorded as free.
     if (leg === 'agent' && lines.length === before) {
       throw new AppError(409, `Provider ${item.providerId} has no outbound telephony rate in force at ${input.occurredAt.toISOString()} for the agent's leg of a transfer. Add one before costing calls.`);
+    }
+    const used: [string, number | undefined][] = [['seconds', item.usage.seconds], ['characters', item.usage.characters], ['input tokens', item.usage.inputTokens], ['output tokens', item.usage.outputTokens]];
+    const missing = used.filter(([part, n]) => (n ?? 0) > 0 && !covered.has(part)).map(([part]) => part);
+    if (missing.length) {
+      throw new AppError(400, `Provider ${item.providerId} has no ${item.relay ? 'speech relay ' : ''}rate for the ${missing.join(' and ')} this call used${item.relay ? ' (a "relay" billing line on its charging version)' : ''}. Add one, then cost the call again.`);
     }
   }
   if (lines.length === 0) throw new AppError(400, 'The usage given does not match any billable component of those providers.');
@@ -180,6 +191,9 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
     );
   }
 
+  // The providers' own funding goes down by what the call cost them. Once, here: a reconciled record copies these lines.
+  await drawFundingForCall(c, input.callId, lines.map((l) => ({ providerId: l.providerId, currency: l.currency, amount: l.amount })));
+
   if (credits > 0n) {
     await c.query(
       `INSERT INTO credit_entries (tenant_id, project_id, kind, credits, ref) VALUES ($1,$2,'usage',$3,$4)`,
@@ -197,7 +211,8 @@ export async function getCallCost(c: pg.PoolClient, callId: string) {
   )).rows[0];
   if (!head) throw new AppError(404, 'No cost record for that call.');
   const lines = (await c.query('SELECT * FROM call_cost_lines WHERE call_cost_id = $1 ORDER BY id', [head.id])).rows;
-  return { ...head, lines };
+  // How many of the call's model calls failed or timed out with their tokens unknown: if any, this cost leaves them out.
+  return { ...head, lines, model_tokens_unknown: await unknownTokensOf(c, callId) };
 }
 
 /** Roll costs up per campaign (project), so cost maps onto client billing. */
@@ -217,4 +232,15 @@ export async function campaignCosts(c: pg.PoolClient, tenantId?: string) {
     [tenantId ?? null],
   );
   return rows;
+}
+
+/** Which part of the usage a rate prices. */
+function partsOf(unit: Unit, billingLine: string): string[] {
+  switch (unit) {
+    case 'per_minute': case 'per_second': return ['seconds'];
+    case 'per_character': case 'per_1k_characters': return ['characters'];
+    case 'per_token': case 'per_1k_tokens': case 'per_1m_tokens':
+      return billingLine === 'input' ? ['input tokens'] : billingLine === 'output' ? ['output tokens'] : ['input tokens', 'output tokens'];
+    default: return [];
+  }
 }

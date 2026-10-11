@@ -28,6 +28,12 @@ export interface Listen {
   captureAs: string; intents?: Record<string, string[]>;
   /** The answer is used to route the call and then forgotten: it is not recorded, and not kept after this step. */
   sensitive?: boolean;
+  /**
+   * A reply the phrase rules cannot read may be read by a model (when one is configured). Off unless set: a question whose
+   * answer must be clear (consent, identity, a promise) stays with the rules, and an unclear answer stays unclear.
+   * Never allowed on a sensitive answer.
+   */
+  model?: boolean;
 }
 
 interface Common { label?: string }
@@ -56,7 +62,43 @@ export type ContactOutcome = (typeof CONTACT_OUTCOMES)[number];
  * refused, a wrong number, someone else answered); it is recorded as the call's outcome when a live outbound call's run
  * ends here. An end inside a subflow hands back to its parent, so only the end the call finishes at counts.
  */
-export interface EndNode extends Common { type: 'end'; outcome: string; contact?: ContactOutcome }
+export interface EndNode extends Common { type: 'end'; outcome: string; contact?: ContactOutcome; callback?: CallbackAsked; promise?: PromiseAsked }
+/** The furthest ahead a promise to pay can fall due, in days. */
+export const MAX_PROMISE_DAYS = 60;
+/**
+ * A promise to pay the person made on the call, recorded on the call's case. The amount is read from a variable holding
+ * an exact amount (such as `case_balance`). It falls due a fixed number of days from today, or on the day the answer
+ * maps to: with `as: 'days'` the map gives days from today ("tomorrow" to 1), with `as: 'weekday'` it gives a day of the
+ * week (0 Sunday to 6), meaning the next such day, never today ("Friday" said on a Friday is next Friday). Days are counted in the case's own time zone when
+ * the promise is recorded. An amount that is not exact, or an answer the map does not hold, records no promise.
+ */
+export interface PromiseAsked {
+  amount: { var: string };
+  due: { days: number } | { var: string; map: Record<string, number>; as: 'days' | 'weekday' };
+}
+/** A promise read from a call: the amount as an exact decimal string, and when it falls due (days from today, or a weekday). */
+export interface PromiseMade { amount: string; days?: number; weekday?: number }
+/**
+ * When the person asked to be called back, read from what the call captured: each part names a variable (usually a
+ * captured answer's intent, such as `when_intent`) and maps its values to a number. A value the map does not hold means
+ * the time was not understood, and no callback time is recorded.
+ */
+export interface CallbackAsked {
+  /** Day of the week, 0 (Sunday) to 6. */
+  day: { var: string; map: Record<string, number> };
+  /** Hour of the day, 0 to 23, in `timeZone`. */
+  hour: { var: string; map: Record<string, number> };
+  /** The person's time zone, such as Asia/Kuala_Lumpur. */
+  timeZone: string;
+}
+/** A callback time read from a call: the parts of `CallbackAsked`, resolved. */
+export interface CallbackTime { day: number; hour: number; timeZone: string }
+/** A time zone's one standard spelling (`asia/kuala_lumpur` is `Asia/Kuala_Lumpur`), so one zone is never counted under two names. */
+export const canonicalTimeZone = (tz: string): string => new Intl.DateTimeFormat('en', { timeZone: tz }).resolvedOptions().timeZone;
+export const validTimeZone = (tz: unknown): tz is string => {
+  if (typeof tz !== 'string' || tz.length === 0 || tz.length > 64) return false;
+  try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch { return false; }
+};
 
 export type WorkflowNode = SpeakNode | ApiNode | SubflowNode | HandoffNode | EndNode;
 

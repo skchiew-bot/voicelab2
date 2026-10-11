@@ -1,7 +1,8 @@
 /**
  * The change log: every change anyone made to the platform, with who made it and why, read from the audit log. The
  * reason is read from the record the change made (a change request's reason, an approval's note, a policy's summary),
- * not copied into the audit log, so nothing typed by a person is stored twice. Day-to-day activity (calls placed,
+ * not copied into the audit log, so nothing typed by a person is stored twice. A settings change that has no record of
+ * its own keeps its reason in its audit row (`src/change-reason.ts`). Day-to-day activity (calls placed,
  * workflows run, events that could not be matched) is not a change and is left out unless asked for.
  */
 import type pg from 'pg';
@@ -15,19 +16,19 @@ export type Category = (typeof CATEGORIES)[number];
 // audited, but they are not changes to the platform, and one busy day of them must not bury the changes.
 const ACTIVITY = new Set(['call.outbound', 'workflow.run', 'workflow.runs_abandoned', 'webhook.unknown_call', 'inbound.unrouted', 'queue.expired',
   'call_cost.record', 'call_cost.reconcile', 'outbound.outcome', 'case.step_failed', 'case.open', 'qa.score_batch', 'ticket.open', 'ticket.event',
-  'did.lock', 'channels.charge', 'learning.distil', 'appointment.book', 'appointment.cancel', 'appointment.reschedule', 'appointment.no_show', 'appointment.complete']);
+  'did.lock', 'did.lock_failed', 'channels.charge', 'learning.distil', 'appointment.book', 'appointment.cancel', 'appointment.reschedule', 'appointment.no_show', 'appointment.complete']);
 
 const PREFIX: [string, Category][] = [
   ['workflow.', 'workflows'], ['change.', 'workflows'], ['approval.', 'workflows'], ['integration.', 'workflows'],
   ['charging.', 'money'], ['rate_card.', 'money'], ['fx.', 'money'], ['credits.', 'money'], ['channels.', 'money'], ['funding.', 'money'], ['call_cost.', 'money'],
-  ['provider.', 'providers'], ['control.', 'providers'], ['number.', 'providers'], ['did.', 'providers'], ['routes.', 'providers'], ['fallback.', 'providers'], ['resilience.', 'providers'], ['entitlement.', 'providers'], ['model.', 'providers'],
+  ['provider.', 'providers'], ['control.', 'providers'], ['number.', 'providers'], ['did.', 'providers'], ['routes.', 'providers'], ['fallback.', 'providers'], ['resilience.', 'providers'], ['entitlement.', 'providers'], ['model.', 'providers'], ['transfer.set', 'providers'], ['transfer.clear', 'providers'],
   ['dnc.', 'compliance'],
   ['policy.', 'policy'], ['knowledge.', 'policy'],
   ['learning.', 'learning'], ['recording.', 'learning'],
   ['qa.', 'journey'], ['ticket.', 'journey'], ['fault.', 'journey'], ['journey.', 'journey'],
   ['case.', 'modules'], ['cases.', 'modules'], ['appointment.', 'modules'], ['appointments.', 'modules'], ['diary.', 'modules'], ['location.', 'modules'],
   ['tenant.', 'people'], ['user.', 'people'], ['project.', 'people'],
-  ['scheduler.', 'platform'],
+  ['scheduler.', 'platform'], ['alerts.subscribe', 'platform'], ['alerts.unsubscribe', 'platform'],
 ];
 
 /** A change's kind. Anything not known to be a change (activity, or an action this list has not heard of) is activity. */

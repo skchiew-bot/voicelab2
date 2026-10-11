@@ -1,6 +1,6 @@
 import { conditionVars } from './conditions.js';
 import {
-  CONTACT_OUTCOMES, ID_RE, isName, LIMITS, OPERATORS, own, SLOT_RE, type Condition, type Json, type LocalText, type WorkflowDefinition, type WorkflowNode,
+  CONTACT_OUTCOMES, ID_RE, isName, MAX_PROMISE_DAYS, validTimeZone, LIMITS, OPERATORS, own, SLOT_RE, type Condition, type Json, type LocalText, type WorkflowDefinition, type WorkflowNode,
 } from './definition.js';
 import { isWorkflowName } from './refs.js';
 import { slotsIn } from './render.js';
@@ -80,6 +80,8 @@ export function validateDefinition(input: unknown): ValidationResult {
   const used: { name: string; nodeId: string }[] = [];
   const spoken: { name: string; nodeId: string }[] = [];   // read out loud or fed to a model
   const sent: { name: string; nodeId: string }[] = [];     // sent to an integration
+  const recorded: { name: string; nodeId: string }[] = []; // recorded with the call's outcome (a callback time)
+  const modelRead: { id: string; captureAs: string }[] = []; // answers a model may read when the rules cannot
   const sensitive = new Set<string>();
   if (def.sensitiveVariables !== undefined) {
     if (!Array.isArray(def.sensitiveVariables) || !def.sensitiveVariables.every((v) => isName(v))) err('bad_sensitive', '"sensitiveVariables" must be a list of variable names.');
@@ -111,6 +113,26 @@ export function validateDefinition(input: unknown): ValidationResult {
     const addSpoken = (name: string) => { addUse(name); spoken.push({ name, nodeId: id }); };
     const addSent = (name: string) => { addUse(name); sent.push({ name, nodeId: id }); };
     const nodeErr = (code: string, msg: string) => err(code, msg, id);
+    /**
+     * A part read from a variable through a map to a whole number from 0 to `max` (a callback day or hour, a promise's
+     * days to pay). An answer nobody understood is never a value, and a key the answer's intents can never produce is flagged.
+     */
+    const mappedPart = (label: string, p: unknown, max: number, code: string, neverCode: string) => {
+      if (!isObj(p) || typeof p.var !== 'string' || !isName(p.var) || !isObj(p.map) || Object.keys(p.map).length === 0) {
+        nodeErr(code, `${label} must be { var, map }, mapping what the variable can hold to a number.`); return;
+      }
+      for (const [k, v] of Object.entries(p.map)) {
+        if (k.length === 0 || k.length > 100 || !Number.isInteger(v) || (v as number) < 0 || (v as number) > max) nodeErr(code, `${label}.map: "${k}" must map to a whole number from 0 to ${max}.`);
+        // An answer nobody understood is not a value: mapping it to one would be a guess.
+        if (k === 'unknown' || k === 'ambiguous') nodeErr(code, `${label}.map: "${k}" means the answer was not understood, so it cannot stand for a value.`);
+      }
+      // An answer's intent can only be one of its intents: a key that is none of them can never match.
+      const capture = p.var.endsWith('_intent') ? p.var.slice(0, -'_intent'.length) : null;
+      const asked = capture === null ? undefined : Object.values(def.nodes as Record<string, unknown>).map((x) => (isObj(x) && isObj(x.listen) && x.listen.captureAs === capture && isObj(x.listen.intents) ? x.listen.intents : null)).find((x) => x !== null);
+      if (asked) for (const k of Object.keys(p.map)) if (!own(asked, k) && k !== 'unknown' && k !== 'ambiguous') warn(neverCode, `${label}.map: "${k}" is not one of the intents of "${capture}", so it can never match.`, id);
+      recorded.push({ name: p.var, nodeId: id });
+      used.push({ name: p.var, nodeId: id });
+    };
 
     const terminal = n.type === 'end' || n.type === 'handoff';
     if (terminal && n.transitions !== undefined) nodeErr('terminal_has_transitions', `A ${n.type} node finishes the call or hands it over, so it cannot have transitions.`);
@@ -158,6 +180,9 @@ export function validateDefinition(input: unknown): ValidationResult {
             assigned.add(l.captureAs);
             if (l.sensitive !== undefined && typeof l.sensitive !== 'boolean') nodeErr('bad_listen', 'listen.sensitive must be true or false.');
             if (l.sensitive === true) sensitive.add(l.captureAs);
+            if (l.model !== undefined && typeof l.model !== 'boolean') nodeErr('bad_listen', 'listen.model must be true or false.');
+            if (l.model === true && l.intents === undefined) nodeErr('bad_listen', 'listen.model needs intents for the model to choose from.');
+            if (l.model === true) modelRead.push({ id, captureAs: l.captureAs });
             if (l.intents !== undefined) {
               if (!isObj(l.intents) || !Object.entries(l.intents).every(([k, v]) => isName(k) && Array.isArray(v) && v.length > 0 && v.every((p) => typeof p === 'string' && p.trim() !== ''))) {
                 nodeErr('bad_intents', 'intents must map each intent name to a non-empty list of phrases.');
@@ -201,6 +226,28 @@ export function validateDefinition(input: unknown): ValidationResult {
         if (n.contact !== undefined && !(CONTACT_OUTCOMES as readonly unknown[]).includes(n.contact)) {
           nodeErr('unknown_contact', `"${String(n.contact)}" is not a call outcome (${CONTACT_OUTCOMES.join(', ')}). Leave it out when this end does not say.`);
         }
+        if (n.callback !== undefined) {
+          const cb = n.callback as unknown;
+          if (n.contact === undefined || n.contact === 'wrong_number') nodeErr('bad_callback', 'A callback time needs a call outcome on the same end, and a wrong number has none.');
+          if (!isObj(cb)) nodeErr('bad_callback', 'callback must be { day, hour, timeZone }.');   // and the promise is still checked
+          else {
+            if (!validTimeZone(cb.timeZone)) nodeErr('bad_callback', 'callback.timeZone must be a time zone name, such as Asia/Kuala_Lumpur.');
+            for (const [part, max] of [['day', 6], ['hour', 23]] as const) mappedPart(`callback.${part}`, cb[part], max, 'bad_callback', 'callback_never_matches');
+          }
+        }
+        if (n.promise !== undefined) {
+          const pr = n.promise as unknown;
+          if (!isObj(pr) || !isObj(pr.amount) || !isObj(pr.due)) { nodeErr('bad_promise', 'promise must be { amount: { var }, due: { days } or { var, map } }.'); break; }
+          if (typeof pr.amount.var !== 'string' || !isName(pr.amount.var)) nodeErr('bad_promise', 'promise.amount.var must name the variable holding the amount, such as case_balance.');
+          else { recorded.push({ name: pr.amount.var, nodeId: id }); used.push({ name: pr.amount.var, nodeId: id }); }
+          if (pr.due.days !== undefined) {
+            if (pr.due.var !== undefined || !Number.isInteger(pr.due.days) || (pr.due.days as number) < 0 || (pr.due.days as number) > MAX_PROMISE_DAYS) {
+              nodeErr('bad_promise', `promise.due.days must be a whole number of days from 0 (today) to ${MAX_PROMISE_DAYS}, on its own.`);
+            }
+          } else if (pr.due.as !== 'days' && pr.due.as !== 'weekday') {
+            nodeErr('bad_promise', 'promise.due.as must say what the map gives: "days" from today, or a "weekday" (0 Sunday to 6).');
+          } else mappedPart('promise.due', pr.due, pr.due.as === 'weekday' ? 6 : MAX_PROMISE_DAYS, 'bad_promise', 'promise_never_matches');
+        }
         break;
       default: nodeErr('unknown_node_type', `"${String((n as { type: unknown }).type)}" is not a node type (speak, api, subflow, handoff, end).`);
     }
@@ -221,6 +268,9 @@ export function validateDefinition(input: unknown): ValidationResult {
 
   for (const u of spoken) if (sensitive.has(u.name)) err('sensitive_in_speech', `"${u.name}" is sensitive, so it cannot be spoken or given to a model.`, u.nodeId);
   for (const u of sent) if (sensitive.has(u.name)) err('sensitive_in_request', `"${u.name}" is sensitive, so it cannot be sent to an integration.`, u.nodeId);
+  // A sensitive answer's intent is forgotten with it, so it cannot be read for a callback time either.
+  for (const u of recorded) if (sensitive.has(u.name) || [...sensitive].some((s) => u.name === `${s}_intent`)) err('sensitive_in_record', `"${u.name}" is sensitive, so it cannot be recorded with the call (a callback time or a promise).`, u.nodeId);
+  for (const m of modelRead) if (sensitive.has(m.captureAs)) err('sensitive_to_model', `"${m.captureAs}" is sensitive, so a model may not read the answer.`, m.id);
   for (const name of sensitive) if (!assigned.has(name)) err('unknown_variable', `"${name}" is marked sensitive but is never set.`);
   for (const u of used) {
     if (!assigned.has(u.name)) err('unknown_variable', `"${u.name}" is used but never set: declare it in "variables" or capture it earlier.`, u.nodeId);

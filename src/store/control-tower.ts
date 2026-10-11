@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { UNKNOWN_TOKENS } from './usage.js';
 import { jobProblems } from '../scheduler.js';
 import { fromScaled, toScaled } from '../money.js';
 import { decryptSecrets } from '../secrets.js';
@@ -54,6 +55,9 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
          OR (status = 'in_progress' AND started_at < now() - interval '6 hours')`)).rows[0].n as number;
   const unpriced = (await c.query(
     `SELECT count(*)::int AS n FROM calls WHERE ended_at IS NOT NULL AND cost_status = 'pending' AND ended_at < now() - interval '15 minutes'`)).rows[0].n as number;
+  // Costed in the last week without some model tokens (a model call failed or timed out): their cost is below what was used.
+  const tokensUnknown = (await c.query(
+    `SELECT count(*)::int AS n FROM calls WHERE cost_status IN ('recorded', 'reconciled', 'variance', 'unchecked') AND ended_at > now() - interval '7 days' AND ${UNKNOWN_TOKENS} > 0`)).rows[0].n as number;
   const blocked24h = (await c.query(`SELECT count(*)::int AS n FROM calls WHERE status = 'blocked' AND started_at > now() - interval '24 hours'`)).rows[0].n as number;
 
   const funding = (await c.query(
@@ -89,6 +93,7 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   if (telephony.length > 0 && registries === 0) add('medium', 'no_dnc', 'No do-not-call position is declared for any country, so outbound calls are blocked everywhere.', '#/compliance');
   if (stuck > 0) add('high', 'calls_stuck', `${stuck} call${stuck === 1 ? '' : 's'} ${stuck === 1 ? 'has' : 'have'} not moved for a long time. Provider events are probably not arriving: check the public address and the webhook settings.`, '#/calls');
   if (unpriced > 0) add('medium', 'cost_pending', `${unpriced} finished call${unpriced === 1 ? ' has' : 's have'} not been priced.`, '#/calls');
+  if (tokensUnknown > 0) add('low', 'cost_tokens_unknown', `${tokensUnknown} call${tokensUnknown === 1 ? ' was' : 's were'} costed in the last week without some model tokens: a model failed or timed out, so what it used is not known and its cost is left out.`, '#/calls');
   if (problems.failed > 0) add('high', 'cost_failed', `${problems.failed} call${problems.failed === 1 ? '' : 's'} could not be priced.`, '#/calls');
   // Scheduled jobs: one overdue means no server is running jobs (or every one is stuck), so nothing sweeps.
   // Each job is its own alert (scoped by name), so a second job going wrong is a new alert and a new email.
@@ -154,6 +159,12 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   }
   // A call the system dropped is loud: it is an alert the moment it is flagged, until someone has acknowledged it.
   const faults = (await c.query(`SELECT count(*)::int AS n FROM calls c WHERE c.fault AND NOT EXISTS (SELECT 1 FROM fault_acks a WHERE a.call_id = c.id)`)).rows[0].n as number;
+  // A carrier blocked the number we showed but the lock could not be written: until a person locks it, the DID can be
+  // shown to that contact again. Cleared by a lock on the call, by hand or otherwise.
+  const unlocked = (await c.query(
+    `SELECT count(DISTINCT a.entity_id)::int AS n FROM audit_log a
+      WHERE a.action = 'did.lock_failed' AND NOT EXISTS (SELECT 1 FROM did_failures f WHERE f.call_id::text = a.entity_id)`)).rows[0].n as number;
+  if (unlocked > 0) add('high', 'did_lock_failed', `${unlocked} outbound call${unlocked === 1 ? ' was' : 's were'} blocked by the carrier, but the number shown could not be locked away from the contact. Lock it on the call by hand.`, '#/numbers');
   if (faults > 0) add('high', 'system_drop', `${faults} call${faults === 1 ? ' was' : 's were'} dropped by the system and ${faults === 1 ? 'has' : 'have'} not been looked at.`, '#/faults');
   // A promoted script that drifted was put back to live speech: say so, and say what is waiting for a person.
   const drifted = (await c.query(

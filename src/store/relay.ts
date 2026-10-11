@@ -332,14 +332,17 @@ async function sayAgain(d: RelayDeps, session: RelaySession, lines: SpokenLine[]
 export async function closeRelay(d: RelayDeps, session: RelaySession): Promise<void> {
   const wasEnded = session.ended;
   session.ended = true;
+  let owner = false;
   await asInternal(d, async (c) => {
     const call = (await c.query('SELECT relay_owner FROM calls WHERE id = $1 FOR UPDATE', [session.callId])).rows[0];
     if (call?.relay_owner !== session.owner) return;
+    owner = true;
     await c.query('UPDATE calls SET relay_owner = NULL WHERE id = $1', [session.callId]);
     const run = (await c.query(`SELECT id, state FROM workflow_runs WHERE call_id = $1 AND kind = 'live' AND status IN ('running', 'awaiting_reply') FOR UPDATE`, [session.callId])).rows[0];
     if (run) await abandonRow(c, run);
   }).catch(() => undefined);
-  await event(d, session, 'relay.closed', { finished: wasEnded }).catch(() => undefined);
+  // Whether this connection was serving the call: only its close ends the relay's time on the call (it is costed by it).
+  await event(d, session, 'relay.closed', { finished: wasEnded, owner }).catch(() => undefined);
 }
 
 function afterTurn(d: RelayDeps, session: RelaySession, view: { status: string; outcome: string | null; error: string | null }, speech: SpokenLine[]) {
@@ -365,6 +368,9 @@ export async function failed(d: RelayDeps, session: RelaySession, already: Relay
     return (await getFallbackPlan(c, session.tenantId)) ?? DEFAULT_FALLBACK;
   }).catch(() => DEFAULT_FALLBACK);
   await event(d, session, 'relay.fallback', { steps: ['record_callback_request', 'holding_message'] }).catch(() => undefined);
+  // The relay's own voice speaks the holding message: its characters are speech on the call, priced with the rest. A line
+  // that has already gone hears nothing, so nothing is recorded as said (the callback request above still stands).
+  if (!session.closed) await event(d, session, 'relay.holding_message', { synthChars: plan.holdingMessage.length }).catch(() => undefined);
   // The run ends now, whatever it was doing, so nothing sensitive is held for a call that has given up. A reply still being
   // applied cannot then land: its write needs the run to be as it left it. What that reply did to a client's system is
   // unknown, so the end says it was cut off (L-002).

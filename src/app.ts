@@ -17,9 +17,10 @@ import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, gateOutbound, normalizeE164, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
-import { addNumber, callKnown, callQueued, costCall, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
+import { addNumber, callKnown, callQueued, callTimedOut, costCall, costPendingCalls, retryFailedCosts, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, promoteWaiting, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
 import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, WAIT_LINE_MS, waitLine, type RelayDeps, type RelaySession } from './store/relay.js';
 import { recordingAudio } from './store/recordings.js';
+import { needsReason, reasonOf, recordRoutes, takeReason } from './change-reason.js';
 import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
 import { accept, afterDial, afterRelay, settleAgentLeg, transferUrl, twimlHangup, twimlHoldingThenHangup, whisper } from './store/transfer.js';
 import { DEFAULT_FALLBACK } from './resilience/fallback.js';
@@ -39,7 +40,8 @@ import { listDeliveries, listSubscriptions, sendTest, subscribe, subscriptionSch
 import { actionSchema, controlState, runAction } from './store/control-actions.js';
 import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
 import { clientAddUser, clientCalls, clientDisableUser, clientSummary, clientUsers } from './store/portal.js';
-import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
+import { audit } from './store/audit.js';
+import { listReconciliations, reconcileCall, reconcileSweep, recordTelnyxCost } from './store/reconcile.js';
 import { countsOf, createScheduler, drain, listJobs, runJobNow, updateJob, type Job } from './scheduler.js';
 import { sweepFaults } from './store/call-end.js';
 import { expireQueued } from './store/concurrency.js';
@@ -48,10 +50,11 @@ import { checkPayments, cleanNote, dispatchDue, sweepAgeing } from './store/case
 import { sweepAudio, sweepDrift } from './store/learning.js';
 import { sweepReminders } from './store/appointments.js';
 import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
-import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
-import { parseTwilio, twimlHold, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
+import { parseTelnyx, parseTelnyxCost, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
+import { parseTwilio, twimlHold, twimlQueueTimedOut, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
 import { createProvider, getProvider, listProviders, preflight, recheckProvider, setCapability } from './store/providers.js';
-import { ACTIVE, approveAdmin, createProject, createTenant, createUser, disableUser, listProjects, listTenants, listUsers, STAFF_ROLES, type Role } from './store/tenants.js';
+import { ACTIVE, approveAdmin, createProject, createTenant, createUser, disableUser, listProjects, listTenants, listUsers, rotateOwnToken, STAFF_ROLES, type Role } from './store/tenants.js';
+import { productionAccess } from './store/workflows.js';
 
 interface Session { userId: string; email: string; role: Role; actor: Actor }
 
@@ -67,6 +70,8 @@ export interface Deps {
   fetch?: Fetch;
   /** How workflow integrations connect. Only tests change this; production always uses the guarded default. */
   integrationHttp?: HttpDeps;
+  /** Models that read a caller's reply the phrase rules cannot, by tier. None by default: replies are read by rules only. */
+  interpreters?: import('./store/runs.js').RunDeps['interpreters'];
   /** Models that judge QA criteria, by tier. None by default: only the rules are applied. */
   judges?: import('./store/qa.js').QaDeps['judges'];
   /** The models and recorder behind the learning loop. None is connected to a live provider yet. */
@@ -80,6 +85,7 @@ export interface Deps {
 export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): FastifyInstance {
   const http: Fetch = deps.fetch ?? fetch;
   const app = Fastify({ logger: false });
+  recordRoutes(app);
   const key = parseKey(config.VOICELAB_SECRET_KEY);
   const dncKey = dncKeyFrom(key);
   /** The gate judges quiet hours and contact limits by the keyed hash of the number; derive it for callers who only send the number. */
@@ -106,8 +112,16 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const s = await authenticate(req);
     if (s.actor.kind !== 'internal') throw new AppError(403, 'Internal access only.');
     if (s.actor.readOnly && req.method !== 'GET' && req.method !== 'HEAD') throw new AppError(403, 'Read-only access: this user can look but not change anything.');
-    return s;
+    const why = reasonOf(req);
+    return why ? { ...s, actor: { ...s.actor, reason: why } } : s;
   }
+
+  // A settings change needs a reason: checked once staff are known, before the route reads anything (src/change-reason.ts).
+  app.addHook('preHandler', async (req) => {
+    if (!needsReason(req)) return;
+    await internal(req);
+    takeReason(req);
+  });
 
   /** Managing who can sign in is for admins only. */
   async function admin(req: FastifyRequest): Promise<Session> {
@@ -159,7 +173,14 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   // Who am I: the admin UI uses this to validate a pasted token and pick its menus.
   app.get('/me', async (req) => {
     const s = await authenticate(req);
-    return { email: s.email, role: s.role, readOnly: s.actor.kind === 'internal' && Boolean(s.actor.readOnly) };
+    // production: how this person may put a flow live there (directly, after replacing their token, or by a change).
+    const production = s.actor.kind === 'internal' ? await withActor(pool, s.actor, (c) => productionAccess(c, s.userId, config.PRODUCTION_DEPLOYERS)) : 'change';
+    return { email: s.email, role: s.role, readOnly: s.actor.kind === 'internal' && Boolean(s.actor.readOnly), production };
+  });
+  // Replace your own sign-in token. The one you were given was shown to whoever added you; this one only you see.
+  app.post('/me/token', async (req) => {
+    const s = await authenticate(req);
+    return withActor(pool, { kind: 'internal' }, (c) => rotateOwnToken(c, s.userId));
   });
 
   // ------------------------------------------------------------ users
@@ -381,7 +402,21 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
         }),
       })).min(1),
     }).parse(req.body);
-    return reply.status(201).send(await withActor(pool, s.actor, (c) => recordCallCost(c, s.userId, { callId, ...body })));
+    return reply.status(201).send(await withActor(pool, s.actor, async (c) => {
+      // A call of ours that is still under way, or that used the relay or a workflow, has usage this route cannot see (its
+      // relay, its model tokens, what it has yet to use): it is costed from its own records (re-price), never from figures
+      // entered here that would leave them out and make it look complete.
+      const call = (await c.query(
+        `SELECT ended_at, workflow_id,
+                EXISTS (SELECT 1 FROM workflow_runs WHERE call_id = calls.id AND kind = 'live') AS ran,
+                EXISTS (SELECT 1 FROM call_events WHERE call_id = calls.id AND type = 'relay.connected') AS relayed
+           FROM calls WHERE id = $1 FOR UPDATE`, [callId])).rows[0];
+      if (call && !call.ended_at) throw new AppError(409, 'This call has not ended yet, so its cost cannot be entered by hand.');
+      if (call && (call.ran || call.relayed || call.workflow_id)) {
+        throw new AppError(409, 'This was a live call with a workflow: its relay and model usage are costed from its own records. Use re-price instead.');
+      }
+      return recordCallCost(c, s.userId, { callId, ...body });
+    }));
   });
   app.get('/internal/calls/:callId/cost', async (req) => {
     const s = await internal(req);
@@ -431,14 +466,14 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     return withActor(pool, s.actor, (c) => gateOutbound(c, dncKey, withContact(body)));
   });
 
-  registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerWorkflowRoutes(app, { pool, key, internal, productionDeployers: config.PRODUCTION_DEPLOYERS, runDeps: { pool, key, integrationHttp: deps.integrationHttp, interpreters: deps.interpreters } });
   registerAppointmentRoutes(app, { pool, internal });
   registerKnowledgeRoutes(app, { pool, internal });
   registerCaseRoutes(app, { internal, cases: { calls: callDeps, ...deps.cases } });
   registerLearningRoutes(app, { internal, learn: { pool, ...deps.learning } });
-  registerJourneyRoutes(app, { pool, internal, judges: deps.judges, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerJourneyRoutes(app, { pool, internal, judges: deps.judges, runDeps: { pool, key, integrationHttp: deps.integrationHttp, interpreters: deps.interpreters } });
   registerResilienceRoutes(app, { pool, internal, callDeps });
-  registerStitchingRoutes(app, { pool, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerStitchingRoutes(app, { pool, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp, interpreters: deps.interpreters } });
 
   // ------------------------------------------------- control tower
   app.get('/internal/control-tower', async (req) => {
@@ -454,7 +489,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
 
   // ------------------------------------------------- scheduled jobs
   // The same work the sweep endpoints do, with their default settings, run by the app itself (src/scheduler.ts).
-  const runDeps = { pool, key, integrationHttp: deps.integrationHttp };
+  const runDeps = { pool, key, integrationHttp: deps.integrationHttp, interpreters: deps.interpreters };
   const caseDeps = { calls: callDeps, ...deps.cases };
   const learnDeps = { pool, ...deps.learning };
   const sys = <T>(fn: (c: pg.PoolClient) => Promise<T>) => withActor(pool, { kind: 'internal' }, fn);
@@ -464,11 +499,14 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     // missed only because one batch is small. Bounded, and a batch smaller than its limit means nothing more is due.
     { name: 'cases-dispatch', everySeconds: 60, run: () => drain(() => dispatchDue(caseDeps, () => new Date(), 20), 20, 10) },
     { name: 'queue-expire', everySeconds: 60, run: async () => {
+      // A free channel goes to a waiting caller before anyone is timed out of the queue.
+      const promotion = await promoteWaiting(callDeps);   // never throws, so expiry always runs
       const out = await sys((c) => expireQueued(c, null, 300));
-      return { expired: out.expired, hungUp: await hangUpCalls(callDeps, out.hangups) };
+      return { served: promotion.served, promotionFailed: promotion.failed, expired: out.expired, hungUp: await hangUpCalls(callDeps, out.hangups) };
     } },
     { name: 'faults-sweep', everySeconds: 300, run: () => sys((c) => sweepFaults(c)) },
     { name: 'workflow-runs-sweep', everySeconds: 900, run: () => abandonStaleRuns(runDeps, null, { olderThanMinutes: 60 }) },
+    { name: 'calls-cost', everySeconds: 60, run: () => costPendingCalls(callDeps) },
     { name: 'reconcile', everySeconds: 3600, run: () => reconcileSweep(callDeps, null, { olderThanMinutes: 60, limit: 50 }) },
     { name: 'learning-sweep', everySeconds: 3600, run: async () => ({ ...countsOf(await sweepAudio(learnDeps, null)), ...countsOf(await sweepDrift(learnDeps, null)) }) },
     { name: 'payment-checks', everySeconds: 3600, perTenant: true, run: (t) => checkPayments(caseDeps, t!) },
@@ -598,9 +636,14 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const b = z.object({ agentLegSeconds: z.number().int().min(0).max(86_400).optional() }).strict().parse(req.body ?? {});
     const outcome = await withActor(pool, s.actor, async (c) => {
       if (b.agentLegSeconds !== undefined) await settleAgentLeg(c, s.userId, callId, b.agentLegSeconds);
-      return costCall(c, s.userId, callId);
+      return costCall(c, s.userId, callId, { force: true });
     });
     return { cost_status: outcome };
+  });
+  // Re-price every call whose cost could not be recorded, e.g. once a missing rate has been entered.
+  app.post('/internal/calls/cost/retry-failed', async (req) => {
+    const s = await internal(req);
+    return retryFailedCosts(callDeps, s.userId);
   });
 
   // ------------------------------------------------------- webhooks
@@ -630,6 +673,8 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     // A call with a workflow to run is handed to the speech relay; one without hears the test message.
     const relayed = known && !queued && ev ? await relayTarget(callDeps, provider.id, ev.providerCallId) : null;
     if (relayed) return reply.type('text/xml').send(twimlRelay(relayUrl(provider.id), relayed, relayCallToken(key, relayed), relaySettings(provider.params), transferUrl(callDeps.baseUrl!, provider.id, 'relay-ended', relayed)));
+    // A caller timed out of the queue whose line is still open (the hangup has not landed yet) hears that a callback is booked.
+    if (known && !queued && !relayed && ev && await callTimedOut(callDeps, provider.id, ev.providerCallId)) return reply.type('text/xml').send(twimlQueueTimedOut());
     return reply.type('text/xml').send(known ? (queued ? twimlHold(`${callDeps.baseUrl}/webhooks/twilio/${provider.id}/voice${callId ? `?callId=${callId}` : ''}`) : twimlTestCall()) : twimlReject());
   };
   app.post('/webhooks/twilio/:providerId/status', twilioHook(false));
@@ -664,7 +709,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   // Twilio's speech relay connects here once a call with a workflow is answered. The connection is refused before it
   // opens unless Twilio's signature on it checks out; then only the call it names, on this provider, is served.
   const relayUrl = (providerId: string) => `${(callDeps.baseUrl ?? '').replace(/^http/, 'ws')}/relay/twilio/${providerId}`;
-  const relayDeps: RelayDeps = { runs: { pool, key, integrationHttp: deps.integrationHttp }, baseUrl: callDeps.baseUrl ?? '' };
+  const relayDeps: RelayDeps = { runs: { pool, key, integrationHttp: deps.integrationHttp, interpreters: deps.interpreters }, baseUrl: callDeps.baseUrl ?? '' };
   app.register(fastifyWebsocket, { options: { maxPayload: 64 * 1024 } });
   app.register(async (f) => {
     f.get('/relay/twilio/:providerId', {
@@ -771,6 +816,15 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
       rawBody: (req as FastifyRequest & { rawBody?: string }).rawBody ?? '',
     });
     if (!ok) throw new AppError(403, 'Bad signature.');
+    // What Telnyx charged for a call: kept against it and checked against our estimate. A report in a form we do not
+    // recognise is refused (Telnyx retries it), never read as a guess.
+    let report;
+    try { report = parseTelnyxCost(req.body); } catch (err) {
+      // Left a trace, so a report Telnyx stops retrying is not lost unseen. The reason is our own fixed wording, never its text.
+      await withActor(pool, { kind: 'internal' }, (c) => audit(c, null, 'webhook.unreadable', 'provider', provider.id, { kind: 'cost', reason: (err as Error).message }));
+      throw new AppError(400, (err as Error).message);
+    }
+    if (report) { await recordTelnyxCost(callDeps, provider, report); return reply.status(200).send({ ok: true }); }
     const ev = parseTelnyx(req.body);
     if (ev) await processWebhook(callDeps, provider, ev);
     return reply.status(200).send({ ok: true });

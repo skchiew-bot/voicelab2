@@ -16,6 +16,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fromUnits, priceTokens, readConfig, toUnits } from '../.claude/hooks/devlog.mjs';
 import { clean } from './devlog-flush.mjs';
+import { secretHits } from './devlog-secrets.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
@@ -186,6 +187,104 @@ export function branchAudit({ prs, board, phases, repo, cfg, now }) {
   return { ...base, branches, forks, uninspectedForks: Math.max(0, (repo?.forksCount ?? 0) - forks.length) };
 }
 
+// ----------------------------------------------------------- audit integrity
+const gitIn = (dir, args, input) => {
+  try { return execFileSync('git', args, { cwd: dir, encoding: 'utf8', input, maxBuffer: 64 << 20, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore'] }); } catch { return null; }
+};
+
+/**
+ * The activity log is append-only: every file in devlog/activity must still hold exactly what it held in the commit
+ * that added it, and none may be deleted. Compared blob by blob, so an edit made in a merge or not yet committed is
+ * caught too. A file not committed yet is new, not a failure. When git cannot be read the result is "unavailable",
+ * never a pass (lesson L-005).
+ */
+export function activityIntegrity(dir = root, accepted = {}, decisions = []) {
+  const none = { state: 'unavailable', checked: 0, changed: [], deleted: [], accepted: [], pending: 0 };
+  // -m: a file first added while resolving a merge shows only in the merge commit's own diff (review of DCT-11).
+  const log = gitIn(dir, ['log', '-m', '--diff-filter=A', '--no-renames', '--raw', '--no-abbrev', '--format=', '--', 'devlog/activity']);
+  if (log === null) return none;
+  const added = new Map(); // path -> its blob when first added; the log runs newest first, so the oldest add is kept
+  for (const line of log.split('\n')) {
+    const m = /^:\d+ \d+ [0-9a-f]+ ([0-9a-f]{40,64}) A\t(devlog\/activity\/[^\t]+\.jsonl)$/.exec(line);
+    if (m) added.set(m[2], m[1]);
+  }
+  const folder = path.join(dir, 'devlog', 'activity');
+  const present = existsSync(folder) ? readdirSync(folder).filter((f) => f.endsWith('.jsonl')).map((f) => `devlog/activity/${f}`) : [];
+  const tracked = present.filter((f) => added.has(f));
+  // A file git tracks but whose add cannot be found (a shallow clone, say) cannot be judged: never "new" (lesson L-005).
+  const listed = gitIn(dir, ['ls-files', '--', 'devlog/activity']);
+  if (listed === null) return none;
+  const unknown = listed.split('\n').filter((f) => f.endsWith('.jsonl') && !added.has(f) && present.includes(f));
+  if (unknown.length) return { ...none, unknown };
+  const out = tracked.length ? gitIn(dir, ['hash-object', '--stdin-paths'], tracked.join('\n') + '\n') : '';
+  if (out === null) return none;
+  const now = out.split('\n').filter(Boolean);
+  if (now.length !== tracked.length) return none;
+  const current = new Map(tracked.map((f, i) => [f, now[i]]));
+  const kept = new Set(present);
+  // A change the owner accepted counts only while the file still holds exactly the content accepted (null: deleted),
+  // and only with the decision that accepted it. Anything else stays a failure, and every accepted change stays listed.
+  const byId = new Map(decisions.filter((d) => d?.event === 'Decision').map((d) => [d.id, d]));
+  const ok = (f) => {
+    const a = Object.hasOwn(accepted, f) ? accepted[f] : null;
+    // The decision must be in the register, not merely shaped like an id (lesson L-024).
+    return Boolean(a && typeof a.decision === 'string' && byId.has(a.decision) && (a.blob ?? null) === (current.get(f) ?? null));
+  };
+  const touched = [...tracked.filter((f) => current.get(f) !== added.get(f)), ...[...added.keys()].filter((f) => !kept.has(f))].sort();
+  const changed = touched.filter((f) => kept.has(f) && !ok(f));
+  const deleted = touched.filter((f) => !kept.has(f) && !ok(f));
+  const acceptedList = touched.filter(ok).map((f) => {
+    const d = byId.get(accepted[f].decision);
+    return { file: f, decision: d.id, title: d.title, on: d.on, ref: d.ref ?? null, deleted: !kept.has(f) };
+  });
+  return { state: changed.length || deleted.length ? 'red' : 'green', checked: tracked.length, changed, deleted, accepted: acceptedList, pending: present.length - tracked.length };
+}
+
+// ------------------------------------------------------------- plan progress
+/** How many string literals a list holds, from just after its "[" to its own "]", brackets inside quotes skipped. */
+export function stringsInList(src, from) {
+  let n = 0; let quote = null;
+  for (let i = from; i < src.length; i++) {
+    const c = src[i];
+    if (quote) { if (c === '\\') i++; else if (c === quote) quote = null; continue; }
+    if (c === "'" || c === '"' || c === '`') { quote = c; n++; } else if (c === ']') return n;
+  }
+  return n;
+}
+// Daythree pages use sentence case: a capitalised word after the first is lowered, an acronym (QA) and the named
+// product "Control Tower" stay as they are.
+export const sentenceCase = (title) => String(title).split(' ').map((w, i) => (i > 0 && /^[A-Z][a-z]+[,:]?$/.test(w) ? w.toLowerCase() : w.replace(/-([A-Z][a-z]+)/g, (x) => x.toLowerCase()))).join(' ').replace(/\bcontrol tower\b/gi, 'Control Tower');
+/** Each phase of src/progress.ts with its exit criteria counted by state, for the phase track. Read as text: no build step. */
+export function planProgress(dir = root) {
+  let src;
+  try { src = readFileSync(path.join(dir, 'src', 'progress.ts'), 'utf8'); } catch { return []; }
+  const starts = [...src.matchAll(/^\s*id: '([^']+)', name: '([^']+)', status: '([a-z_]+)'/gm)];
+  return starts.map((m, i) => {
+    const block = src.slice(m.index, starts[i + 1]?.index ?? src.length);
+    const openAt = block.search(/\bopen: \[/);
+    const criteria = block.slice(block.search(/\bcriteria: \[/), openAt >= 0 ? openAt : undefined);
+    const count = (re) => (criteria.match(re) ?? []).length;
+    return {
+      id: m[1], name: sentenceCase(m[2]), status: m[3],
+      met: count(/state: 'met'/g), partly: count(/state: 'partly'/g), notMet: count(/state: 'not_met'/g) + count(/\bnotMet\(/g),
+      fakes: count(/proof: 'fakes'/g), open: openAt >= 0 ? stringsInList(block, block.indexOf('[', openAt) + 1) : 0,
+    };
+  });
+}
+
+// ------------------------------------------------------------------- health
+// The worst check sets the overall state. "Unavailable" (an input that could not be read) ranks with amber and is never
+// green. "Off" is a check for something not built yet (the runner); it is shown but does not count.
+const RANK = { green: 0, amber: 1, unavailable: 1, red: 2 };
+export function overallHealth(checks) {
+  const counted = checks.filter((c) => c.state !== 'off');
+  if (!counted.length) return 'unavailable';
+  const worst = Math.max(...counted.map((c) => RANK[c.state] ?? 1));
+  return worst === 2 ? 'red' : worst === 1 ? 'amber' : 'green';
+}
+
+// Events a person or Claude records by hand, which say nothing about when a session was active.
+const BY_HAND = new Set(['Task', 'Incident', 'Decision']);
 const sum = (xs) => xs.reduce((a, b) => a + b, 0n);
 const pct = (n, d) => (d > 0 ? Math.round((n / d) * 1000) / 10 : null); // a ratio of counts, for display only
 const tierOf = (model, tiers = {}) => Object.entries(tiers).find(([k, v]) => !k.startsWith('_') && Array.isArray(v) && v.some((w) => model.includes(w)))?.[0] ?? 'other';
@@ -199,6 +298,9 @@ function money(units, cfg) {
   return out;
 }
 
+/** Whether two task titles name the same work: case and spacing aside. */
+export const sameWork = (a = '', b = '') => a.toLowerCase().replace(/\s+/g, ' ').trim() === b.toLowerCase().replace(/\s+/g, ' ').trim();
+
 /** Fold Task events into the board, newest values winning. Exported for the task CLI. */
 export function buildBoard(events = activity(), now = new Date()) {
   const tasks = new Map();
@@ -207,6 +309,11 @@ export function buildBoard(events = activity(), now = new Date()) {
     for (const k of ['title', 'epic', 'workstream', 'phase', 'owner', 'status', 'progress', 'attempt', 'tests', 'blocker', 'next', 'pr', 'branch']) {
       if (e[k] !== undefined) t[k] = e[k];
     }
+    // An id started again for different work: sessions on separate branches cannot see each other's ids. A rename is
+    // the same work, and so is a title that differs only in case or spacing.
+    if (e.title && e.action === 'start') t.starts = [...(t.starts ?? []), e.title];
+    else if (e.title && t.starts?.length) t.starts = [...t.starts.slice(0, -1), e.title];
+    if (t.starts) t.starts = t.starts.filter((x, i, all) => all.findIndex((y) => sameWork(x, y)) === i);
     if (e.action === 'done') { t.finished = e.ts; t.blocker = ''; }
     else if (e.status && !['done', 'abandoned'].includes(e.status)) delete t.finished; // reopened
     if (!t.sessions.includes(e.session)) t.sessions.push(e.session);
@@ -251,7 +358,7 @@ export function build(opts = {}) {
   for (const c of all) if (c.session && !c.merge) { const s = touch(c.session); s.commits++; stamp(s, c.date); }
   for (const e of events) {
     const s = touch(e.session);
-    if (e.event !== 'Task' && e.event !== 'Incident') stamp(s, e.ts);
+    if (!BY_HAND.has(e.event)) stamp(s, e.ts);
     if (e.event === 'UserPromptSubmit') s.prompts++;
     if (e.tool) {
       s.tools++;
@@ -262,7 +369,8 @@ export function build(opts = {}) {
         if (highRisk.some((r) => r.test(e.target))) s.highRiskFiles.add(e.target);
       }
     }
-    if (e.event === 'SubagentStart') s.subagents[e.agentId ?? e.ts] = { type: e.agentType, started: e.ts, active: true };
+    // A start without an id cannot be paired with its stop, so whether it is still running is unknown (lesson L-005).
+    if (e.event === 'SubagentStart') s.subagents[e.agentId ?? e.ts] = { type: e.agentType, started: e.ts, active: true, paired: Boolean(e.agentId) };
     if (e.event === 'SubagentStop' && s.subagents[e.agentId]) s.subagents[e.agentId].active = false;
     if (e.event === 'Usage') s.usage.set('session', e); // each record covers the whole session; keep the latest
     if (e.event === 'Alert') s.alerts++;
@@ -316,6 +424,7 @@ export function build(opts = {}) {
     return { ...i, lessonTitle: l?.title ?? null, guarded: l ? l.guards.length > 0 && l.guards.every((g) => g.ok) : null };
   }).sort((a, b) => b.ts.localeCompare(a.ts));
   const alerts = events.filter((e) => e.event === 'Alert').sort((a, b) => b.ts.localeCompare(a.ts));
+  const decisions = events.filter((e) => e.event === 'Decision').sort((a, b) => b.on.localeCompare(a.on) || b.ts.localeCompare(a.ts));
 
   // ------------------------------------------------------------ AI economics
   const byModel = {};
@@ -342,6 +451,25 @@ export function build(opts = {}) {
     };
   }).sort((a, b) => (b.costUnits > a.costUnits ? 1 : b.costUnits < a.costUnits ? -1 : 0));
   const spend = sum(sessionRows.map((s) => s.costUnits));
+  // What the same tokens would have cost on the baseline model (ADR-0013 section 4.4). An estimate by design: it assumes
+  // the baseline would use the same tokens, and any model with no price makes it unavailable, never a guess.
+  const baseline = cfg.costEstimate?.baselineModel;
+  let routingSaving = null;
+  if (baseline && cfg.pricing?.perMTokUSD?.[baseline] && registry.length) {
+    let all = 0n; let actual = 0n; let priced = true;
+    for (const m of registry) {
+      const b = priceTokens(baseline, m, cfg.pricing); const a = priceTokens(m.model, m, cfg.pricing);
+      if (b === null || a === null) { priced = false; break; }
+      all += b; actual += a;
+    }
+    if (priced) routingSaving = { baseline, allBaseline: money(all, cfg), actual: money(actual, cfg), saving: money(all - actual, cfg), share: all > 0n ? Number(((all - actual) * 10000n) / all) / 100 : null };
+  }
+  // Which model led each metered session (the most output), against the routing policy.
+  const ledBy = {};
+  for (const s of sessionRows.filter((x) => x.metered)) {
+    const lead = Object.entries(s.models).sort((a, b) => b[1].output - a[1].output)[0]?.[0];
+    if (lead) ledBy[lead] = (ledBy[lead] ?? 0) + 1;
+  }
   const tierSpend = {};
   for (const m of registry) tierSpend[m.tier] = (tierSpend[m.tier] ?? 0n) + m.costUnits;
   const pricedTotal = sum(registry.map((m) => m.costUnits));
@@ -363,6 +491,8 @@ export function build(opts = {}) {
     partial: sessionRows.some((s) => s.costBasis === 'partial'),
     unmetered: sessionRows.filter((s) => !s.metered && s.tools > 0).length, // logged activity but no usage record
     unassignedSpend: money(spend - sum([...taskCost.values()]), cfg), // spend in sessions that recorded no task
+    unattributed: money(spend - pricedTotal, cfg), // session cost that no model's priced tokens account for
+    routingSaving, ledBy,
     pricing: { source: cfg.pricing?.source ?? null, asOf: cfg.pricing?.asOf ?? null },
     currency: cfg.currency?.myrPerUsd ? { myrPerUsd: cfg.currency.myrPerUsd, asOf: cfg.currency.asOf, source: cfg.currency.source } : null,
   };
@@ -375,7 +505,7 @@ export function build(opts = {}) {
   const realCommits = all.filter((c) => !c.merge);
   const commitSessions = new Set(realCommits.map((c) => c.session).filter(Boolean));
   const loggedSessions = new Set(events.map((e) => e.session));
-  const activitySince = events.find((e) => e.event !== 'Task' && e.event !== 'Incident')?.ts ?? null;
+  const activitySince = events.find((e) => !BY_HAND.has(e.event))?.ts ?? null;
   const loggableCommitSessions = [...commitSessions].filter((id) => (sessionsById.get(id)?.last ?? '') >= (activitySince ?? '~'));
   // Logging gaps: a session that committed well after its last logged event was not being
   // logged (for example, Claude Code opened it outside the repository, so the hooks never loaded).
@@ -449,6 +579,8 @@ export function build(opts = {}) {
   for (const l of lessons) for (const g of l.guards) if (!g.ok) attention.push({ level: 'critical', text: `${l.id} lost its guard: "${g.text}" is no longer in ${g.file}.` });
   for (const a of alerts.filter((x) => x.kind === 'stop-loss' && x.ts >= since(2))) attention.push({ level: 'critical', text: `Stop-loss in ${a.session.slice(-8)}: ${a.rule} (${a.key}).` });
   for (const t of board.filter((x) => x.blocker && x.status !== 'done')) attention.push({ level: 'warning', text: `${t.id} is blocked: ${t.blocker}` });
+  // Still shown once done: the record mixes the two pieces of work whatever its status.
+  for (const t of board.filter((x) => (x.starts?.length ?? 0) > 1)) attention.push({ level: t.status === 'done' ? 'info' : 'warning', text: `${t.id} was started for ${t.starts.length} different pieces of work (${t.starts.join('; ')}): its record mixes them. Give each its own id.` });
   for (const t of board.filter((x) => (x.attempt ?? 1) > (cfg.stopLoss?.maxTaskAttempts ?? 99) && x.status !== 'done')) attention.push({ level: 'warning', text: `${t.id} is on attempt ${t.attempt}.` });
   for (const l of lessons.filter((x) => x.times >= 2)) attention.push({ level: 'warning', text: `${l.id} has happened ${l.times} times: ${l.title}.` });
   if (behind > 0) attention.push({ level: 'warning', text: `This branch is ${behind} commits behind main (lesson L-013).` });
@@ -484,6 +616,59 @@ export function build(opts = {}) {
   if (economics.unpriced.length) attention.push({ level: 'warning', text: `No price configured for ${economics.unpriced.join(', ')}; its cost is not counted.` });
   for (const a of alerts.filter((x) => x.kind === 'waste' && x.ts >= since(2))) attention.push({ level: 'info', text: `Wasted effort in ${a.session.slice(-8)}: ${a.rule} (${a.key}).` });
 
+  // ------------------------------------------------------------------ health
+  const integrity = activityIntegrity(root, cfg.integrity?.acceptedChanges ?? {}, decisions);
+  const secrets = secretHits(root);
+  const lastTest = [...events].reverse().find((e) => e.kind === 'test' && !e.expectRed);
+  const testFresh = lastTest && now - new Date(lastTest.ts) <= 24 * 36e5; // an old run says nothing about today's code (lesson L-011)
+  // A helper agent is stalled only while its session is still active; one whose session went quiet (a restart, a killed
+  // session) never logged its end, so whether it still runs is unknown, not a failure (lessons L-005, L-021).
+  const long = (a) => a.paired && a.active && a.started && now - new Date(a.started) > 6 * 36e5;
+  const stalled = sessionRows.filter((s) => s.active).flatMap((s) => s.subagents.filter(long));
+  const unpaired = sessionRows.reduce((n, s) => n + s.subagents.filter((a) => !a.paired || (long(a) && !s.active)).length, 0);
+  const recentStop = alerts.filter((a) => a.kind === 'stop-loss' && a.ts >= since(1));
+  const guardsTotal = lessons.reduce((n, l) => n + l.guards.length, 0);
+  const guardsBroken = lessons.reduce((n, l) => n + l.guards.filter((g) => !g.ok).length, 0);
+  const checks = [
+    { name: 'Lesson guards', state: guardsBroken ? 'red' : 'green', detail: guardsBroken ? `${guardsBroken} of ${guardsTotal} guards are missing` : `${guardsTotal} of ${guardsTotal} guards in place` },
+    { name: 'Activity log integrity', state: integrity.state, detail: integrity.state === 'unavailable' ? (integrity.unknown?.length ? `${integrity.unknown.length} committed file(s) whose first commit cannot be found (a shallow clone?)` : 'Git history could not be read') : integrity.state === 'red' ? `${integrity.changed.length} changed and ${integrity.deleted.length} deleted after being committed, not accepted` : `${integrity.checked} files as committed${integrity.accepted.length ? `, ${integrity.accepted.length} earlier change(s) accepted by the owner` : ''}${integrity.pending ? `, ${integrity.pending} not committed yet` : ''}` },
+    { name: 'Secret scan', state: secrets === null ? 'unavailable' : secrets.length ? 'red' : 'green', detail: secrets === null ? 'Files could not be listed' : secrets.length ? `${secrets.length} file(s) hold a real provider's key format` : "No file holds a real provider's key format (L-015)" },
+    { name: 'Tests', state: !testFresh ? 'unavailable' : lastTest.ok ? 'green' : 'amber', detail: !lastTest ? 'No test run recorded' : `Last recorded test run, of any scope, ${lastTest.ok ? 'passed' : 'failed'} at ${lastTest.ts.slice(0, 16).replace('T', ' ')} UTC${testFresh ? '' : ', more than a day ago'}. No CI runs the suite.` },
+    { name: 'Stalled agents', state: stalled.length ? 'amber' : 'green', detail: `${stalled.length ? `${stalled.length} helper agent(s) active for more than 6 hours` : 'None active for more than 6 hours'}${unpaired ? `; ${unpaired} older start(s) cannot be judged (no id, or their session went quiet)` : ''}` },
+    { name: 'Stop-loss', state: recentStop.length ? 'amber' : 'green', detail: recentStop.length ? `${recentStop.length} in the last 24 hours` : `None in the last 24 hours (${alerts.filter((a) => a.kind === 'stop-loss').length} on record)` },
+    { name: 'Logging', state: gaps.length || checked?.fallback === 'missing' ? 'amber' : 'green', detail: [gaps.length ? `${gaps.length} session(s) committed while not logged` : '', checked?.fallback === 'missing' ? 'fallback hook not installed' : ''].filter(Boolean).join('; ') || 'Every committing session was logged' },
+    { name: 'Runner heartbeat', state: 'off', detail: 'No runner is built yet' },
+    { name: 'Usage windows', state: 'off', detail: 'Not read: no runner yet' },
+  ];
+  const health = { overall: overallHealth(checks), checks, integrity };
+
+  // ---------------------------------------------------------------- playback
+  // Every recorded step in order, compact: what was done and how it ended, never content (lesson L-017).
+  const sessionIndex = new Map(sessionRows.map((s, i) => [s.id, i]));
+  const sid = (id) => sessionIndex.get(id) ?? -1;
+  const step = (e) => {
+    switch (e.event) {
+      case 'SessionStart': return { k: 'start', d: `Session started${e.branch ? ` on ${e.branch}` : ''}${e.via === 'fallback' ? ' (outside the repository)' : ''}` };
+      case 'SessionEnd': return { k: 'end', d: 'Session ended' };
+      case 'UserPromptSubmit': return { k: 'prompt', d: 'Message received' };
+      case 'PostToolUse': case 'PostToolUseFailure': return { k: e.kind && e.kind !== 'other' ? e.kind : 'tool', d: `${e.tool}${e.target ? ` ${e.target}` : ''}`, ok: e.ok, f: e.failure };
+      case 'SubagentStart': return { k: 'agent', d: `Helper agent started${e.agentType ? `: ${e.agentType}` : ''}` };
+      case 'SubagentStop': return { k: 'agent', d: 'Helper agent finished' };
+      case 'Task': return { k: 'task', d: `${e.id} ${e.action}${e.status ? `, ${e.status.replace('_', ' ')}` : ''}${e.progress !== undefined ? `, ${e.progress}%` : ''}${e.title ? `: ${e.title}` : e.next ? `: next ${e.next}` : ''}`, t: e.id };
+      case 'Incident': return { k: 'incident', d: `${e.id} (${e.severity}): ${e.title ?? ''}${e.lesson ? ` [${e.lesson}]` : ''}`, t: e.task };
+      case 'Decision': return { k: 'decision', d: `${e.id}: ${e.title}`, t: e.task };
+      case 'Alert': return { k: 'alert', d: `${e.kind === 'stop-loss' ? 'Stop-loss' : 'Wasted effort'}: ${e.rule}` };
+      case 'Usage': return e.costUSD ? { k: 'usage', d: `Cost checkpoint $${e.costUSD}` } : null;
+      default: return null;
+    }
+  };
+  const timeline = [
+    ...events.map((e) => { const x = step(e); return x ? { ts: e.ts, s: sid(e.session), ...x } : null; }).filter(Boolean),
+    ...realCommits.map((c) => ({ ts: c.date, s: c.session ? sid(c.session) : -1, k: 'commit', d: `Commit ${c.sha}: ${c.subject}` })),
+    // A merge time that does not parse is left out, never a reason for the whole report to fail (lesson L-006).
+    ...prs.filter((p) => p.merged && !Number.isNaN(new Date(p.merged).getTime())).map((p) => ({ ts: new Date(p.merged).toISOString(), s: -1, k: 'merge', d: `PR #${p.number} merged: ${p.title}` })),
+  ].sort((a, b) => a.ts.localeCompare(b.ts));
+
   return {
     generatedAt: now.toISOString(),
     repo: 'skchiew-bot/voicelab2',
@@ -497,7 +682,8 @@ export function build(opts = {}) {
       sessions: sessionRows.length, toolCalls: events.filter((e) => e.tool).length, failures: events.filter((e) => e.event === 'PostToolUseFailure').length,
       incidents: incidents.length, openTasks: areas.workload.openTasks,
     },
-    attention, areas, economics, board, incidents, branches, alerts: alerts.slice(0, 50), registry: registry.map(({ costUnits, ...r }) => r),
+    attention, areas, economics, board, incidents, decisions, branches, alerts: alerts.slice(0, 50), registry: registry.map(({ costUnits, ...r }) => r),
+    health, plan: planProgress(), timeline, timelineSessions: sessionRows.map((s) => ({ id: s.id, url: s.url, first: s.first, last: s.last })),
     prs, lessons,
     sessions: sessionRows.map(({ costUnits, ...s }) => s),
     commits: realCommits.slice(0, 60),

@@ -8,6 +8,16 @@ import { recordEvent } from './events.js';
 export const DID_FAILURE_REASONS = ['spam_flagged', 'carrier_blocked', 'rejected_on_sight', 'caller_id_invalid'] as const;
 export type DidFailureReason = (typeof DID_FAILURE_REASONS)[number];
 
+/**
+ * The SIP responses that lock a DID for the contact by themselves, when a provider reports one as the end of an outbound
+ * dial (owner's decision, 2026-10-11: only clear blocks). 607 Unwanted (RFC 8197): the person, or their phone, marked
+ * the call as unwanted. 608 Rejected (RFC 8688): a network's call analytics blocked it. Anything else (a decline, busy,
+ * no answer, an error) says nothing about the number shown and locks nothing; a person can still record one by hand.
+ */
+export const CARRIER_LOCKS: Readonly<Record<number, DidFailureReason>> = Object.freeze({ 607: 'spam_flagged', 608: 'carrier_blocked' });
+export const carrierLockFor = (sipCode: number | undefined): DidFailureReason | null =>
+  sipCode !== undefined && Object.prototype.hasOwnProperty.call(CARRIER_LOCKS, sipCode) ? CARRIER_LOCKS[sipCode]! : null;
+
 /** USD per minute a provider charges for the outbound telephony leg now, or null if no rate is captured. */
 export async function outboundPerMinuteUsd(c: pg.PoolClient, providerId: string, at: Date): Promise<bigint | null> {
   const version = (await c.query(
@@ -15,7 +25,7 @@ export async function outboundPerMinuteUsd(c: pg.PoolClient, providerId: string,
   if (!version) return null;
   const comps = (await c.query(
     `SELECT unit, rate, currency FROM charging_components
-      WHERE charging_version_id = $1 AND component = 'telephony_leg' AND direction IN ('any', 'outbound') AND unit IN ('per_minute', 'per_second')`, [version.id])).rows;
+      WHERE charging_version_id = $1 AND component = 'telephony_leg' AND billing_line <> 'relay' AND direction IN ('any', 'outbound') AND unit IN ('per_minute', 'per_second')`, [version.id])).rows;
   if (comps.length === 0) return null;
   let total = 0n;
   for (const k of comps) {
@@ -110,7 +120,7 @@ export async function didLockedFor(c: pg.PoolClient, tenantId: string, phoneNumb
  * Record that the DID a call was dialled from failed for its contact: from now on that DID is never used for that
  * contact. The contact is known only by the hash stored on the call, so no number is needed here or kept.
  */
-export async function recordDidFailure(c: pg.PoolClient, actorId: string | null, callId: string, reason: DidFailureReason) {
+export async function recordDidFailure(c: pg.PoolClient, actorId: string | null, callId: string, reason: DidFailureReason, from?: { sipCode: number }) {
   const call = (await c.query('SELECT id, tenant_id, from_number_id, contact_hash, direction, status, end_reason FROM calls WHERE id = $1', [callId])).rows[0];
   if (!call) throw new AppError(404, 'Call not found.');
   if (call.direction !== 'outbound' || !call.from_number_id || !call.contact_hash) throw new AppError(409, 'That call was not dialled from a pooled number, so there is no DID to lock.');
@@ -123,8 +133,10 @@ export async function recordDidFailure(c: pg.PoolClient, actorId: string | null,
     await c.query(
       `INSERT INTO did_failures (tenant_id, phone_number_id, contact_hash, reason, call_id, recorded_by) VALUES ($1,$2,$3,$4,$5,$6)`,
       [call.tenant_id, call.from_number_id, call.contact_hash, reason, callId, actorId]);
-    await recordEvent(c, { tenantId: call.tenant_id, callId, type: 'did.locked', payload: { phoneNumberId: call.from_number_id, reason } });
-    await audit(c, actorId, 'did.lock', 'call', callId, { phoneNumberId: call.from_number_id, reason });
+    // Who decided: a person, or the carrier's own answer to the dial (its SIP code).
+    const source = from ? { source: 'carrier', sipCode: from.sipCode } : { source: 'person' };
+    await recordEvent(c, { tenantId: call.tenant_id, callId, type: 'did.locked', payload: { phoneNumberId: call.from_number_id, reason, ...source } });
+    await audit(c, actorId, 'did.lock', 'call', callId, { phoneNumberId: call.from_number_id, reason, ...source });
   }
   return { phoneNumberId: call.from_number_id as string, reason, alreadyLocked: Boolean(exists) };
 }

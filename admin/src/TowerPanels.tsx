@@ -17,7 +17,7 @@ export function TowerPanels({ p }: { p: Panels }) {
               {p.funding.providers.map((f) => (
                 <tr key={`${f.providerId}-${f.currency}`}>
                   <td><a href={`#/providers/${f.providerId}`}>{f.provider}</a></td>
-                  <td>{fmtDecimal(f.balance)} {f.currency} <span className="muted">as of {fmtDate(f.recordedAt)}</span></td>
+                  <td>{fmtDecimal(f.balance)} {f.currency} <span className="muted">estimate: last recorded by staff {fmtDate(f.recordedAt)}, less calls since</span></td>
                   <td>{fmtDecimal(f.spent7d)} {f.currency}{f.spentInOtherCurrencies.map((o) => <div key={o.currency} className="muted">and {fmtDecimal(o.spent)} {o.currency}</div>)}</td>
                   <td>{fmtDecimal(f.perDay)} {f.currency}</td>
                   <td>{f.runway === 'measured' ? f.runwayDays : <span className="muted">{f.runway === 'no_spend' ? 'no spend to measure' : `unknown: spend is in ${f.spentInOtherCurrencies.map((o) => o.currency).join(', ')}`}</span>}</td>
@@ -113,6 +113,22 @@ export function TowerPanels({ p }: { p: Panels }) {
           <p>{p.learning.inReview} waiting for review, {p.learning.approved} approved and waiting for audio, {p.learning.promoted} speaking from recordings, {p.learning.demoted} demoted
             ({p.learning.driftDemotions7d} for drift and {p.learning.forcedDemotions7d} by hand this week). <a href="#/learning">Review and decide</a></p>
         )}
+        {p.nearThreshold === null ? <Unavailable what="clusters near the threshold" /> : (<>
+          <p>{p.nearThreshold.readyToDistil} past the threshold and waiting to be drawn up as a script; {p.nearThreshold.close} close to it (at least {p.nearThreshold.closeAtPercent}% of the way).
+            {(p.nearThreshold.stuck.alreadyProposed + p.nearThreshold.stuck.failsRules) > 0 && <> {p.nearThreshold.stuck.alreadyProposed + p.nearThreshold.stuck.failsRules} past it will not be drawn up from callers' own wording ({p.nearThreshold.stuck.alreadyProposed} already proposed, {p.nearThreshold.stuck.failsRules} failing the rule checks): a person decides.</>}
+            {p.nearThreshold.asOf && <span className="muted"> Clusters as of {fmtDate(p.nearThreshold.asOf)}.</span>}</p>
+          {p.nearThreshold.unavailable.length > 0 && <p className="muted" role="alert">Clusters could not be worked out for {p.nearThreshold.unavailable.join(', ')}.</p>}
+          {p.nearThreshold.clusters.length > 0 && (
+            <table aria-label="Close to the threshold">
+              <thead><tr><th>Client</th><th>Workflow · node</th><th>Context</th><th>Wording</th><th>Turns</th><th>Of threshold</th></tr></thead>
+              <tbody>{p.nearThreshold.clusters.map((k) => (
+                <tr key={`${k.tenantId}|${k.workflow}|${k.node}|${k.language}|${k.context}`}>
+                  <td>{k.tenant}</td><td>{k.workflow} · {k.node}</td><td>{k.context}</td><td>{k.script}</td><td>{k.support} of {k.threshold}</td><td>{k.percentOfThreshold}%</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          )}
+        </>)}
       </section>
 
       <section className="card" aria-label="Modules">

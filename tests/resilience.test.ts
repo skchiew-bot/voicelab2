@@ -63,7 +63,7 @@ beforeAll(async () => {
   tenantId = (await must(post('/internal/tenants', { name: 'Chaos Co' }))).json().id;
   const mk = async (adapterKey: string, name: string) => (await must(post('/internal/providers', { adapterKey, name, params: { apiKey: 'k' } }))).json().id as string;
   A = await mk('elevenlabs', 'voice-a'); B = await mk('openai', 'voice-b'); C = await mk('elevenlabs', 'voice-c');
-  await must(put(`/internal/tenants/${tenantId}/routes/voice`, { providerIds: [A, B, C] }));
+  await must(put(`/internal/tenants/${tenantId}/routes/voice`, { reason: 'Set up for this test.', providerIds: [A, B, C] }));
 });
 afterAll(async () => { await env?.teardown(); });
 
@@ -241,7 +241,7 @@ describe('total failure: the call is never dropped dead', () => {
   it('transfers to a person when the client has one available', async () => {
     await reset();
     for (const id of [A, B, C]) voices[id]!.mode = 'dead';
-    await must(put(`/internal/tenants/${tenantId}/fallback`, { holdingMessage: 'Please hold for a colleague.', offerCallback: true, humanTransfer: true, voicemail: false }));
+    await must(put(`/internal/tenants/${tenantId}/fallback`, { reason: 'Set up for this test.', holdingMessage: 'Please hold for a colleague.', offerCallback: true, humanTransfer: true, voicemail: false }));
     const r = await speakLines(session({ humanAvailable: async () => true }), { tenantId, callId: callId(), lines: LINES });
     expect(telephony.log).toEqual(['holding:Please hold for a colleague.', 'transfer']);
     expect(r.fallback!.done).toContain('transfer_human');
@@ -286,7 +286,7 @@ describe('found in review', () => {
     await reset();
     await must(post(`/internal/providers/${C}/funding`, { kind: 'topup', amount: '20', currency: 'USD' }));   // our ledger shows money
     voices[C]!.mode = 'no_credit';
-    await must(put(`/internal/tenants/${tenantId}/routes/voice`, { providerIds: [C, B] }));
+    await must(put(`/internal/tenants/${tenantId}/routes/voice`, { reason: 'Set up for this test.', providerIds: [C, B] }));
     await speakLines(session(), { tenantId, callId: callId(), lines: ['hi'] });
     expect(await healthOf(C)).toMatchObject({ state: 'unfunded' });
     for (let i = 0; i < 6; i++) { tick(60); await must(post(`/internal/providers/${C}/samples`, { kind: 'ok', latencyMs: 100 })); }
@@ -295,7 +295,7 @@ describe('found in review', () => {
     expect(await healthOf(C)).toMatchObject({ state: 'unfunded' });             // nor does an entry that is not a top-up
     await must(post(`/internal/providers/${C}/funding`, { kind: 'topup', amount: '50', currency: 'USD' }));
     expect(await healthOf(C)).toMatchObject({ state: 'failed' });               // a top-up puts it on probation
-    await must(put(`/internal/tenants/${tenantId}/routes/voice`, { providerIds: [A, B, C] }));
+    await must(put(`/internal/tenants/${tenantId}/routes/voice`, { reason: 'Set up for this test.', providerIds: [A, B, C] }));
   });
 
   it('lets a failed provider earn its way back by probing, and does not probe one that is out of funding', async () => {

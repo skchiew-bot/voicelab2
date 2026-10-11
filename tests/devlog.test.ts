@@ -1,9 +1,11 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { devNull, tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { fmtDecimal } from '../admin/src/format.js';
+// @ts-expect-error a plain ES module with no type declarations
+import { secretFormats, secretHits } from '../scripts/devlog-secrets.mjs';
 
 // The dev Control Tower: the lessons register must keep its guards, and the activity log must
 // record what happened without recording anything private. Everything it records may reach git.
@@ -14,6 +16,15 @@ const scratch = mkdtempSync(path.join(tmpdir(), 'devlog-'));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 let dirs = 0;
 const freshDir = (name = 'p') => { const d = path.join(scratch, `${name}${dirs++}`); mkdirSync(d, { recursive: true }); return d; };
+// Git for the throwaway repositories, without the machine's own git config: a cloud container signs every
+// commit through an outside program, which made one test take 7.8 s under load (lesson L-038).
+// GIT_CONFIG_COUNT also drops config passed in the environment, which the other two do not cover.
+const gitEnv = (extra: Record<string, string> = {}) => ({ ...process.env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_COUNT: '0', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', ...extra });
+// Every git command the tests run goes through here, so the guard below covers them all.
+const gitAt = (cwd: string, args: string[], extra: Record<string, string> = {}) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe', env: gitEnv(extra) });
+// Tests that build repositories spawn dozens of processes, so their time follows the machine's load. They take about
+// 1 s alone; 10 s allows for a loaded machine without hiding a real slowdown.
+const REPO_TIMEOUT = 10_000;
 
 // Tokens are assembled at run time from obviously fake parts, so no file holds one (lesson L-015).
 const fake = (...parts: string[]) => parts.join('');
@@ -54,6 +65,8 @@ describe('lessons register', () => {
       }
       const sentences = (/^- \*\*Seen:\*\* (.*)$/m.exec(l.body)?.[1] ?? '').split(/(?<=\.) (?=[A-Z])/).filter((x) => x.length > 40);
       expect(sentences.length, `${l.id} repeats a sentence in its Seen line`).toBe(new Set(sentences).size);
+      // Where it happened belongs on the Seen line: a dated case on the Rule line is a merge that put it in the wrong place.
+      expect(/^- \*\*Rule:\*\* .*\b20\d\d-\d\d-\d\d\b/m.test(l.body), `${l.id} dates a case on its Rule line`).toBe(false);
     }
   });
 
@@ -81,17 +94,9 @@ describe('lessons register', () => {
 
 describe('secrets in the repository (lesson L-015)', () => {
   it("no tracked file holds a token in a real provider's key format", () => {
-    const formats = [
-      new RegExp(fake('sk', '_(?:live|test)_', '[A-Za-z0-9]{10,}')),
-      new RegExp(fake('xox', '[abprs]-', '[0-9]{6,}-')),
-      new RegExp(fake('\\bA', 'C', '[0-9a-f]{32}\\b')),
-      new RegExp(fake('gh', 'p_', '[A-Za-z0-9]{30,}')),
-      new RegExp(fake('AK', 'IA', '[0-9A-Z]{16}')),
-    ];
-    const files = execFileSync('git', ['ls-files', '-co', '--exclude-standard'], { cwd: root, encoding: 'utf8' })
-      .split('\n').filter((f) => f && !f.startsWith('node_modules/') && existsSync(path.join(root, f)) && !/\.(png|jpe?g|gif|wav|mp3|ico)$/i.test(f));
-    const hits = files.flatMap((f) => formats.filter((re) => re.test(readFileSync(path.join(root, f), 'utf8'))).map((re) => `${f}: ${re.source}`));
-    expect(hits).toEqual([]);
+    // The same scan the dev Control Tower's health check runs (scripts/devlog-secrets.mjs), so they cannot disagree.
+    expect(secretFormats()).toHaveLength(5);
+    expect(secretHits(root)).toEqual([]);
   });
 });
 
@@ -214,17 +219,17 @@ describe('activity hook', () => {
   });
 
   it('warns at session start when the branch is behind origin/main', () => {
-    const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: 'pipe' });
+    const git = (cwd: string, ...a: string[]) => gitAt(cwd, a);
     const origin = freshDir('origin');
     git(origin, 'init', '-q', '-b', 'main');
-    git(origin, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'one');
+    git(origin, 'commit', '-q', '--allow-empty', '-m', 'one');
     const clone = path.join(freshDir(), 'clone');
     git(scratch, 'clone', '-q', origin, clone);
-    git(origin, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'two');
+    git(origin, 'commit', '-q', '--allow-empty', '-m', 'two');
     const r = hook(clone, { hook_event_name: 'SessionStart', session_id: 's1', source: 'startup' });
     expect(r.stdout).toContain('1 commits behind origin/main');
     expect(lines(clone)[0]).toMatchObject({ event: 'SessionStart', behind_main: 1 });
-  });
+  }, REPO_TIMEOUT);
 
   it('never blocks the session, whatever it is given', () => {
     const dir = freshDir();
@@ -583,14 +588,14 @@ describe('dashboard report', () => {
 /** A throwaway copy of the tooling in its own git repository, so reports run on known data. */
 function makeRepo(config?: (c: Record<string, any>) => void) {
   const dir = freshDir('repo');
-  for (const f of ['.claude/hooks/devlog.mjs', 'scripts/devlog-flush.mjs', 'scripts/devlog-report.mjs', 'scripts/devlog-task.mjs', 'devlog/lessons.md', 'devlog/dashboard.html']) {
+  for (const f of ['.claude/hooks/devlog.mjs', 'scripts/devlog-flush.mjs', 'scripts/devlog-report.mjs', 'scripts/devlog-task.mjs', 'scripts/devlog-secrets.mjs', 'devlog/lessons.md', 'devlog/dashboard.html']) {
     mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
     writeFileSync(path.join(dir, f), read(f));
   }
   const cfg = JSON.parse(read('devlog/control-tower.json'));
   config?.(cfg);
   writeFileSync(path.join(dir, 'devlog/control-tower.json'), JSON.stringify(cfg));
-  const git = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  const git = (...a: string[]) => gitAt(dir, a);
   git('init', '-q', '-b', 'main');
   return { dir, git };
 }
@@ -860,7 +865,7 @@ describe('control tower report', () => {
     const commit = (date: string, session: string, msg: string) => {
       writeFileSync(path.join(dir, `f${date}`), date);
       git('add', '-A');
-      execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', `${msg}\n\nClaude-Session: https://claude.ai/code/${session}`], { cwd: dir, env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } });
+      gitAt(dir, ['commit', '-q', '-m', `${msg}\n\nClaude-Session: https://claude.ai/code/${session}`], { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
     };
     mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
     const ev = (o: object) => JSON.stringify({ session: 'session_01A', ...o });
@@ -904,6 +909,42 @@ describe('control tower report', () => {
     run(dir, 'scripts/devlog-report.mjs', ['--json', out]);
     const later = JSON.parse(readFileSync(out, 'utf8')).attention.filter((a: { text: string }) => a.text.includes('latest cloud session'));
     expect(later).toEqual([expect.objectContaining({ level: 'info', text: expect.stringContaining('(sion_01E, 2026-10-10) found the installed fallback hook differs') })]);
+  }, REPO_TIMEOUT);
+
+  it('flags a task id started for two pieces of work, and refuses to start a known id for something else', () => {
+    const { dir } = makeRepo();
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    // Two sessions on separate branches each took the next free id; merging brought both together.
+    writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), [
+      { ts: '2026-10-10T00:01:00Z', session: 'session_01A', event: 'Task', action: 'start', id: 'T-9', title: 'Client portal' },
+      { ts: '2026-10-10T00:02:00Z', session: 'session_01B', event: 'Task', action: 'start', id: 'T-9', title: 'Fresh container' },
+      // Finishing either piece of work does not hide that the record mixes them.
+      { ts: '2026-10-10T00:03:00Z', session: 'session_01A', event: 'Task', action: 'start', id: 'T-7', title: 'Portal' },
+      { ts: '2026-10-10T00:04:00Z', session: 'session_01B', event: 'Task', action: 'start', id: 'T-7', title: 'Setup' },
+      { ts: '2026-10-10T00:05:00Z', session: 'session_01B', event: 'Task', action: 'done', id: 'T-7', status: 'done' },
+      // Normal work: the same work started again, differing only in case and spacing, or after a rename.
+      { ts: '2026-10-10T00:06:00Z', session: 'session_01A', event: 'Task', action: 'start', id: 'T-8', title: 'Same work' },
+      { ts: '2026-10-10T00:07:00Z', session: 'session_01B', event: 'Task', action: 'start', id: 'T-8', title: 'same  Work ' },
+      { ts: '2026-10-10T00:08:00Z', session: 'session_01A', event: 'Task', action: 'start', id: 'T-6', title: 'First name' },
+      { ts: '2026-10-10T00:09:00Z', session: 'session_01A', event: 'Task', action: 'update', id: 'T-6', title: 'Better name' },
+      { ts: '2026-10-10T00:10:00Z', session: 'session_01B', event: 'Task', action: 'start', id: 'T-6', title: 'Better name' },
+    ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+    const out = path.join(dir, 'r.json');
+    expect(run(dir, 'scripts/devlog-report.mjs', ['--json', out]).status).toBe(0);
+    const attention = JSON.parse(readFileSync(out, 'utf8')).attention.filter((a: { text: string }) => a.text.includes('different pieces of work'));
+    expect(attention).toEqual([
+      { level: 'warning', text: 'T-9 was started for 2 different pieces of work (Client portal; Fresh container): its record mixes them. Give each its own id.' },
+      { level: 'info', text: 'T-7 was started for 2 different pieces of work (Portal; Setup): its record mixes them. Give each its own id.' },
+    ]);
+    const spool = () => readdirSync(path.join(dir, 'devlog/.spool')).map((f) => readFileSync(path.join(dir, 'devlog/.spool', f), 'utf8')).join('');
+    const before = spool();
+    const refused = run(dir, 'scripts/devlog-task.mjs', ['start', 'T-9', '--title', 'Something else']);
+    expect([refused.status, refused.stderr.trim()]).toEqual([1, 'T-9 is already "Fresh container". Choose a new id.']);
+    const reused = run(dir, 'scripts/devlog-task.mjs', ['start', 'T-7', '--title', 'Another thing']); // done, but still its own work
+    expect([reused.status, reused.stderr.trim()]).toEqual([1, 'T-7 is already "Setup". Choose a new id.']);
+    expect(spool()).toBe(before); // a refused start records nothing
+    expect(run(dir, 'scripts/devlog-task.mjs', ['start', 'T-8', '--title', 'SAME WORK']).status).toBe(0);
+    expect(run(dir, 'scripts/devlog-task.mjs', ['start', 'T-6', '--title', 'Better name']).status).toBe(0);
   });
 
   it('shows RM only from a configured rate, computed exactly', () => {
@@ -922,16 +963,17 @@ describe('branch and fork audit', () => {
     const { dir, git } = makeRepo();
     mkdirSync(path.join(dir, 'src'), { recursive: true });
     writeFileSync(path.join(dir, 'src/progress.ts'), read('src/progress.ts'));
-    const commit = (msg: string, date = '2026-10-10T00:00:00Z') => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', msg], { cwd: dir, env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } });
+    // Few processes: a branch is one commit-tree and one ref, and every branch goes to origin in one push.
+    const commit = (msg: string, date = '2026-10-10T00:00:00Z') => gitAt(dir, ['commit', '-q', '--allow-empty', '-m', msg], { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
     commit('base'); git('add', '-A'); commit('tooling');
     const origin = freshDir('origin-bare');
-    execFileSync('git', ['init', '-q', '--bare', origin]);
+    gitAt(dir, ['init', '-q', '--bare', origin]);
     git('remote', 'add', 'origin', origin);
-    git('push', '-q', 'origin', 'main');
-    const branch = (name: string, msg?: string, date?: string) => { git('switch', '-q', '-c', name, 'main'); if (msg) commit(msg, date); git('push', '-q', 'origin', name); git('switch', '-q', 'main'); };
+    const onMain = (msg: string, date = '2026-10-10T00:00:00Z') => gitAt(dir, ['commit-tree', 'main^{tree}', '-p', 'main', '-m', msg], { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }).trim();
+    const branch = (name: string, msg?: string, date?: string) => git('branch', name, msg ? onMain(msg, date) : 'main');
     branch('claude/phase-2-workflow', 'phase 2 work');
     branch('claude/old-default', 'old default');
-    git('merge', '-q', '--no-edit', 'claude/phase-2-workflow', 'claude/old-default'); git('push', '-q', 'origin', 'main');
+    git('merge', '-q', '--no-edit', 'claude/phase-2-workflow', 'claude/old-default');
     branch('claude/phase-9-mystery', 'phase 9?');
     branch('feature/side-project', 'unplanned', '2026-09-01T00:00:00Z');
     branch('claude/session-abc', 'task work');
@@ -943,7 +985,8 @@ describe('branch and fork audit', () => {
     branch('claude/squashed', 'squash-merged');       // its PR was squash-merged: not an ancestor of main
     branch('claude/fresh');                           // just created: no commits of its own
     branch('claude/phase-CT-console', 'control tower'); // plan id CT, upper case in the name
-    git('switch', '-q', '-c', 'local-only', 'main'); commit('never pushed'); const localSha = git('rev-parse', 'HEAD').trim(); git('switch', '-q', 'main');
+    git('push', '-q', 'origin', '--all');
+    const localSha = onMain('never pushed'); git('branch', 'local-only', localSha);
     git('fetch', '-q', '--prune', 'origin');
     const sha = (b: string) => git('rev-parse', `origin/${b}`).trim();
     const pr = (number: number, head: string, title: string, state: string, merged = false) => ({ number, head, title, state, html_url: `https://github.com/o/r/pull/${number}`, created_at: '2026-10-10T00:00:00Z', merged_at: merged ? '2026-10-10T00:00:00Z' : null, head_sha: sha(head), findings: [] });
@@ -995,7 +1038,7 @@ describe('branch and fork audit', () => {
       expect(text).toContain(want);
     }
     expect(text).not.toMatch(/can be deleted by the owner: [^;]*claude\/old-default/); // never listed for deletion before the default changes
-  });
+  }, REPO_TIMEOUT);
 
   it('runs no audit and flags nothing when the trunk cannot be found', () => {
     const { dir, report } = branchRepo();
@@ -1006,7 +1049,33 @@ describe('branch and fork audit', () => {
     expect(r.branches.error).toContain('origin/master is missing');
     expect(r.branches.branches).toEqual([]);
     expect(r.attention.map((a: { text: string }) => a.text).join('\n')).not.toContain('can be deleted');
-  });
+  }, REPO_TIMEOUT);
+
+  it('builds its repositories without the machine\'s git config, so no commit waits on a signing program', () => {
+    // Config like a cloud container's, with a signer that fails, both in a global file and passed in the
+    // environment: a commit that read either would fail outright.
+    const cfg = path.join(freshDir('gitconfig'), 'config');
+    writeFileSync(cfg, '[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n');
+    const hostile: Record<string, string> = { GIT_CONFIG_GLOBAL: cfg, GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'true', GIT_CONFIG_KEY_1: 'gpg.program', GIT_CONFIG_VALUE_1: 'false' };
+    const was = Object.fromEntries(Object.keys(hostile).map((k) => [k, process.env[k]]));
+    const signFails = (env: Record<string, string | undefined>) => {
+      const r = spawnSync('git', ['commit', '-q', '--allow-empty', '-m', 'x'], { cwd: makeRepo().dir, encoding: 'utf8', env: { ...process.env, ...env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+      return r.status !== 0 && r.stderr.includes('gpg failed to sign');
+    };
+    Object.assign(process.env, hostile);
+    try {
+      // Each source bites on its own, without the tests' own git environment.
+      expect(signFails({ GIT_CONFIG_COUNT: '0' })).toBe(true);
+      expect(signFails({ GIT_CONFIG_GLOBAL: devNull })).toBe(true);
+      const dir = makeRepo().dir;
+      gitAt(dir, ['commit', '-q', '--allow-empty', '-m', 'x']); // the path every other test commits through
+      expect(gitAt(dir, ['log', '--format=%G?']).trim()).toBe('N'); // not signed
+      const { report } = branchRepo();
+      expect(report().branches.branches).toHaveLength(14);
+    } finally {
+      for (const [k, v] of Object.entries(was)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }, REPO_TIMEOUT);
 
   it('keeps a branch name out of git when it holds a long number', () => {
     const { dir } = makeRepo();
@@ -1015,5 +1084,233 @@ describe('branch and fork audit', () => {
     run(dir, 'scripts/devlog-flush.mjs', []);
     const out = readdirSync(path.join(dir, 'devlog/activity')).map((f) => readFileSync(path.join(dir, 'devlog/activity', f), 'utf8')).join('');
     expect(out).not.toContain('60123456789');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Audit and playback (the D3ngineering blueprint applied here): a decisions register, a tamper-evident activity log,
+// health that never reads green on what it cannot see, and a playback of every recorded step.
+describe('audit and playback', () => {
+  const report = (dir: string) => {
+    const out = path.join(dir, 'r.json');
+    expect(run(dir, 'scripts/devlog-report.mjs', ['--json', out]).status).toBe(0);
+    return JSON.parse(readFileSync(out, 'utf8'));
+  };
+
+  it('records an owner decision in an append-only register, with the day it was made, and refuses a day that is not real or still to come', () => {
+    const { dir } = makeRepo();
+    const ok = run(dir, 'scripts/devlog-task.mjs', ['decision', '--title', 'Keep #46 and close #47', '--on', '2026-10-11', '--ref', '#46']);
+    expect(ok.stdout).toMatch(/Recorded DEC-\d{8}-[0-9a-f]{4}\./);
+    // Up to a day ahead of UTC is today somewhere (Kuala Lumpur, before 08:00); later than that is refused.
+    const tomorrow = new Date(Date.now() + 864e5).toISOString().slice(0, 10);
+    const later = new Date(Date.now() + 3 * 864e5).toISOString().slice(0, 10);
+    expect(run(dir, 'scripts/devlog-task.mjs', ['decision', '--title', 'Made this morning in Kuala Lumpur', '--on', tomorrow]).status).toBe(0);
+    expect(run(dir, 'scripts/devlog-task.mjs', ['decision', '--title', 'Not yet made', '--on', later]).status).toBe(1);
+    for (const bad of [['decision', '--on', '2026-10-11'], ['decision', '--title', 'x', '--on', '2026-02-30'], ['decision', '--title', 'x', '--on', '2999-01-01'], ['decision', '--title', 'x', '--colour', 'red']]) {
+      expect(run(dir, 'scripts/devlog-task.mjs', bad).status, bad.join(' ')).toBe(1);
+    }
+    expect(run(dir, 'scripts/devlog-flush.mjs', []).status).toBe(0);
+    const r = report(dir);
+    const kept = r.decisions.find((x: { title: string }) => x.title === 'Keep #46 and close #47');
+    expect(kept).toMatchObject({ on: '2026-10-11', by: 'owner', ref: '#46' });
+    expect(kept.id).toMatch(/^DEC-\d{8}-[0-9a-f]{4}$/);
+    expect(r.decisions).toHaveLength(2);
+    expect(r.timeline.filter((x: { k: string }) => x.k === 'decision')).toHaveLength(2);
+  });
+
+  it('keeps only known fields of a decision when flushing, and drops one with no title or a malformed id', () => {
+    const { dir } = makeRepo();
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    const lines = [
+      { ts: '2026-10-10T00:00:00Z', session: 's', event: 'Decision', id: 'DEC-20261010-abcd', on: '2026-10-09', title: 'Agent leg skips the gate', by: 'owner', note: 'dropped' },
+      { ts: '2026-10-10T00:00:01Z', session: 's', event: 'Decision', id: 'DEC-1', on: '2026-10-09', title: 'Bad id' },
+      { ts: '2026-10-10T00:00:02Z', session: 's', event: 'Decision', id: 'DEC-20261010-abce', on: '2026-10-09' },
+    ];
+    writeFileSync(path.join(dir, 'devlog/.spool/s.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    expect(run(dir, 'scripts/devlog-flush.mjs', []).status).toBe(0);
+    const out = readdirSync(path.join(dir, 'devlog/activity')).map((f) => readFileSync(path.join(dir, 'devlog/activity', f), 'utf8')).join('');
+    expect(out.trim().split('\n').map((l) => JSON.parse(l))).toEqual([{ ts: '2026-10-10T00:00:00.000Z', session: 's', event: 'Decision', id: 'DEC-20261010-abcd', on: '2026-10-09', title: 'Agent leg skips the gate', by: 'owner' }]);
+  });
+
+  it('flags an activity file changed or deleted after it was committed, accepts a change only at the exact content a recorded decision accepted, and is unavailable without git', () => {
+    const { dir, git } = makeRepo();
+    const act = (name: string, body: string) => { mkdirSync(path.join(dir, 'devlog/activity'), { recursive: true }); writeFileSync(path.join(dir, 'devlog/activity', name), body); };
+    act('a.jsonl', '{"x":1}\n'); act('b.jsonl', '{"x":2}\n');
+    git('add', '-A'); git('commit', '-q', '-m', 'log');
+    act('c.jsonl', '{"x":3}\n'); // not committed yet: new, not a failure
+    let r = report(dir);
+    expect(r.health.integrity).toMatchObject({ state: 'green', checked: 2, changed: [], deleted: [], pending: 1 });
+    act('a.jsonl', '{"x":"edited"}\n'); // an edit, even uncommitted, is caught
+    git('add', '-A'); git('commit', '-q', '-m', 'edit the log'); // and committing it does not hide it
+    rmSync(path.join(dir, 'devlog/activity/b.jsonl'));
+    r = report(dir);
+    expect(r.health.integrity).toMatchObject({ state: 'red', changed: ['devlog/activity/a.jsonl'], deleted: ['devlog/activity/b.jsonl'] });
+    expect(r.health.checks.find((c: { name: string }) => c.name === 'Activity log integrity').state).toBe('red');
+    expect(r.health.overall).toBe('red');
+    // Accepted by a decision, at the exact content now there: listed as accepted, no longer a failure.
+    const blob = gitAt(dir, ['hash-object', 'devlog/activity/a.jsonl']).trim();
+    const accept = (a: Record<string, unknown>) => {
+      const cfg = JSON.parse(readFileSync(path.join(dir, 'devlog/control-tower.json'), 'utf8'));
+      cfg.integrity = { acceptedChanges: a };
+      writeFileSync(path.join(dir, 'devlog/control-tower.json'), JSON.stringify(cfg));
+    };
+    // An id shaped like a decision is not enough: it must be in the register (lesson L-024).
+    accept({ 'devlog/activity/a.jsonl': { blob, decision: 'DEC-20261011-0a0a' }, 'devlog/activity/b.jsonl': { blob: null, decision: 'DEC-20261011-0a0b' } });
+    expect(report(dir).health.integrity).toMatchObject({ state: 'red', changed: ['devlog/activity/a.jsonl'], deleted: ['devlog/activity/b.jsonl'] });
+    const decide = (title: string) => /Recorded (DEC-\d{8}-[0-9a-f]{4})\./.exec(run(dir, 'scripts/devlog-task.mjs', ['decision', '--title', title, '--on', '2026-10-11', '--ref', 'audit']).stdout)![1]!;
+    const d1 = decide('Accept the edit to a.jsonl'); const d2 = decide('Accept the removal of b.jsonl');
+    accept({ 'devlog/activity/a.jsonl': { blob, decision: d1 }, 'devlog/activity/b.jsonl': { blob: null, decision: d2 } });
+    r = report(dir);
+    expect(r.health.integrity).toMatchObject({ state: 'green', changed: [], deleted: [] });
+    expect(r.health.integrity.accepted).toEqual([
+      { file: 'devlog/activity/a.jsonl', decision: d1, title: 'Accept the edit to a.jsonl', on: '2026-10-11', ref: 'audit', deleted: false },
+      { file: 'devlog/activity/b.jsonl', decision: d2, title: 'Accept the removal of b.jsonl', on: '2026-10-11', ref: 'audit', deleted: true },
+    ]);
+    act('a.jsonl', '{"x":"edited again"}\n'); // a later edit is not covered by the earlier acceptance
+    expect(report(dir).health.integrity.changed).toEqual(['devlog/activity/a.jsonl']);
+    accept({ 'devlog/activity/a.jsonl': { blob: gitAt(dir, ['hash-object', 'devlog/activity/a.jsonl']).trim() } }); // no decision cited
+    expect(report(dir).health.integrity.changed).toEqual(['devlog/activity/a.jsonl']);
+    rmSync(path.join(dir, '.git'), { recursive: true, force: true });
+    expect(report(dir).health.integrity.state).toBe('unavailable');
+  }, REPO_TIMEOUT);
+
+  it('checks a file first committed while resolving a merge, like any other', () => {
+    const { dir, git } = makeRepo();
+    mkdirSync(path.join(dir, 'devlog/activity'), { recursive: true });
+    writeFileSync(path.join(dir, 'base'), '1'); git('add', '-A'); git('commit', '-q', '-m', 'base');
+    git('checkout', '-q', '-b', 'side'); writeFileSync(path.join(dir, 'side'), '1'); git('add', '-A'); git('commit', '-q', '-m', 'side');
+    git('checkout', '-q', 'main'); writeFileSync(path.join(dir, 'main'), '1'); git('add', '-A'); git('commit', '-q', '-m', 'main');
+    git('merge', '-q', '--no-commit', 'side');
+    writeFileSync(path.join(dir, 'devlog/activity/m.jsonl'), '{"x":1}\n'); // added in the merge itself
+    git('add', '-A'); git('commit', '-q', '-m', 'merge side');
+    expect(report(dir).health.integrity).toMatchObject({ state: 'green', checked: 1, pending: 0 });
+    writeFileSync(path.join(dir, 'devlog/activity/m.jsonl'), '{"x":"edited"}\n');
+    git('add', '-A'); git('commit', '-q', '-m', 'edit');
+    expect(report(dir).health.integrity).toMatchObject({ state: 'red', changed: ['devlog/activity/m.jsonl'] });
+  }, REPO_TIMEOUT);
+
+  it('finds every real key format in a file, and cannot scan without git', () => {
+    const dir = freshDir();
+    gitAt(dir, ['init', '-q', '-b', 'main']);
+    // One planted key per format, each built at run time from fake parts (lesson L-015).
+    const keys = [fake('sk', '_live_', 'A'.repeat(12)), fake('xox', 'b-', '1234567-'), fake('A', 'C', 'a'.repeat(32)), fake('gh', 'p_', 'B'.repeat(32)), fake('AK', 'IA', 'C'.repeat(16))];
+    keys.forEach((k, i) => writeFileSync(path.join(dir, `k${i}.txt`), `x ${k} x\n`));
+    expect(secretHits(dir).map((h: string) => h.split(':')[0]).sort()).toEqual(keys.map((_, i) => `k${i}.txt`));
+    expect(secretHits(freshDir())).toBeNull();
+  });
+
+  it('judges the tests only by a run from the last day, says it may be of any scope, and calls a helper agent of a quiet session unknown, not stalled', () => {
+    const { dir } = makeRepo();
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    const ago = (h: number) => new Date(Date.now() - h * 36e5).toISOString();
+    const write = (lines: object[]) => writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), lines.map((l) => JSON.stringify({ session: 'session_01A', ...l })).join('\n') + '\n');
+    const check = (name: string) => report(dir).health.checks.find((c: { name: string }) => c.name === name);
+    write([{ ts: ago(30), event: 'PostToolUse', tool: 'Bash', target: 'Run tests', kind: 'test' }]);
+    expect(check('Tests')).toMatchObject({ state: 'unavailable' }); // passed, but more than a day ago
+    write([{ ts: ago(1), event: 'PostToolUseFailure', tool: 'Bash', target: 'Run tests', kind: 'test', failure: 'exit 1' }]);
+    expect(check('Tests')).toMatchObject({ state: 'amber' });
+    expect(check('Tests').detail).toContain('of any scope');
+    // A helper agent started 8 hours ago with no end: stalled while its session is active, unknown once it went quiet.
+    const agent = [{ ts: ago(8), event: 'SubagentStart', agentId: 'agent1', agentType: 'review' }];
+    write([...agent, { ts: ago(0.1), event: 'PostToolUse', tool: 'Read', target: 'x' }]);
+    expect(check('Stalled agents').state).toBe('amber');
+    write([...agent, { ts: ago(7), event: 'PostToolUse', tool: 'Read', target: 'x' }]);
+    expect(check('Stalled agents')).toMatchObject({ state: 'green' });
+    expect(check('Stalled agents').detail).toContain('cannot be judged');
+  }, REPO_TIMEOUT);
+
+  it('never calls health green while a check is unavailable, and leaves checks for what is not built out of it', async () => {
+    // @ts-expect-error a plain ES module with no type declarations
+    const { overallHealth } = await import('../scripts/devlog-report.mjs');
+    const c = (state: string) => ({ name: state, state, detail: '' });
+    expect(overallHealth([c('green'), c('green')])).toBe('green');
+    expect(overallHealth([c('green'), c('unavailable')])).toBe('amber');
+    expect(overallHealth([c('green'), c('amber'), c('red')])).toBe('red');
+    expect(overallHealth([c('green'), c('off')])).toBe('green');
+    expect(overallHealth([c('off')])).toBe('unavailable');
+    expect(overallHealth([c('green'), c('something new')])).toBe('amber');
+  });
+
+  it('counts each phase\'s exit criteria and open items as written in progress.ts, brackets and quotes inside the text included', async () => {
+    // @ts-expect-error a plain ES module with no type declarations
+    const { planProgress } = await import('../scripts/devlog-report.mjs');
+    const dir = freshDir();
+    mkdirSync(path.join(dir, 'src'));
+    writeFileSync(path.join(dir, 'src/progress.ts'), `export const PHASES = [
+  {
+    id: '1', name: 'Journey, QA And Audit', status: 'in_progress',
+    criteria: [
+      { text: 'A [bracket] and a \\'quote\\'', state: 'met', proof: 'fakes' },
+      { text: "It's partly", state: 'partly', proof: 'tests' },
+      notMet('Not yet'),
+    ], open: ['One with ] inside', "Two's", \`Three\`],
+  },
+  {
+    id: 'CT', name: 'Control Tower', status: 'in_progress',
+    criteria: [],
+    open: [],
+  },
+];
+export const QUESTIONS = ['Not an open item', 'Nor this'];
+`);
+    expect(planProgress(dir)).toEqual([
+      { id: '1', name: 'Journey, QA and audit', status: 'in_progress', met: 1, partly: 1, notMet: 1, fakes: 1, open: 3 },
+      { id: 'CT', name: 'Control Tower', status: 'in_progress', met: 0, partly: 0, notMet: 0, fakes: 0, open: 0 },
+    ]);
+    expect(planProgress(freshDir())).toEqual([]);
+  });
+
+  it('plays back every recorded step in order, never its content: owner messages, actions and how they ended, commits, merges, tasks, incidents and decisions', () => {
+    const { dir, git } = makeRepo();
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    const ev = (o: object) => JSON.stringify({ session: 'session_01A', ...o });
+    writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), [
+      ev({ ts: '2026-10-10T00:00:00Z', event: 'SessionStart', source: 'startup', branch: 'claude/phase-1-x' }),
+      ev({ ts: '2026-10-10T00:00:01Z', event: 'UserPromptSubmit', prompt: 'PRIVATE owner words' }),
+      ev({ ts: '2026-10-10T00:00:02Z', event: 'PostToolUse', tool: 'Bash', target: 'Run the tests', kind: 'test' }),
+      ev({ ts: '2026-10-10T00:00:03Z', event: 'PostToolUseFailure', tool: 'Edit', target: 'src/a.ts', failure: 'exit 1', error: 'PRIVATE error text' }),
+      ev({ ts: '2026-10-10T00:00:04Z', event: 'Task', action: 'start', id: 'T-1', title: 'Build it', status: 'in_progress' }),
+      ev({ ts: '2026-10-10T00:00:05Z', event: 'Incident', id: 'INC-20261010-0001', type: 'process', severity: 'low', title: 'Stale', task: 'T-1' }),
+      ev({ ts: '2026-10-10T00:00:06Z', event: 'Decision', id: 'DEC-20261010-0001', on: '2026-10-10', title: 'Owner merges', task: 'T-1' }),
+    ].join('\n') + '\n');
+    writeFileSync(path.join(dir, 'f'), 'x'); git('add', '-A');
+    gitAt(dir, ['commit', '-q', '-m', 'Do the work\n\nClaude-Session: https://claude.ai/code/session_01A'], { GIT_AUTHOR_DATE: '2026-10-10T00:00:07Z', GIT_COMMITTER_DATE: '2026-10-10T00:00:07Z' });
+    writeFileSync(path.join(dir, 'prs.json'), JSON.stringify([
+      { number: 7, title: 'Phase 1: x', state: 'closed', html_url: 'https://github.com/o/r/pull/7', created_at: '2026-10-10T00:00:00Z', merged_at: '2026-10-10T00:00:08Z', findings: [] },
+      { number: 8, title: 'Phase 1: y', state: 'closed', html_url: 'https://github.com/o/r/pull/8', created_at: '2026-10-10T00:00:00Z', merged_at: 'not a date', findings: [] }, // left out, never fatal (L-006)
+    ]));
+    const out = path.join(dir, 'r.json');
+    expect(run(dir, 'scripts/devlog-report.mjs', ['--prs', path.join(dir, 'prs.json'), '--json', out]).status).toBe(0);
+    const r = JSON.parse(readFileSync(out, 'utf8'));
+    const s = r.timelineSessions.findIndex((x: { id: string }) => x.id === 'session_01A');
+    expect(r.timeline.map((x: { k: string; s: number; ok?: boolean }) => [x.k, x.s, x.ok])).toEqual([
+      ['start', s, undefined], ['prompt', s, undefined], ['test', s, true], ['tool', s, false], ['task', s, undefined],
+      ['incident', s, undefined], ['decision', s, undefined], ['commit', s, undefined], ['merge', -1, undefined],
+    ]);
+    expect(r.timeline[3]).toMatchObject({ d: 'Edit src/a.ts', f: 'exit 1' });
+    expect(r.timeline.filter((x: { t?: string }) => x.t === 'T-1').map((x: { k: string }) => x.k)).toEqual(['task', 'incident', 'decision']);
+    expect(JSON.stringify(r.timeline)).not.toContain('PRIVATE');
+  }, REPO_TIMEOUT);
+
+  it('estimates the saving from model routing exactly, against the baseline model, and gives none when a model has no price', () => {
+    const tokens = { 'claude-sonnet-5-5': { messages: 1, input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 } };
+    const setup = (dir: string, t: object) => {
+      mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+      writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), JSON.stringify({ ts: '2026-10-10T00:00:00Z', session: 'session_01A', event: 'Usage', costUSD: '12.00000000', costBasis: 'checkpoint+since', tokens: t }) + '\n');
+    };
+    const priced = makeRepo((c) => { c.pricing.perMTokUSD = { 'claude-opus-5-5': { input: '4', output: '20', cacheRead: '0.2', cacheWrite5m: '5', cacheWrite1h: '8' }, 'claude-sonnet-5-5': { input: '2', output: '10', cacheRead: '0.2', cacheWrite5m: '2.5', cacheWrite1h: '4' } }; c.costEstimate = { baselineModel: 'claude-opus-5-5' }; });
+    setup(priced.dir, tokens);
+    // Worked by hand: Sonnet 1M in x $2 + 1M out x $10 = $12; at Opus prices $4 + $20 = $24; saving $12, half.
+    expect(report(priced.dir).economics.routingSaving).toEqual({ baseline: 'claude-opus-5-5', allBaseline: { usd: '24.00000000' }, actual: { usd: '12.00000000' }, saving: { usd: '12.00000000' }, share: 50 });
+    const unpriced = makeRepo((c) => { c.costEstimate = { baselineModel: 'claude-opus-5-5' }; });
+    setup(unpriced.dir, { 'claude-unknown-9': tokens['claude-sonnet-5-5'] });
+    expect(report(unpriced.dir).economics.routingSaving).toBeNull();
+  }, REPO_TIMEOUT);
+
+  it('builds the dashboard with the Daythree tokens and every element through the DOM, never from markup', () => {
+    const template = read('devlog/dashboard.html');
+    expect(template).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
+    for (const token of ['--d3-purple: #5D3FD3', '--d3-red: #C8102E', '--ink-muted: #6B6C70', '"Source Sans 3"']) expect(template).toContain(token);
+    expect(template).not.toMatch(/text-transform:\s*(uppercase|capitalize)/); // sentence case only
   });
 });

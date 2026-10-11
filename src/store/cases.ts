@@ -514,6 +514,36 @@ export async function recordPromise(c: pg.PoolClient, actorId: string | null, ca
   return { id: p.id as string };
 }
 
+/**
+ * A promise the person made on a live call, recorded on the call's case in the same step that ends the call's run. It
+ * falls due the given days from today in the case's own time zone. It passes the same checks as one entered by a person
+ * (an open case, not more than the balance, one open promise at a time); one the checks refuse is recorded on the case
+ * with the reason, and never fails the step it comes from (L-006).
+ */
+export async function recordPromiseFromCall(c: pg.PoolClient, e: { callId: string; runId: string; amount: string; days?: number; weekday?: number }, now = new Date()) {
+  const caseId = (await c.query('SELECT case_id FROM calls WHERE id = $1', [e.callId])).rows[0]?.case_id as string | undefined;
+  if (!caseId) return null;
+  await c.query('SAVEPOINT workflow_promise');
+  try {
+    const cs = await caseRow(c, caseId);
+    // One clock for "today": the same moment works out the date and is checked against it.
+    const local = localParts(now, cs.time_zone);
+    // The next such weekday, never today: "Friday" said on a Friday means next Friday (owner's decision, 2026-10-11).
+    const days = e.weekday !== undefined ? ((e.weekday - local.dow + 6) % 7) + 1 : e.days ?? 0;
+    const parsed = promiseSchema.safeParse({ amount: e.amount, dueOn: addDays(local.date, days) });
+    if (!parsed.success) throw new AppError(400, 'The amount from the call is not an exact amount.');
+    if (toScaled(parsed.data.amount) <= 0n) throw new AppError(400, 'A promise is for an amount above nothing.');
+    const r = await recordPromise(c, null, caseId, parsed.data, now);
+    await c.query('RELEASE SAVEPOINT workflow_promise');
+    return r;
+  } catch (err) {
+    await c.query('ROLLBACK TO SAVEPOINT workflow_promise');
+    const reason = err instanceof AppError ? err.message : 'The promise could not be recorded.';
+    await event(c, caseId, 'promise.not_recorded', { run: e.runId, source: 'workflow', reason });
+    return null;
+  }
+}
+
 const paidOf = (r: Json): string | null => {
   const v = r && typeof r === 'object' && !Array.isArray(r) && Object.hasOwn(r, 'paid') ? (r as Record<string, Json>).paid : null;
   const t = typeof v === 'number' ? null : typeof v === 'string' ? v.trim() : null;   // a number would be a float: only an exact decimal string is taken

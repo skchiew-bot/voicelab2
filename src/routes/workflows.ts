@@ -12,6 +12,8 @@ import { AppError } from '../errors.js';
 
 interface Ctx {
   pool: pg.Pool; key: Buffer; runDeps: RunDeps;
+  /** Who may put a flow live in production without an approved change (the owner's PRODUCTION_DEPLOYERS). */
+  productionDeployers: readonly string[];
   internal(req: FastifyRequest): Promise<{ userId: string; actor: Actor }>;
 }
 
@@ -27,6 +29,7 @@ export const scenario = z.object({
   expect: z.object({
     outcome: z.string().optional(), says: z.array(z.string()).optional(),
     doesNotSay: z.array(z.string()).optional(), handoff: z.string().optional(), contact: z.enum([...CONTACT_OUTCOMES, 'none']).optional(),
+    callback: z.union([z.literal('none'), z.object({ day: z.number().int().min(0).max(6), hour: z.number().int().min(0).max(23) })]).optional(),
   }).optional(),
 });
 
@@ -71,12 +74,12 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: Ctx): void {
   app.post('/internal/workflows/:workflowId/deploy', async (req, reply) => {
     const { workflowId } = z.object({ workflowId: id }).parse(req.params);
     const body = z.object({ versionId: id, environment }).parse(req.body);
-    return reply.status(201).send(await run(req, (c, u) => wf.deploy(c, u, workflowId, body)));
+    return reply.status(201).send(await run(req, (c, u) => wf.deploy(c, u, workflowId, body, { by: 'person', deployers: ctx.productionDeployers })));
   });
   app.post('/internal/workflows/:workflowId/rollback', async (req, reply) => {
     const { workflowId } = z.object({ workflowId: id }).parse(req.params);
     const body = z.object({ environment }).parse(req.body);
-    return reply.status(201).send(await run(req, (c, u) => wf.rollback(c, u, workflowId, body.environment)));
+    return reply.status(201).send(await run(req, (c, u) => wf.rollback(c, u, workflowId, body.environment, { by: 'person', deployers: ctx.productionDeployers })));
   });
   app.get('/internal/workflows/:workflowId/deployments', async (req) => {
     const { workflowId } = z.object({ workflowId: id }).parse(req.params);

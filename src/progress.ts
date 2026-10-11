@@ -74,7 +74,7 @@ export const PHASES: PhaseProgress[] = [
       'Recordings and live speech are sent to a call through Twilio\'s speech relay (recordings by a signed, short-lived link), but only to a fake relay so far, so the seams between them are still unheard',
       "A call's cost record now carries the characters the relay synthesised, priced; the stitching saving on the Stitching screen is still worked out from runs, not from cost records",
       'DID failures are detected only from the SIP code that ends a dial (607 and 608, from Telnyx\'s sip_hangup_cause and Twilio\'s SipResponseCode, the latter assumed); a number marked as spam by a carrier\'s app without a SIP rejection, or a contact who keeps declining, is not detected',
-      'A workflow records how an outbound call turned out at the end it finishes at, tested only against fakes; it does not yet capture a callback time asked for on the call',
+      'A workflow records how an outbound call turned out, and the callback time the person asked for, at the end it finishes at; tested only against fakes, and a time is understood only through the workflow\'s phrase rules',
     ],
   },
   {
@@ -138,7 +138,7 @@ export const PHASES: PhaseProgress[] = [
       'Case management has been tested only against fakes: the lookup of a number to dial at the moment of a call, and the client\'s payment-status system, are stand-ins; no client system is connected',
       'Messages on other channels (WhatsApp, SMS, email) are not sent by the platform: case and appointment messages are queued for the client\'s own sender (`/internal/tenants/:id/case-outbox`, `/internal/tenants/:id/notifications`), and no provider for them exists',
       'The dispatcher, the payment check, the ageing sweep and the appointment reminders run as scheduled jobs (every minute, hourly, daily and every 15 minutes); a callback is placed within its agreed lateness only if the dispatcher runs at least that often, so its interval should stay at a minute',
-      'Promises are recorded through the API; a workflow does not yet record one from what a caller says on a call',
+      'A workflow records a promise to pay on the call\'s case, for an amount a variable already holds (such as the balance) and a day the answer maps to (a number of days, or the next such weekday, never today, in the case\'s time zone); tested against fakes, and a spoken amount ("I can pay 200") is not understood',
       'Quiet hours and contact limits apply to every dial only for a client with a contact policy; a client without one has no limits. The daily and weekly limits are rolling 24 hours and 7 days, not calendar days in the contact\'s zone',
       'It is assumed, not checked against a real system, that the client\'s payment-status integration reports the total paid since the case was opened, as an exact decimal string; a total that goes down is ignored and logged each time it is seen',
       'The keyed hash of every inbound caller\'s number is now kept on the call, whether or not they have a case',

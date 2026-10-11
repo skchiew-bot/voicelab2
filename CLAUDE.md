@@ -29,7 +29,7 @@ The owner watches how Claude Code builds Voice Lab through the **dev Control Tow
 
 ## Commands
 
-- `npm test` runs unit and database tests (needs local Postgres; each test file gets a throwaway database). In the cloud container Postgres can be stopped after a restart: `pg_ctlcluster 16 main start`, and if every database test fails with ECONNREFUSED, that is why.
+- `npm test` runs unit and database tests (needs local Postgres; each test file gets a throwaway database, and `tests/global-setup.ts` migrates one scratch database first so the files never race to create the cluster-wide roles). In a cloud session, `.claude/hooks/session-start.sh` runs at every session start: it starts Postgres when it is down (it stops after a restart), and creates the `voicelab` test role and installs the dependencies when they are missing. If database tests fail with ECONNREFUSED or a password error, run `CLAUDE_CODE_REMOTE=true .claude/hooks/session-start.sh`.
 - `npm run typecheck` checks the API and the admin UI. Run both before pushing.
 - `npm run build:admin` builds the admin UI (`admin/`, Vite + React) that the API serves at `/admin/`. `tests/admin-ui.test.ts` drives it in Chromium and is skipped where none is installed (`CHROMIUM_PATH`).
 - `npm run migrate` applies `migrations/*.sql`. Migrations are append-only: add a new file, never edit an applied one.

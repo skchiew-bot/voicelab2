@@ -15,7 +15,7 @@ let env: Env; let browser: Browser; let base: string;
 beforeAll(async () => {
   if (!run) return;
   // The API serves admin/dist only if it exists when the app is built.
-  execSync('npm run -s build:admin', { stdio: 'pipe' });
+  execSync('npm run -s build:admin && npm run -s build:portal', { stdio: 'pipe' });
   const { setupDb } = await import('./helpers.js');
   env = await setupDb();
   await env.app.listen({ port: 0, host: '127.0.0.1' });
@@ -1106,6 +1106,56 @@ describe.skipIf(!run)('admin UI', () => {
     await page.getByLabel('Show').selectOption({ label: 'Platform and scheduled jobs' });
     await expect(page.getByLabel('Changes')).toContainText('Paused while the dialler is checked.');
     await page.close();
+  }, 60_000);
+
+  it('gives a client its own portal: credits and calls for everyone, users for its admins, and a sign-in apart from the console', async () => {
+    const t = (await env.call(env.staffToken, 'POST', '/internal/tenants', { name: 'Portal Co' })).json().id as string;
+    expect((await env.call(env.staffToken, 'POST', `/internal/tenants/${t}/credits`, { kind: 'grant', credits: '1250.5' })).statusCode).toBe(201);
+    const admin = (await env.call(env.staffToken, 'POST', `/internal/tenants/${t}/users`, { email: 'boss@portal.test', role: 'tenant_admin' })).json();
+    const user = (await env.call(env.staffToken, 'POST', `/internal/tenants/${t}/users`, { email: 'agent@portal.test', role: 'tenant_user' })).json();
+    expect(admin.token && user.token).toBeTruthy();
+    const ctx = await browser.newContext({ viewport: { width: 1200, height: 900 } });
+    const page = await ctx.newPage();
+    // A staff token is not a client: the portal refuses it.
+    await page.goto(`${base.replace('/admin/', '/portal/')}`);
+    await page.getByLabel('API token').fill(env.staffToken);
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await expect(page.getByText('Client access only.')).toBeVisible();
+    await page.getByLabel('API token').fill(admin.token);
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await expect(page.getByRole('navigation')).toContainText('Portal Co');
+    await expect(page.getByLabel('Balance')).toContainText('1,250.5');
+    await page.getByRole('link', { name: 'Calls', exact: true }).click();
+    await expect(page.getByText('No calls yet.')).toBeVisible();
+    await page.getByRole('link', { name: 'Users', exact: true }).click();
+    const form = page.getByLabel('Add a user');
+    await form.getByLabel(/^Email/).fill('new@portal.test');
+    await form.getByRole('button', { name: 'Add' }).click();
+    await expect(page.getByRole('status')).toContainText('API token for new@portal.test');
+    page.once('dialog', (d) => d.accept());
+    const row = page.getByLabel('Users').getByRole('row').filter({ hasText: 'new@portal.test' });
+    await row.getByRole('button', { name: 'Disable' }).click();
+    await expect(row).toContainText('Disabled');
+    // The console, opened in the same tab, keeps its own sign-in: going back to the portal finds the client still signed in.
+    await signIn(page, env.staffToken);
+    await expect(page.getByRole('heading', { name: 'Control Tower', level: 1 })).toBeVisible();
+    await page.goto(`${base.replace('/admin/', '/portal/')}`);
+    await expect(page.getByRole('navigation')).toContainText('Portal Co');
+    // A client user sees credits and calls, and no users screen.
+    const userPage = await (await browser.newContext()).newPage();
+    await userPage.goto(`${base.replace('/admin/', '/portal/')}`);
+    await userPage.getByLabel('API token').fill(user.token);
+    await userPage.getByRole('button', { name: 'Sign in' }).click();
+    await expect(userPage.getByRole('navigation')).toContainText('agent@portal.test · User');
+    await expect(userPage.getByRole('link', { name: 'Users', exact: true })).toHaveCount(0);
+    await expect(userPage.getByText(/^As of /)).toBeVisible(); // the overview says when its numbers are from
+    // Disabled while signed in: the next screen goes back to sign-in, instead of failing on every screen.
+    expect((await env.call(env.staffToken, 'POST', `/internal/users/${user.id}/disable`)).statusCode).toBe(200);
+    await userPage.getByRole('link', { name: 'Calls', exact: true }).click();
+    await expect(userPage.getByLabel('API token')).toBeVisible();
+    await expect(userPage.getByText('No calls yet.')).toHaveCount(0);
+    await userPage.context().close();
+    await ctx.close();
   }, 60_000);
 
   it('keeps the signed-in session across a reload', async () => {

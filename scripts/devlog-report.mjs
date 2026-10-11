@@ -455,6 +455,16 @@ export function build(opts = {}) {
   for (const n of areas.governance.unreviewedMerged) attention.push({ level: 'info', text: `PR #${n} was merged with no independent review recorded.` });
   for (const p of prs.filter((x) => x.state === 'open')) attention.push({ level: 'info', text: `PR #${p.number} is open: ${p.title}.` });
   for (const s of starts.filter((x) => x.behind_main > 0).slice(0, 5)) attention.push({ level: 'info', text: `A session started ${s.behind_main} commits behind main on ${s.ts.slice(0, 10)}.` });
+  // Lesson L-020: sessions opened outside the repository (once each), and whether the latest cloud
+  // session start found the fallback hook that logs them in place.
+  const outside = new Map();
+  for (const s of starts.filter((x) => x.via === 'fallback')) if (!outside.has(s.session)) outside.set(s.session, s);
+  for (const s of [...outside.values()].slice(0, 5)) attention.push({ level: 'info', text: `Session ${s.session.slice(-8)} was opened outside the repository on ${s.ts.slice(0, 10)}; the fallback hook logged it (lesson L-020).` });
+  const checked = starts.find((x) => x.fallback);
+  const when = checked ? `(${checked.session.slice(-8)}, ${checked.ts.slice(0, 10)})` : '';
+  if (checked?.fallback === 'missing') attention.push({ level: 'warning', text: `The latest cloud session ${when} found the fallback hook missing, so a session opened outside the repository would not be logged. Add \`node /home/user/voicelab2/scripts/install-devlog-fallback.mjs || true\` to the cloud environment's setup script (lesson L-020).` });
+  if (checked?.fallback === 'unreadable') attention.push({ level: 'warning', text: `The latest cloud session ${when} could not read the user settings file, so the fallback hook could not be checked (lesson L-020).` });
+  if (checked?.fallback === 'outdated') attention.push({ level: 'info', text: `The latest cloud session ${when} found the installed fallback hook differs from its branch's. It still logs, and is refreshed when the environment's setup script next runs (lesson L-020).` });
   for (const g of areas.governance.loggingGaps) attention.push({ level: 'warning', text: `Session ${g.session.slice(-8)} made ${g.commits} commit(s) while not being logged${g.lastLogged ? ` (last logged ${g.lastLogged.slice(0, 16).replace('T', ' ')} UTC)` : ''}. Its hooks were not running.` });
   // Branch findings, summarised so a repository with many branches stays readable.
   const capped = (list, max = 8) => (list.length > max ? `${list.slice(0, max).join(', ')} and ${list.length - max} more` : list.join(', '));

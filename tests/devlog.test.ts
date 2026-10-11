@@ -47,6 +47,16 @@ describe('lessons register', () => {
     });
   });
 
+  it('gives each lesson one Seen, one Rule and one Guards line, so a merge cannot leave a lesson written twice', () => {
+    for (const l of lessons) {
+      for (const label of ['Seen', 'Rule', 'Guards']) {
+        expect(l.body.split(`**${label}:**`).length - 1, `${l.id} has ${label} more than once`).toBe(1);
+      }
+      const sentences = (/^- \*\*Seen:\*\* (.*)$/m.exec(l.body)?.[1] ?? '').split(/(?<=\.) (?=[A-Z])/).filter((x) => x.length > 40);
+      expect(sentences.length, `${l.id} repeats a sentence in its Seen line`).toBe(new Set(sentences).size);
+    }
+  });
+
   it('keeps every guard in place: each named file exists and still contains the text', () => {
     for (const l of lessons) {
       for (const g of l.guards) {

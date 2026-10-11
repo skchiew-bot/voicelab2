@@ -119,10 +119,11 @@ if (invoked && invoked === pathToFileURL(realpathSync(fileURLToPath(import.meta.
     } else {
       const event = eventFor(argv);
       if (event.action === 'start') {
-        // One id, one piece of work: refuse an id this checkout already has for something else.
-        const { buildBoard } = await import('./devlog-report.mjs');
+        // One id, one piece of work, even once that work is done: refuse an id this branch already has for something
+        // else. Ids on other unmerged branches cannot be seen from here; the report flags those once they meet.
+        const { buildBoard, sameWork } = await import('./devlog-report.mjs');
         const had = buildBoard().find((t) => t.id === event.id);
-        if (had && had.title && had.title !== event.title) throw new UsageError(`${event.id} is already "${had.title}". Choose a new id.`);
+        if (had?.title && !sameWork(had.title, event.title)) throw new UsageError(`${event.id} is already "${had.title}". Choose a new id.`);
       }
       append(event);
       console.log(event.event === 'Incident' ? `Recorded ${event.id}.` : `Task ${event.id}: ${event.action} recorded.`);

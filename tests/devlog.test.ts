@@ -596,18 +596,33 @@ describe('control tower report', () => {
     writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), [
       { ts: '2026-10-10T00:01:00Z', session: 'session_01A', event: 'Task', action: 'start', id: 'T-9', title: 'Client portal' },
       { ts: '2026-10-10T00:02:00Z', session: 'session_01B', event: 'Task', action: 'start', id: 'T-9', title: 'Fresh container' },
-      { ts: '2026-10-10T00:03:00Z', session: 'session_01A', event: 'Task', action: 'start', id: 'T-8', title: 'Same work' },
-      { ts: '2026-10-10T00:04:00Z', session: 'session_01B', event: 'Task', action: 'start', id: 'T-8', title: 'Same work' },
+      // Finishing either piece of work does not hide that the record mixes them.
+      { ts: '2026-10-10T00:03:00Z', session: 'session_01A', event: 'Task', action: 'start', id: 'T-7', title: 'Portal' },
+      { ts: '2026-10-10T00:04:00Z', session: 'session_01B', event: 'Task', action: 'start', id: 'T-7', title: 'Setup' },
+      { ts: '2026-10-10T00:05:00Z', session: 'session_01B', event: 'Task', action: 'done', id: 'T-7', status: 'done' },
+      // Normal work: the same work started again, differing only in case and spacing, or after a rename.
+      { ts: '2026-10-10T00:06:00Z', session: 'session_01A', event: 'Task', action: 'start', id: 'T-8', title: 'Same work' },
+      { ts: '2026-10-10T00:07:00Z', session: 'session_01B', event: 'Task', action: 'start', id: 'T-8', title: 'same  Work ' },
+      { ts: '2026-10-10T00:08:00Z', session: 'session_01A', event: 'Task', action: 'start', id: 'T-6', title: 'First name' },
+      { ts: '2026-10-10T00:09:00Z', session: 'session_01A', event: 'Task', action: 'update', id: 'T-6', title: 'Better name' },
+      { ts: '2026-10-10T00:10:00Z', session: 'session_01B', event: 'Task', action: 'start', id: 'T-6', title: 'Better name' },
     ].map((e) => JSON.stringify(e)).join('\n') + '\n');
     const out = path.join(dir, 'r.json');
     expect(run(dir, 'scripts/devlog-report.mjs', ['--json', out]).status).toBe(0);
-    const texts = JSON.parse(readFileSync(out, 'utf8')).attention.map((a: { text: string }) => a.text);
-    expect(texts.filter((t: string) => t.includes('different pieces of work'))).toEqual([
-      'T-9 was started for 2 different pieces of work (Client portal; Fresh container): its status mixes them. Give each its own id.',
+    const attention = JSON.parse(readFileSync(out, 'utf8')).attention.filter((a: { text: string }) => a.text.includes('different pieces of work'));
+    expect(attention).toEqual([
+      { level: 'warning', text: 'T-9 was started for 2 different pieces of work (Client portal; Fresh container): its record mixes them. Give each its own id.' },
+      { level: 'info', text: 'T-7 was started for 2 different pieces of work (Portal; Setup): its record mixes them. Give each its own id.' },
     ]);
+    const spool = () => readdirSync(path.join(dir, 'devlog/.spool')).map((f) => readFileSync(path.join(dir, 'devlog/.spool', f), 'utf8')).join('');
+    const before = spool();
     const refused = run(dir, 'scripts/devlog-task.mjs', ['start', 'T-9', '--title', 'Something else']);
     expect([refused.status, refused.stderr.trim()]).toEqual([1, 'T-9 is already "Fresh container". Choose a new id.']);
-    expect(run(dir, 'scripts/devlog-task.mjs', ['start', 'T-8', '--title', 'Same work']).status).toBe(0); // restarting the same work is fine
+    const reused = run(dir, 'scripts/devlog-task.mjs', ['start', 'T-7', '--title', 'Another thing']); // done, but still its own work
+    expect([reused.status, reused.stderr.trim()]).toEqual([1, 'T-7 is already "Setup". Choose a new id.']);
+    expect(spool()).toBe(before); // a refused start records nothing
+    expect(run(dir, 'scripts/devlog-task.mjs', ['start', 'T-8', '--title', 'SAME WORK']).status).toBe(0);
+    expect(run(dir, 'scripts/devlog-task.mjs', ['start', 'T-6', '--title', 'Better name']).status).toBe(0);
   });
 
   it('shows RM only from a configured rate, computed exactly', () => {

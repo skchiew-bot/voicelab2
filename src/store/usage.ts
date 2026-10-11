@@ -28,7 +28,7 @@ async function relayUsage(c: pg.PoolClient, call: CallRow): Promise<Item[]> {
   const span = (await c.query(
     `SELECT min(occurred_at) FILTER (WHERE type = 'relay.connected') AS started,
             max(occurred_at) FILTER (WHERE type = 'relay.connected') AS last_connected,
-            max(occurred_at) FILTER (WHERE type = 'relay.closed') AS closed
+            max(occurred_at) FILTER (WHERE type = 'relay.closed' AND coalesce(payload->>'owner', 'true') = 'true') AS closed
        FROM call_events WHERE call_id = $1 AND type IN ('relay.connected', 'relay.closed')`, [call.id])).rows[0];
   if (!span?.started) return [];
   const ended = new Date(call.ended_at).getTime();
@@ -46,10 +46,11 @@ async function relayUsage(c: pg.PoolClient, call: CallRow): Promise<Item[]> {
 }
 
 /**
- * Work about a call that is not part of it: scoring it afterwards and the learning loop run in batches, later, and are
- * the platform's own running cost, not this call's.
+ * The decisions that are part of a live call: lines a model wrote while the caller was on. Anything else that names the
+ * call (scoring it afterwards, the learning loop) runs later in batches and is the platform's running cost, not this
+ * call's; a new kind of decision is left out until it is added here.
  */
-const NOT_THE_CALL = ['qa_judge', 'qa_score', 'distill_script'];
+const ON_THE_CALL = ['speak_dynamic'];
 const AFTER_THE_CALL_MS = 2 * 60_000;
 
 /**
@@ -59,9 +60,9 @@ const AFTER_THE_CALL_MS = 2 * 60_000;
 async function modelUsage(c: pg.PoolClient, call: CallRow): Promise<Item[]> {
   const rows = (await c.query(
     `SELECT model, sum(input_tokens)::bigint AS input, sum(output_tokens)::bigint AS output FROM ai_decisions
-      WHERE call_id = $1 AND (input_tokens > 0 OR output_tokens > 0) AND task <> ALL($2) AND task NOT LIKE 'council\_%'
+      WHERE call_id = $1 AND (input_tokens > 0 OR output_tokens > 0) AND task = ANY($2)
         AND at <= $3::timestamptz + make_interval(secs => $4)
-      GROUP BY model ORDER BY model NULLS FIRST`, [call.id, NOT_THE_CALL, call.ended_at, AFTER_THE_CALL_MS / 1000])).rows as { model: string | null; input: string; output: string }[];
+      GROUP BY model ORDER BY model NULLS FIRST`, [call.id, ON_THE_CALL, call.ended_at, AFTER_THE_CALL_MS / 1000])).rows as { model: string | null; input: string; output: string }[];
   const out: Item[] = [];
   for (const r of rows) {
     if (!r.model) throw new AppError(409, 'A decision on this call used tokens but names no model, so they cannot be priced.');

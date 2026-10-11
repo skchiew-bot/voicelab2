@@ -289,14 +289,17 @@ async function sayAgain(d: RelayDeps, session: RelaySession, lines: SpokenLine[]
 export async function closeRelay(d: RelayDeps, session: RelaySession): Promise<void> {
   const wasEnded = session.ended;
   session.ended = true;
+  let owner = false;
   await asInternal(d, async (c) => {
     const call = (await c.query('SELECT relay_owner FROM calls WHERE id = $1 FOR UPDATE', [session.callId])).rows[0];
     if (call?.relay_owner !== session.owner) return;
+    owner = true;
     await c.query('UPDATE calls SET relay_owner = NULL WHERE id = $1', [session.callId]);
     const run = (await c.query(`SELECT id, state FROM workflow_runs WHERE call_id = $1 AND kind = 'live' AND status IN ('running', 'awaiting_reply') FOR UPDATE`, [session.callId])).rows[0];
     if (run) await abandonRow(c, run);
   }).catch(() => undefined);
-  await event(d, session, 'relay.closed', { finished: wasEnded }).catch(() => undefined);
+  // Whether this connection was serving the call: only its close ends the relay's time on the call (it is costed by it).
+  await event(d, session, 'relay.closed', { finished: wasEnded, owner }).catch(() => undefined);
 }
 
 function afterTurn(d: RelayDeps, session: RelaySession, view: { status: string; outcome: string | null; error: string | null }, speech: SpokenLine[]) {

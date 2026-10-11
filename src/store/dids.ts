@@ -15,7 +15,7 @@ export async function outboundPerMinuteUsd(c: pg.PoolClient, providerId: string,
   if (!version) return null;
   const comps = (await c.query(
     `SELECT unit, rate, currency FROM charging_components
-      WHERE charging_version_id = $1 AND component = 'telephony_leg' AND direction IN ('any', 'outbound') AND unit IN ('per_minute', 'per_second')`, [version.id])).rows;
+      WHERE charging_version_id = $1 AND component = 'telephony_leg' AND billing_line <> 'relay' AND direction IN ('any', 'outbound') AND unit IN ('per_minute', 'per_second')`, [version.id])).rows;
   if (comps.length === 0) return null;
   let total = 0n;
   for (const k of comps) {

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withActor } from '../src/db.js';
 import { costCall, costPendingCalls, COST_WAIT_MS } from '../src/store/calls.js';
@@ -203,5 +203,52 @@ describe('a call\'s cost record holds everything the call used', () => {
       expect(r.statusCode, action).toBe(400);
       expect(r.json().error, action).toContain('is a model provider');
     }
+  });
+
+  it('ends the relay time only at a close by the connection serving the call, not one standing by', async () => {
+    const call = await finishedCall(240);
+    await event(call.id, 'relay.connected', call.started);
+    await event(call.id, 'relay.closed', new Date(call.started.getTime() + 30_000), { finished: false, owner: false });   // a standby went away
+    expect(await cost(call.id)).toBe('recorded');
+    expect((await lines(call.id)).filter((l) => l.line === 'platform:relay').map((l) => l.quantity)).toEqual(['240s']);
+  });
+
+  it('checks a relay call against Twilio by its phone line alone, since Twilio prices the relay as its own item', async () => {
+    const call = await finishedCall(180);
+    await event(call.id, 'relay.connected', call.started);
+    await event(call.id, 'relay.closed', call.ended, { finished: true, owner: true });
+    expect(await cost(call.id)).toBe('recorded');
+    // Twilio's price for the call: 3 minutes at 0.0085, the phone line only
+    env.provider.state.respond = () => new Response(JSON.stringify({ duration: '180', price: '-0.0255', price_unit: 'USD' }), { status: 200 });
+    const r = await env.call(env.staffToken, 'POST', `/internal/calls/${call.id}/reconcile`, { source: 'provider_api' });
+    expect(r.json()).toMatchObject({ outcome: 'matched' });
+  });
+
+  it('does not cost a caller timed out of the queue before the provider says how long they were held, and a retry never forces a call still pending', async () => {
+    const queued = await finishedCall(0, twilioId, COST_WAIT_MS + 60_000);
+    await env.pool.query(`UPDATE calls SET end_reason = 'queue_timeout', duration_seconds = NULL WHERE id = $1`, [queued.id]);
+    await costPendingCalls({ pool: env.pool } as Parameters<typeof costPendingCalls>[0]);
+    expect((await status(queued.id)).cost_status).toBe('pending');
+
+    const held = await finishedCall(60, twilioId, 0);
+    await env.pool.query('UPDATE calls SET relay_owner = $2 WHERE id = $1', [held.id, randomUUID()]);
+    expect(await cost(held.id)).toBe('pending');                                 // an operator's retry seconds after the end
+    expect((await status(held.id)).cost_status).toBe('pending');
+  });
+
+  it('leaves a call the relay still holds pending when Twilio reports its end, and costs it once the relay lets go', async () => {
+    const id = randomUUID(); const sid = `CA_hook_${id.slice(0, 6)}`;
+    await env.pool.query(
+      `INSERT INTO calls (id, tenant_id, provider_id, provider_call_id, direction, status, started_at, answered_at, relay_owner)
+       VALUES ($1,$2,$3,$4,'inbound','in_progress',now() - interval '2 minutes',now() - interval '2 minutes',$5)`, [id, tenantId, twilioId, sid, randomUUID()]);
+    const params = { CallSid: sid, CallStatus: 'completed', CallDuration: '120', Direction: 'inbound' };
+    const path = `/webhooks/twilio/${twilioId}/status`;
+    const sig = createHmac('sha1', 'FAKE_TOKEN_tw').update('https://voicelab.test' + path + Object.keys(params).sort().map((k) => k + params[k as keyof typeof params]).join('')).digest('base64');
+    const r = await env.app.inject({ method: 'POST', url: path, payload: new URLSearchParams(params).toString(), headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': sig } });
+    expect(r.statusCode).toBe(204);
+    expect(await status(id)).toMatchObject({ cost_status: 'pending' });
+    await env.pool.query('UPDATE calls SET relay_owner = NULL WHERE id = $1', [id]);
+    await costPendingCalls({ pool: env.pool } as Parameters<typeof costPendingCalls>[0]);
+    expect((await status(id)).cost_status).toBe('recorded');
   });
 });

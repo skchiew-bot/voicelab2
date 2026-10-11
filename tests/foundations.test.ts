@@ -35,7 +35,7 @@ describe('exit criterion 1: add a provider through the API without a code change
   it('lists adapters with their parameter declarations for the form', async () => {
     const res = await env.call(env.staffToken, 'GET', '/internal/adapters');
     const adapters = res.json();
-    expect(adapters.map((a: { key: string }) => a.key).sort()).toEqual(['elevenlabs', 'openai', 'telnyx', 'twilio']);
+    expect(adapters.map((a: { key: string }) => a.key).sort()).toEqual(['anthropic', 'elevenlabs', 'openai', 'telnyx', 'twilio']);
     expect(adapters.find((a: { key: string }) => a.key === 'telnyx').params.length).toBeGreaterThan(0);
   });
 

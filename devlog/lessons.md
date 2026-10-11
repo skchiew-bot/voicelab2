@@ -252,11 +252,13 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/scheduler.test.ts` › "works through a backlog in batches while each batch is full, and stops at its bound"
 
 ### L-029: An event can arrive before the record that expects it
-- **Seen:** 2 times. A provider's end-of-call report was processed before the dispatcher had recorded the call against its case, so the outcome was dropped and the retry chain stopped for good (Phase 7 independent review, 2026-10-10). A relay connection that arrived while another was still starting the call stood by and never looked again, so if the starter died the caller heard silence; and a start that finished after the call had already fallen back still wrote a run (live call voice link re-check, 2026-10-10).
+- **Seen:** 4 times. A provider's end-of-call report was processed before the dispatcher had recorded the call against its case, so the outcome was dropped and the retry chain stopped for good (Phase 7 independent review, 2026-10-10). A relay connection that arrived while another was still starting the call stood by and never looked again, so if the starter died the caller heard silence; and a start that finished after the call had already fallen back still wrote a run (live call voice link re-check, 2026-10-10). A call was costed by the end-of-call webhook while the speech relay could still be writing what it used (a reply landing, a line said again), and a priced call is never priced again; a relay connection that took a call over and never recorded its close had its time dropped (voice and model costs review, 2026-10-11). The new costing job would have costed a caller timed out of the queue before the provider reported how long they were held, so the held time was never costed (voice and model costs re-review, 2026-10-11).
 - **Rule:** When a record is written after a call to an outside system, look at whether the outside system has already reported by the time it is written, and settle it then. Never rely on the order in which two requests commit. Anything waiting for another request's record looks again on a timer, and a decision already given (a fallback) is checked again when the late record is written.
 - **Guards:**
   - `tests/cases.test.ts` › "does not lose the outcome of a call the provider reported over before it was recorded"
   - `tests/relay.test.ts` › "does not leave a standing-by connection silent when the one starting the call dies, and a late start then writes nothing"
+  - `tests/call-usage.test.ts` › "waits to cost a call while the relay still holds it, then costs it once it lets go, or after five minutes if it never does"
+  - `tests/call-usage.test.ts` › "does not cost a caller timed out of the queue before the provider says how long they were held, and a retry never forces a call still pending"
 
 ### L-030: A request that needs several locks takes them all first, in one fixed order
 - **Seen:** A move into a group diary held the old diary's lock and then waited for the group's members, while a group booking held a member and waited for the other: Postgres broke the deadlock with an error, and half the requests failed with a 500 (Phase 7 appointments independent review, 2026-10-10).
@@ -271,13 +273,14 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/appointments.test.ts` › "never charges a customer for a time the business broke"
 
 ### L-032: A rule that cannot be judged is a refusal, not a pass
-- **Seen:** A policy "deny when over 1000" let an action through when the amount was missing or unreadable, because the workflow condition language reads an unknown variable as false, so the deny was skipped and a plain allow won; banned phrases slipped past a curly apostrophe; an approved policy nobody could withdraw blocked every later change (Phase 7 knowledge independent review, 2026-10-10). A telephony provider an operator forced to fail over could never come back, because nothing probes telephony providers (Control Tower actions independent review, 2026-10-10).
+- **Seen:** 2 times. A policy "deny when over 1000" let an action through when the amount was missing or unreadable, because the workflow condition language reads an unknown variable as false, so the deny was skipped and a plain allow won; banned phrases slipped past a curly apostrophe; an approved policy nobody could withdraw blocked every later change (Phase 7 knowledge independent review, 2026-10-10). A telephony provider an operator forced to fail over could never come back, because nothing probes telephony providers (Control Tower actions independent review, 2026-10-10). A model rate with only an input line, or relay rates with only minutes, priced the rest of the usage at nothing and recorded the call as costed (voice and model costs review, 2026-10-11).
 - **Rule:** Where a check guards something (a policy, a gate), judge conditions three-valued: unknown on a deny counts as deny, unknown on an allow counts as not allowed. Normalise text before matching it, and give every stuck state a recorded way out.
 - **Guards:**
   - `tests/knowledge-policy.test.ts` › "denies when the variable a deny rule depends on is missing or unreadable, and does not allow on a condition it cannot judge"
   - `tests/knowledge-policy.test.ts` › "catches a banned phrase written with a curly apostrophe or zero-width marks, and refuses a phrase with no words"
   - `tests/knowledge.test.ts` › "lets a wrong proposal be withdrawn, with a reason, so it never blocks every later change; and a refused number is free again"
   - `tests/control-actions.test.ts` › "fails the provider over at once, logs it as an operator's failover, and lets it earn its way back like any other"
+  - `tests/call-usage.test.ts` › "refuses to cost a call whose model nothing prices, or prices only in part, saying which, and costs them all again on one request"
 
 ### L-033: One figure, one definition: reuse the code that already counts it
 - **Seen:** The Control Tower's deliverability panel counted contacts again instead of reusing the Outbound screen's count, so it counted every outcome row instead of each call's latest, mixed two time windows, and could show a different contact rate from the screen it linked to; its stitching total was summed from only the twenty busiest workflows (Control Tower panels independent review, 2026-10-10).
@@ -384,3 +387,11 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** Test a boundary with the exact list of what may cross it (every table, view and owner-rights function a role can reach), compared in full, so anything added fails the test until someone decides it belongs. Code on the client side of the line runs as the client role, every time.
 - **Guards:**
   - `tests/portal.test.ts` › "lets the client role reach exactly what the portal needs, and nothing a later migration quietly adds"
+
+### L-048: Charge a cost to whoever incurred it, and only to that
+- **Seen:** 2 times. The first cost record for the speech relay put Twilio's relay charge on a separate voice provider, so that provider's funding would have been drawn, and could have run out and failed over, for speech Twilio billed; tokens a later QA batch spent scoring a call were counted in the call's own cost, and an unpriced QA model could stop the call ever being costed (voice and model costs review, 2026-10-11). Moving the relay onto the Twilio provider then put its lines into the check against Twilio's price for the call alone, so every relay call would have shown a false variance (voice and model costs re-review, 2026-10-11).
+- **Rule:** Put each cost line on the provider that bills it and on the call whose work incurred it. Work done about a call afterwards (scoring, learning) is the platform's running cost, not the call's. Test that each line lands on the right provider.
+- **Guards:**
+  - `tests/call-usage.test.ts` › "prices the speech relay on the Twilio provider, by its minutes on the call and every character it synthesised"
+  - `tests/call-usage.test.ts` › "prices the tokens each model used at the rates of that model, as our cost only, and leaves out work about the call done later"
+  - `tests/call-usage.test.ts` › "checks a relay call against Twilio by its phone line alone, since Twilio prices the relay as its own item"

@@ -33,6 +33,8 @@ const lock = (c: pg.PoolClient, key: string) => c.query('SELECT pg_advisory_xact
 async function provider(c: pg.PoolClient, providerId: string) {
   const p = (await c.query('SELECT id, name, kind, status FROM providers WHERE id = $1', [providerId])).rows[0] as { id: string; name: string; kind: string; status: string } | undefined;
   if (!p) throw new AppError(404, 'Provider not found.');
+  // A model provider prices tokens; it carries no calls, so there is nothing to drain, fail over or prefer.
+  if (p.kind === 'model') throw new AppError(400, `${p.name} is a model provider: it carries no calls, so it cannot be drained, failed over or preferred.`);
   return p;
 }
 

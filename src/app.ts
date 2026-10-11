@@ -17,7 +17,7 @@ import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, gateOutbound, normalizeE164, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
-import { addNumber, callKnown, callQueued, costCall, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
+import { addNumber, callKnown, callQueued, costCall, costPendingCalls, retryFailedCosts, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
 import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, type RelayDeps, type RelaySession } from './store/relay.js';
 import { recordingAudio } from './store/recordings.js';
 import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
@@ -469,6 +469,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     } },
     { name: 'faults-sweep', everySeconds: 300, run: () => sys((c) => sweepFaults(c)) },
     { name: 'workflow-runs-sweep', everySeconds: 900, run: () => abandonStaleRuns(runDeps, null, { olderThanMinutes: 60 }) },
+    { name: 'calls-cost', everySeconds: 60, run: () => costPendingCalls(callDeps) },
     { name: 'reconcile', everySeconds: 3600, run: () => reconcileSweep(callDeps, null, { olderThanMinutes: 60, limit: 50 }) },
     { name: 'learning-sweep', everySeconds: 3600, run: async () => ({ ...countsOf(await sweepAudio(learnDeps, null)), ...countsOf(await sweepDrift(learnDeps, null)) }) },
     { name: 'payment-checks', everySeconds: 3600, perTenant: true, run: (t) => checkPayments(caseDeps, t!) },
@@ -594,8 +595,13 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   app.post('/internal/calls/:callId/cost/retry', async (req) => {
     const s = await internal(req);
     const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
-    const outcome = await withActor(pool, s.actor, (c) => costCall(c, s.userId, callId));
+    const outcome = await withActor(pool, s.actor, (c) => costCall(c, s.userId, callId, { force: true }));
     return { cost_status: outcome };
+  });
+  // Re-price every call whose cost could not be recorded, e.g. once a missing rate has been entered.
+  app.post('/internal/calls/cost/retry-failed', async (req) => {
+    const s = await internal(req);
+    return retryFailedCosts(callDeps, s.userId);
   });
 
   // ------------------------------------------------------- webhooks

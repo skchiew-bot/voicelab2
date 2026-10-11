@@ -15,6 +15,7 @@ import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.
 import { recordCallEnd } from './call-end.js';
 import { caseCallEnded, recogniseInbound, safely } from './cases.js';
 import { settleTransferOnEnd } from './transfer.js';
+import { speechAndModelUsage } from './usage.js';
 import { recordEvent } from './events.js';
 import { healthMap, logFailover, recordSample } from './resilience.js';
 import { dialPace, drainedSet, routingHealth } from './control-actions.js';
@@ -333,13 +334,26 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
 }
 
 /** Price a finished call and store the result. Failing to price never loses the call or fails the webhook. */
-export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'not_applicable'> {
+/** How long after a call ends it is costed even if the relay never let go of it (a server stopped mid-call). */
+export const COST_WAIT_MS = 5 * 60_000;
+
+export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string, opts: { force?: boolean } = {}): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'not_applicable' | 'pending'> {
   const call = (await c.query('SELECT * FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
   if (!call) throw new AppError(404, 'Call not found.');
   if (!call.ended_at) throw new AppError(409, 'The call has not ended yet.');
   // Already priced and possibly checked: pricing again must not wipe a reconciled or variance flag.
   // A call that never connected has nothing to price, and re-pricing must not invent a cost for it.
   if (['recorded', 'reconciled', 'variance', 'not_applicable'].includes(call.cost_status)) return call.cost_status;
+  // Forcing is for a call whose costing failed (a person retrying once a rate exists); a call still pending waits as usual.
+  if (call.cost_status !== 'failed') opts = { ...opts, force: false };
+  // The speech relay may still be writing what the call used (a reply landing, a line said again): costed once it lets go,
+  // by the 'calls-cost' job, so nothing it adds after is left out. A call is priced once, so it must not be priced early.
+  if (!opts.force && Date.now() - new Date(call.ended_at).getTime() < COST_WAIT_MS) {
+    const busy = (await c.query(
+      `SELECT $2::uuid IS NOT NULL OR EXISTS (SELECT 1 FROM workflow_runs WHERE call_id = $1 AND kind = 'live' AND status = 'processing') AS busy`,
+      [callId, call.relay_owner ?? null])).rows[0].busy;
+    if (busy) return 'pending';
+  }
   try {
     await recordCallCost(c, actorId, {
       callId, tenantId: call.tenant_id, projectId: call.project_id ?? undefined, direction: call.direction,
@@ -348,7 +362,8 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
       // waited and was then served pays credits only from the moment they were.
       drawCredits: !call.no_credit,
       creditSkipSeconds: call.credit_from && call.answered_at ? Math.max(0, (new Date(call.credit_from).getTime() - new Date(call.answered_at).getTime()) / 1000) : 0,
-      usage: [{ providerId: call.provider_id, usage: { seconds: Number(call.duration_seconds ?? 0), burst: call.burst } }],
+      // The phone line first (credits follow it), then what else the call used: the speech relay and the models.
+      usage: [{ providerId: call.provider_id, usage: { seconds: Number(call.duration_seconds ?? 0), burst: call.burst } }, ...await speechAndModelUsage(c, call)],
     });
     await c.query(`UPDATE calls SET cost_status = 'recorded', cost_error = NULL WHERE id = $1`, [callId]);
     return 'recorded';
@@ -503,4 +518,47 @@ export async function hangUpCalls(d: CallDeps, calls: { providerId: string; prov
     }
   }
   return hungUp;
+}
+
+/**
+ * Cost the calls that ended while the relay still held them, once it has let go (or once enough time has passed that it
+ * never will). Each call in its own transaction, so one that fails does not stop the rest.
+ */
+export async function costPendingCalls(d: CallDeps, limit = 500) {
+  // A caller timed out of the queue is costed when the provider reports how long they were held (the 'ended' event),
+  // never before: costing it now would record no provider time and the held time would never be costed.
+  const tally: Record<string, number> = {};
+  await eachPage(d, `cost_status = 'pending' AND ended_at IS NOT NULL AND NOT (end_reason = 'queue_timeout' AND duration_seconds IS NULL)`, limit,
+    async (id) => { const r = await asInternal(d, (c) => costCall(c, null, id)).catch(() => 'error' as const); tally[r] = (tally[r] ?? 0) + 1; });
+  return tally;
+}
+
+/** Cost again every call whose cost could not be recorded, e.g. once a missing rate has been entered. */
+export async function retryFailedCosts(d: CallDeps, actorId: string, limit = 5000) {
+  const tally: Record<string, number> = {};
+  let checked = 0;
+  await eachPage(d, `cost_status = 'failed'`, limit, async (id) => {
+    checked++;
+    const r = await asInternal(d, (c) => costCall(c, actorId, id, { force: true })).catch(() => 'error' as const);
+    tally[r] = (tally[r] ?? 0) + 1;
+  });
+  return { checked, ...tally };
+}
+
+/**
+ * Every call matching `where`, oldest end first, a page at a time by (end, id), up to `max`: a call that stays as it was
+ * (still failing) never keeps a newer one from being reached.
+ */
+async function eachPage(d: CallDeps, where: string, max: number, fn: (id: string) => Promise<void>) {
+  let after: { at: Date; id: string } | null = null; let done = 0;
+  while (done < max) {
+    const page: { id: string; ended_at: Date }[] = await asInternal(d, async (c) => (await c.query(
+      `SELECT id, ended_at FROM calls WHERE ${where}
+          AND ($1::timestamptz IS NULL OR (ended_at, id) > ($1::timestamptz, $2::uuid))
+        ORDER BY ended_at, id LIMIT $3`, [after?.at ?? null, after?.id ?? null, Math.min(100, max - done)])).rows);
+    if (page.length === 0) return;
+    for (const r of page) await fn(r.id);
+    done += page.length;
+    after = { at: page[page.length - 1]!.ended_at, id: page[page.length - 1]!.id };
+  }
 }

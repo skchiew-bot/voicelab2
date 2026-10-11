@@ -70,7 +70,8 @@ export async function reconcileCall(d: CallDeps, actorId: string | null, callId:
       `SELECT detail FROM call_reconciliations WHERE call_id = $1 AND outcome = 'matched' ORDER BY id DESC LIMIT 1`, [callId])).rows[0];
     if (done) return { outcome: 'matched', detail: done.detail, alreadyReconciled: true };
     const lines = (await c.query(
-      `SELECT sum(amount_usd) AS usd FROM call_cost_lines WHERE call_cost_id = $1 AND provider_id = $2`, [ctx.costId, call.provider_id])).rows[0];
+      // The call's own price at the provider: the speech relay is billed as its own item, so its lines are not compared here.
+      `SELECT sum(amount_usd) AS usd FROM call_cost_lines WHERE call_cost_id = $1 AND provider_id = $2 AND billing_line <> 'relay'`, [ctx.costId, call.provider_id])).rows[0];
     const ourCostUsd = lines.usd ?? '0.00000000';
     let reportedUsd: string | undefined;
     if (reportedCost !== undefined) {

@@ -135,7 +135,7 @@ function Shell({ me, hash, onSignOut }: { me: Me; hash: string; onSignOut: () =>
           : section === 'numbers' ? <Numbers />
           : section === 'recordings' ? <Recordings />
           : section === 'outbound' ? <Outbound />
-          : section === 'resilience' ? <Resilience />
+          : section === 'resilience' ? <Resilience readOnly={me.readOnly} />
           : section === 'tickets' || section === 'faults' ? <Tickets />
           : section === 'qa' ? <Qa />
           : section === 'changes' ? <Changes />

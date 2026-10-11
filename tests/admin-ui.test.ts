@@ -1108,6 +1108,60 @@ describe.skipIf(!run)('admin UI', () => {
     await page.close();
   }, 60_000);
 
+  it('sets each client\'s agent phone, ring time and whisper for admins, refuses a number abroad, and only shows them to read-only staff', async () => {
+    const st = env.staffToken;
+    const t = await env.call(st, 'POST', '/internal/tenants', { name: 'Agent Phone Co' });
+    expect(t.statusCode).toBe(201);
+    const v = await env.call(st, 'POST', '/internal/staff', { email: 'agent-viewer@daythree.test', role: 'internal_viewer' });
+    expect(v.statusCode).toBe(201);
+
+    const page = await browser.newPage({ viewport: { width: 1200, height: 1000 } });
+    await signIn(page, st);
+    await page.goto(`${base}#/resilience`);
+    const card = page.getByLabel('Agent phones');
+    const form = card.getByLabel('Set an agent phone');
+    await expect(field(form, 'Client')).toHaveValue('');                      // chosen each time, never from the menu (L-036)
+    await field(form, 'Client').selectOption({ label: 'Agent Phone Co' });
+    await field(form, 'Agent phone').fill('+65 6123 4567');
+    await form.getByRole('button', { name: 'Save agent phone' }).click();
+    await expect(form.getByRole('alert')).toContainText('Malaysian number (+60)');
+    await field(form, 'Agent phone').fill('+60 3-8765 4321');
+    await field(form, 'Ring for').fill('2O');                        // a letter O: refused, never sent as something else (L-034)
+    await form.getByRole('button', { name: 'Save agent phone' }).click();
+    await expect(form.getByRole('alert')).toContainText('whole number of seconds');
+    await field(form, 'Ring for').fill('30');
+    await field(form, 'Whisper').uncheck();
+    await form.getByRole('button', { name: 'Save agent phone' }).click();
+    const row = card.getByRole('row').filter({ hasText: 'Agent Phone Co' });
+    await expect(row).toContainText('+60387654321');
+    await expect(row).toContainText('30 s');
+    await expect(row).toContainText('Off');
+    expect((await env.call(st, 'GET', `/internal/tenants/${t.json().id}/transfer`)).json()).toEqual({ agentNumber: '+60387654321', ringSeconds: 30, whisper: false });
+
+    await row.getByRole('button', { name: 'Edit' }).click();                  // editing fills the form from the row
+    await expect(field(form, 'Client')).toHaveValue(t.json().id);
+    await field(form, 'Whisper').check();
+    await form.getByRole('button', { name: 'Save agent phone' }).click();
+    await expect(row).toContainText('On, press 1 to take');
+
+    // Read-only staff see the settings, with no way to change them, and the server refuses them anyway.
+    const viewer = await browser.newPage({ viewport: { width: 1200, height: 1000 } });
+    await signIn(viewer, v.json().token);
+    await viewer.goto(`${base}#/resilience`);
+    const seen = viewer.getByLabel('Agent phones');
+    await expect(seen.getByRole('row').filter({ hasText: 'Agent Phone Co' })).toContainText('+60387654321');
+    await expect(seen).toContainText('read-only access');
+    await expect(seen.getByLabel('Set an agent phone')).toHaveCount(0);
+    await expect(seen.getByRole('button')).toHaveCount(0);
+    expect((await env.call(v.json().token, 'PUT', `/internal/tenants/${t.json().id}/transfer`, { agentNumber: '+60312345678' })).statusCode).toBe(403);
+
+    page.once('dialog', (d) => d.accept());
+    await row.getByRole('button', { name: 'Remove' }).click();
+    await expect(card.getByRole('row').filter({ hasText: 'Agent Phone Co' })).toHaveCount(0);
+    expect((await env.call(st, 'GET', `/internal/tenants/${t.json().id}/transfer`)).json()).toBeNull();
+    await viewer.close(); await page.close();
+  }, 60_000);
+
   it('gives a client its own portal: credits and calls for everyone, users for its admins, and a sign-in apart from the console', async () => {
     const t = (await env.call(env.staffToken, 'POST', '/internal/tenants', { name: 'Portal Co' })).json().id as string;
     expect((await env.call(env.staffToken, 'POST', `/internal/tenants/${t}/credits`, { kind: 'grant', credits: '1250.5' })).statusCode).toBe(201);

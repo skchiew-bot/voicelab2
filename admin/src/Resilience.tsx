@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api, type CapacityRow, type FailoverRow, type FundingRow, type HealthRow, type PolicyView, type Provider } from './api';
+import { AgentPhones } from './AgentPhones';
 import { Errors, Field, fmtDate, useAction, useLoad, fmtDecimal } from './ui';
 
 const STATE_TEXT: Record<HealthRow['state'], string> = { healthy: 'Healthy', failed: 'Failed over', unfunded: 'Out of funding' };
@@ -69,7 +70,7 @@ function Policy() {
   );
 }
 
-export function Resilience() {
+export function Resilience({ readOnly }: { readOnly: boolean }) {
   const health = useLoad(() => api<HealthRow[]>('GET', '/internal/resilience/health'));
   const capacity = useLoad(() => api<CapacityRow[]>('GET', '/internal/capacity'));
   const funding = useLoad(() => api<FundingRow[]>('GET', '/internal/funding/status'));
@@ -102,7 +103,7 @@ export function Resilience() {
 
       <section className="card" aria-label="Capacity">
         <h2>Capacity</h2>
-        <p className="muted">Calls in progress against each provider's concurrency limit. Past the limit a provider charges a premium, so further calls go to a provider with room, wait, or (for a client that agreed to it) pay the premium.</p>
+        <p className="muted">Calls in progress against each provider's concurrency limit (a call ringing an agent phone holds two). Past the limit a provider charges a premium, so further calls go to a provider with room, wait, or (for a client that agreed to it) pay the premium.</p>
         {capacity.data && (
           <table>
             <thead><tr><th>Provider</th><th>In progress</th><th>Limit</th></tr></thead>
@@ -128,6 +129,7 @@ export function Resilience() {
       </section>
       {providers.data && <Thresholds providers={providers.data} onSaved={reloadAll} />}
       <Policy />
+      <AgentPhones readOnly={readOnly} />
 
       <section className="card" aria-label="Recent failovers">
         <h2>Recent failovers</h2>

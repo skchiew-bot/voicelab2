@@ -400,7 +400,21 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
         }),
       })).min(1),
     }).parse(req.body);
-    return reply.status(201).send(await withActor(pool, s.actor, (c) => recordCallCost(c, s.userId, { callId, ...body })));
+    return reply.status(201).send(await withActor(pool, s.actor, async (c) => {
+      // A call of ours that is still under way, or that used the relay or a workflow, has usage this route cannot see (its
+      // relay, its model tokens, what it has yet to use): it is costed from its own records (re-price), never from figures
+      // entered here that would leave them out and make it look complete.
+      const call = (await c.query(
+        `SELECT ended_at, workflow_id,
+                EXISTS (SELECT 1 FROM workflow_runs WHERE call_id = calls.id AND kind = 'live') AS ran,
+                EXISTS (SELECT 1 FROM call_events WHERE call_id = calls.id AND type = 'relay.connected') AS relayed
+           FROM calls WHERE id = $1 FOR UPDATE`, [callId])).rows[0];
+      if (call && !call.ended_at) throw new AppError(409, 'This call has not ended yet, so its cost cannot be entered by hand.');
+      if (call && (call.ran || call.relayed || call.workflow_id)) {
+        throw new AppError(409, 'This was a live call with a workflow: its relay and model usage are costed from its own records. Use re-price instead.');
+      }
+      return recordCallCost(c, s.userId, { callId, ...body });
+    }));
   });
   app.get('/internal/calls/:callId/cost', async (req) => {
     const s = await internal(req);

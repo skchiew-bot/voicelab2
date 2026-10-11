@@ -6,6 +6,8 @@ import { parseKey } from '../src/secrets.js';
 import { relayCallToken } from '../src/store/relay.js';
 import { twimlRelay } from '../src/telephony/relay.js';
 import { localParts } from '../src/cases/policy.js';
+import { dispatchDue, type CaseDeps } from '../src/store/cases.js';
+import { dncKeyFrom } from '../src/store/dnc.js';
 import { agentNumberAllowed, dialOutcome, dialSeconds, twimlDialAgent, twimlWhisper, whisperText } from '../src/telephony/transfer.js';
 import type { WorkflowDefinition } from '../src/workflows/definition.js';
 
@@ -861,48 +863,227 @@ describe('a live caller passed to a person', () => {
     }
   });
 
-  it('cancels a hang-up callback still waiting once the caller is served on a later call of the case, and only then', async () => {
+  describe('a hang-up callback no longer needed', () => {
     const KL = 'Asia/Kuala_Lumpur';
-    const ref = `S-${++n}`;
-    const caseId = (await must(post(`/internal/tenants/${tenantId}/cases`, { caseRef: ref, contactRef: `client-${ref}`, phone: CUSTOMER, country: 'MY', currency: 'MYR', openingBalance: '100.00', timeZone: KL }))).json().id as string;
-    const pending = async () => (await env.pool.query(`SELECT status FROM case_actions WHERE case_id = $1 AND dedupe_key LIKE 'transfer-callback:%'`, [caseId])).rows.map((r) => r.status as string);
-    const caseEvents = async () => (await env.pool.query(`SELECT kind FROM case_events WHERE case_id = $1 AND kind = 'callback.cancelled'`, [caseId])).rows;
+    let deps: CaseDeps; let reachNumber = ''; let placedSids = 0;
+    const CONTACTED = '+60300000884'; const THIRD = '+60300000885';
+    beforeAll(async () => {
+      const key = parseKey(env.config.VOICELAB_SECRET_KEY);
+      deps = { calls: { pool: env.pool, key, dncKey: dncKeyFrom(key), http: env.provider.fetch, baseUrl: BASE }, resolveNumber: async () => CUSTOMER };
+      await must(post('/internal/dnc/registries', { country: 'MY', requirement: 'registry', source: 'test' }));
+      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '03:00', quietEnd: '03:01', maxPerDay: 50, maxPerWeek: 100, minGapMinutes: 0 }));
+      // two numbers whose workflows end at once: one that reached the contact, one that found a third party
+      const ends = (contact: string): WorkflowDefinition => ({ start: 'hi', variables: [], nodes: {
+        hi: { type: 'speak', speech: 'fixed', text: 'Thank you.', transitions: [{ to: 'done' }] },
+        done: { type: 'end', outcome: 'done', contact } as WorkflowDefinition['nodes'][string],
+      } });
+      for (const [num, contact] of [[CONTACTED, 'contacted'], [THIRD, 'third_party']] as const) {
+        const id = (await must(post('/internal/numbers', { providerId: twilioId, e164: num, tenantId, country: 'MY' }))).json().id;
+        await must(put(`/internal/numbers/${id}/workflow`, { workflowId: await liveWorkflow(tenantId, `end_${contact}`, ends(contact), [], 'done') }));
+      }
+      reachNumber = CONTACTED;
+      // Twilio places the dispatcher's calls: each gets an id
+      env.provider.state.respond = (url, init) => (init?.method === 'POST' && url.endsWith('/Calls.json'))
+        ? new Response(JSON.stringify({ sid: `CA_cb_${++placedSids}` }), { status: 201 }) : new Response('{}', { status: 200 });
+    });
+    afterAll(async () => {
+      env.provider.state.respond = () => new Response('{}', { status: 200 });
+      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
+    });
+
+    let caseN = 0;
+    /** A contact with an open case who rang, asked for a person and hung up before the dial: a callback is waiting. */
+    async function hungUp(caseId?: string) {
+      const ref = `N-${++caseN}`;
+      const id = caseId ?? (await must(post(`/internal/tenants/${tenantId}/cases`, { caseRef: ref, contactRef: `client-${ref}`, phone: CUSTOMER, country: 'MY', currency: 'MYR', openingBalance: '100.00', timeZone: KL }))).json().id as string;
+      const h = await handedOver();
+      await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [h.callId, id]);
+      await relayEnded(h.callSid, h.callId, { CallStatus: 'completed' });
+      return { caseId: id, ...h };
+    }
+    const actions = async (caseId: string) => (await env.pool.query(`SELECT id, kind, status, dedupe_key, scheduled_for FROM case_actions WHERE case_id = $1 ORDER BY created_at, id`, [caseId])).rows;
+    const noLongerNeeded = async (caseId: string) => (await env.pool.query(`SELECT detail FROM case_events WHERE case_id = $1 AND kind = 'callback.no_longer_needed'`, [caseId])).rows;
     const end = (callSid: string, to: string) => twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: callSid, CallStatus: 'completed', CallDuration: '60', Direction: 'inbound', From: CUSTOMER, To: to });
-    // they hang up waiting for a person: a callback is waiting
-    const first = await handedOver();
-    await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [first.callId, caseId]);
-    await relayEnded(first.callSid, first.callId, { CallStatus: 'completed' });
-    expect(await pending()).toEqual(['pending']);
+    /** The contact rings again on a number whose workflow ends at once, saying they were (or were not) reached. */
+    async function ringsBack(caseId: string, to = reachNumber) {
+      const r = await ring(to);
+      await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [r.callId, caseId]);
+      const l = await converse(r.callSid, r.callId, 2);
+      expect((await env.pool.query(`SELECT status FROM workflow_runs WHERE call_id = $1`, [r.callId])).rows[0].status).toBe('ended');
+      await l.close();
+      return r;
+    }
+    /** The contact rings again, asks for a person, and an agent takes the call with 1. */
+    async function putThroughLater(caseId: string) {
+      const r = await handedOver();
+      await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [r.callId, caseId]);
+      await relayEnded(r.callSid, r.callId); await whisperReq(r.callSid, r.callId); await acceptReq(r.callSid, r.callId, '1');
+      await dialled(r.callSid, r.callId, { DialCallDuration: '30' });
+      return r;
+    }
+    const dispatchAt = async (caseId: string) => {
+      const [cb] = (await actions(caseId)).filter((a) => a.status === 'pending');
+      return dispatchDue(deps, new Date(new Date(cb.scheduled_for).getTime() + 30_000), 50);
+    };
 
-    // a later call that was not served (its conversation was cut off) changes nothing
-    const cut = await ring(ASK);
-    await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [cut.callId, caseId]);
-    const l1 = await converse(cut.callSid, cut.callId, 1); await l1.close();       // the run is abandoned
-    await end(cut.callSid, ASK);
-    expect(await pending()).toEqual(['pending']);
+    it('cancels it when the contact is reached on a later call, by their workflow or by a person, and records why', async () => {
+      const a = await hungUp();
+      const back = await ringsBack(a.caseId);
+      await end(back.callSid, CONTACTED);
+      expect((await actions(a.caseId)).map((x) => x.status)).toEqual(['cancelled']);
+      expect(await noLongerNeeded(a.caseId)).toEqual([{ detail: { action: (await actions(a.caseId))[0].id, servedOn: back.callId } }]);
+      expect((await env.pool.query(`SELECT note FROM case_actions WHERE case_id = $1`, [a.caseId])).rows[0].note).toBe('No longer needed: the caller was served on a later call.');
 
-    // they ring back and the conversation reaches its end: the waiting callback is cancelled, and the case says why
-    const back = await ring(ASK);
-    await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [back.callId, caseId]);
-    const l2 = await converse(back.callSid, back.callId, 1);
-    await env.pool.query(`UPDATE workflow_runs SET status = 'ended', outcome = 'promised' WHERE call_id = $1`, [back.callId]);
-    await end(back.callSid, ASK);
-    await l2.close();
-    expect(await pending()).toEqual(['cancelled']);
-    expect(await caseEvents()).toHaveLength(1);
+      // a person took a later call (the agent pressed 1): reached too, even when the dial's own report comes last
+      const b = await hungUp();
+      const p = await putThroughLater(b.caseId);
+      await end(p.callSid, OUR);
+      expect((await actions(b.caseId)).map((x) => x.status)).toEqual(['cancelled']);
+      // the same contact on another of their cases: matched by the contact's keyed hash, so cancelled as well
+      const other = await hungUp();
+      const again = await hungUp(other.caseId);
+      void again;
+      const served = await ringsBack(b.caseId);
+      await env.pool.query(`UPDATE cases SET contact_hash = (SELECT contact_hash FROM cases WHERE id = $2) WHERE id = $1`, [other.caseId, b.caseId]);
+      await end(served.callSid, CONTACTED);
+      expect((await actions(other.caseId)).map((x) => x.status)).toEqual(['cancelled', 'cancelled']);   // both of its hang-ups
+    });
 
-    // a callback the dispatcher has already claimed is left alone: its dial may be under way
-    const again = await handedOver();
-    await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [again.callId, caseId]);
-    await relayEnded(again.callSid, again.callId, { CallStatus: 'completed' });
-    await env.pool.query(`UPDATE case_actions SET status = 'leased' WHERE case_id = $1 AND status = 'pending'`, [caseId]);
-    const served = await ring(ASK);
-    await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [served.callId, caseId]);
-    const l3 = await converse(served.callSid, served.callId, 1);
-    await env.pool.query(`UPDATE workflow_runs SET status = 'ended', outcome = 'promised' WHERE call_id = $1`, [served.callId]);
-    await end(served.callSid, ASK);
-    await l3.close();
-    expect((await pending()).sort()).toEqual(['cancelled', 'leased']);
-    expect(await caseEvents()).toHaveLength(1);
+    it('keeps it when the later call did not reach them: a third party, a cut-off call, a voicemail on an unscreened dial, or no conversation at all', async () => {
+      const a = await hungUp();
+      const third = await ringsBack(a.caseId, THIRD);
+      await end(third.callSid, THIRD);
+      const cut = await ring(ASK);
+      await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [cut.callId, a.caseId]);
+      const l = await converse(cut.callSid, cut.callId, 1); await l.close();
+      expect((await env.pool.query(`SELECT outcome FROM workflow_runs WHERE call_id = $1`, [cut.callId])).rows[0].outcome).toBe('abandoned');
+      expect((await env.pool.query(`SELECT relay_failed FROM calls WHERE id = $1`, [cut.callId])).rows[0].relay_failed).toBe(false);
+      await end(cut.callSid, ASK);
+      // an answered call with no workflow at all (the test message), as a voicemail on a dispatcher's dial would be
+      const bare = await ring(BARE);
+      await env.pool.query('UPDATE calls SET case_id = $2, tenant_id = $3 WHERE id = $1', [bare.callId, a.caseId, tenantId]);
+      await env.pool.query(`DELETE FROM workflow_runs WHERE call_id = $1`, [bare.callId]).catch(() => undefined);
+      await end(bare.callSid, BARE);
+      // put through with the whisper off: the line picking up may have been a voicemail
+      await must(put(`/internal/tenants/${tenantId}/transfer`, { agentNumber: AGENT, ringSeconds: 20, whisper: false }));
+      try {
+        const u = await handedOver();
+        await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [u.callId, a.caseId]);
+        await relayEnded(u.callSid, u.callId);
+        await dialled(u.callSid, u.callId, { DialCallDuration: '30' });
+        await end(u.callSid, OUR);
+      } finally { await must(put(`/internal/tenants/${tenantId}/transfer`, { agentNumber: AGENT, ringSeconds: 20 })); }
+      expect((await actions(a.caseId)).map((x) => x.status)).toEqual(['pending']);
+      expect(await noLongerNeeded(a.caseId)).toEqual([]);
+      // a call that reached them before the hang-up does not cancel the callback the hang-up asked for
+      const before = await hungUp();
+      const earlier = await ringsBack(before.caseId);
+      await env.pool.query(`UPDATE calls SET started_at = now() - interval '1 hour' WHERE id = $1`, [earlier.callId]);
+      await end(earlier.callSid, CONTACTED);
+      expect((await actions(before.caseId)).map((x) => x.status)).toEqual(['pending']);
+    });
+
+    it('places it when the dispatcher gets there first, and never dials it when they were reached first, even while it was held back', async () => {
+      // the dispatcher first: placed, and a later call that reaches them leaves the placed callback as it is
+      const a = await hungUp();
+      expect((await dispatchAt(a.caseId)).placed).toContain((await actions(a.caseId))[0].id);
+      const back = await ringsBack(a.caseId);
+      await end(back.callSid, CONTACTED);
+      expect((await actions(a.caseId)).map((x) => x.status)).toEqual(['placed']);
+      expect(await noLongerNeeded(a.caseId)).toEqual([]);
+
+      // reached first: cancelled at once, and the dispatcher dials nothing
+      const b = await hungUp();
+      const due = (await actions(b.caseId))[0].scheduled_for;
+      const back2 = await ringsBack(b.caseId);
+      await end(back2.callSid, CONTACTED);
+      const out = await dispatchDue(deps, new Date(new Date(due).getTime() + 30_000), 50);
+      expect(out.placed).not.toContain((await actions(b.caseId))[0].id);
+      expect((await actions(b.caseId)).map((x) => x.status)).toEqual(['cancelled']);
+
+      // claimed when they were reached, then held back (say for a contact limit) and claimed again: the dispatcher
+      // checks again under the case lock and cancels it rather than dial
+      const c = await hungUp();
+      const [cb] = await actions(c.caseId);
+      await env.pool.query(`UPDATE case_actions SET status = 'leased' WHERE id = $1`, [cb.id]);
+      const back3 = await ringsBack(c.caseId);
+      await end(back3.callSid, CONTACTED);
+      expect((await actions(c.caseId)).map((x) => x.status)).toEqual(['leased']);          // left to the dispatcher
+      await env.pool.query(`UPDATE case_actions SET status = 'pending' WHERE id = $1`, [cb.id]);   // held back
+      const out3 = await dispatchDue(deps, new Date(new Date(cb.scheduled_for).getTime() + 30_000), 50);
+      expect(out3.placed).not.toContain(cb.id); expect(out3.cancelled).toContain(cb.id);
+      expect((await noLongerNeeded(c.caseId))).toHaveLength(1);
+
+      // a retry that follows from the callback (it was missed) is no longer needed either
+      const d = await hungUp();
+      const [cbd] = await actions(d.caseId);
+      const late = await dispatchDue(deps, new Date(new Date(cbd.scheduled_for).getTime() + 6 * 3_600_000), 50);
+      expect(late.missed).toContain(cbd.id);
+      expect((await actions(d.caseId)).map((x) => `${x.kind}:${x.status}`)).toEqual(['callback:missed', 'retry:pending']);
+      const back4 = await ringsBack(d.caseId);
+      await end(back4.callSid, CONTACTED);
+      expect((await actions(d.caseId)).map((x) => `${x.kind}:${x.status}`)).toEqual(['callback:missed', 'retry:cancelled']);
+    });
+
+    it('checks again just before the dial: reached while their number was being looked up, the callback is cancelled, not dialled', async () => {
+      const a = await hungUp();
+      const [cb] = await actions(a.caseId);
+      const back = await ringsBack(a.caseId);
+      let lookups = 0;
+      const lookup = deps.resolveNumber;
+      // the call that reached them ends while the dispatcher is looking up the number (after its first check)
+      deps.resolveNumber = async () => { lookups++; expect((await end(back.callSid, CONTACTED)).statusCode).toBe(204); return CUSTOMER; };
+      try {
+        const out = await dispatchDue(deps, new Date(new Date(cb.scheduled_for).getTime() + 30_000), 50);
+        expect(out.placed).not.toContain(cb.id); expect(out.cancelled).toContain(cb.id);
+      } finally { deps.resolveNumber = lookup; }
+      expect(lookups).toBeGreaterThan(0);
+      expect((await env.pool.query(`SELECT count(*)::int AS n FROM calls WHERE case_id = $1 AND direction = 'outbound'`, [a.caseId])).rows[0].n).toBe(0);
+      expect(await noLongerNeeded(a.caseId)).toHaveLength(1);
+      // already reached when claimed: their number is not even looked up
+      const b = await hungUp();
+      const [cbb] = await actions(b.caseId);
+      await env.pool.query(`UPDATE case_actions SET status = 'leased' WHERE id = $1`, [cbb.id]);
+      const back2 = await ringsBack(b.caseId);
+      await end(back2.callSid, CONTACTED);
+      await env.pool.query(`UPDATE case_actions SET status = 'pending' WHERE id = $1`, [cbb.id]);
+      let looked = 0;
+      deps.resolveNumber = async (...x) => { looked++; return lookup!(...x); };
+      try { expect((await dispatchDue(deps, new Date(new Date(cbb.scheduled_for).getTime() + 30_000), 50)).cancelled).toContain(cbb.id); }
+      finally { deps.resolveNumber = lookup; }
+      expect(looked).toBe(0);
+    });
+
+    it('does not cancel a callback the dispatcher claims while the call that reached them is ending', async () => {
+      const a = await hungUp();
+      const [cb] = await actions(a.caseId);
+      const back = await ringsBack(a.caseId);
+      // the dispatcher's claim holds the row; the call's end sees the callback still waiting and tries to cancel it
+      const claim = await env.pool.connect();
+      try {
+        await claim.query('BEGIN');
+        await claim.query(`UPDATE case_actions SET status = 'leased' WHERE id = $1`, [cb.id]);
+        const ending = end(back.callSid, CONTACTED);
+        await new Promise((r) => setTimeout(r, 400));
+        await claim.query('COMMIT');
+        expect((await ending).statusCode).toBe(204);
+      } finally { claim.release(); }
+      expect((await actions(a.caseId)).map((x) => x.status)).toEqual(['leased']);     // left to the dispatcher, which checks again
+      expect(await noLongerNeeded(a.caseId)).toEqual([]);
+    });
+
+    it('is either placed or cancelled, never both, when the dispatcher and the call that reached them land at the same moment', async () => {
+      for (let i = 0; i < 4; i++) {
+        const a = await hungUp();
+        const [cb] = await actions(a.caseId);
+        const back = await ringsBack(a.caseId);
+        const [out] = await Promise.all([dispatchDue(deps, new Date(new Date(cb.scheduled_for).getTime() + 30_000), 50), end(back.callSid, CONTACTED)]);
+        const [after] = await actions(a.caseId);
+        const dialled = (await env.pool.query(`SELECT count(*)::int AS n FROM calls WHERE case_id = $1 AND direction = 'outbound'`, [a.caseId])).rows[0].n as number;
+        const cancelled = (await noLongerNeeded(a.caseId)).length;
+        if (after.status === 'placed') { expect(out.placed).toContain(cb.id); expect(cancelled).toBe(0); expect(dialled).toBe(1); }
+        else { expect(after.status).toBe('cancelled'); expect(out.placed).not.toContain(cb.id); expect(cancelled).toBe(1); expect(dialled).toBe(0); }
+      }
+    });
   });
 });

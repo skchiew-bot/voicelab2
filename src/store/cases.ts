@@ -218,19 +218,71 @@ export async function scheduleTransferCallback(c: pg.PoolClient, caseId: string,
   return scheduleNext(c, cs, at, { kind: 'callback', channel: 'voice', dedupeKey: `transfer-callback:${callId}`, note: 'The caller asked for a person and hung up before reaching one.' });
 }
 
-/**
- * The caller was served on a later call of the case (owner's decision, 2026-10-11): a callback still waiting because they
- * hung up waiting for a person on an earlier call is no longer needed, so it is cancelled and the case says why. One the
- * dispatcher has already claimed is left alone: its dial may be under way (lesson L-002).
+// ------------------------------------------------------------------------------------------------ served before the callback
+/*
+ * A caller who hung up waiting for a person is called back (scheduleTransferCallback). If the same contact (known by the
+ * keyed hash, never the number) is served on a later call first, that callback, and any retry that follows from it, is
+ * no longer needed (owner's decision, 2026-10-11). Served needs positive evidence, never the absence of a fault: a person
+ * took the call (the agent pressed 1), or its workflow ended at an end that says the contact was reached. A voicemail on
+ * a retry, a caller who gave up in the queue, a test message or a wrong person is not served.
  */
-export async function cancelTransferCallbacks(c: pg.PoolClient, caseId: string, servedCallId: string) {
-  await lockCase(c, caseId);
-  const gone = (await c.query(
-    `UPDATE case_actions SET status = 'cancelled', note = 'The caller was served on a later call.', updated_at = now()
-      WHERE case_id = $1 AND status = 'pending' AND dedupe_key LIKE 'transfer-callback:%' AND dedupe_key <> $2 RETURNING id`,
-    [caseId, `transfer-callback:${servedCallId}`])).rows;
-  for (const g of gone) await event(c, caseId, 'callback.cancelled', { action: g.id, reason: 'served_on_later_call', call: servedCallId });
-  return gone.length;
+
+/** The hang-up call a callback (or a retry that follows from one) began from, and whose contact it is for. */
+async function transferOrigin(c: pg.PoolClient, actionId: string): Promise<{ callId: string; startedAt: Date; tenantId: string; hash: string } | null> {
+  const r = (await c.query(
+    `WITH RECURSIVE chain(id, dedupe_key, depth) AS (
+       SELECT id, dedupe_key, 0 FROM case_actions WHERE id = $1
+       UNION ALL
+       SELECT p.id, p.dedupe_key, ch.depth + 1 FROM case_actions p JOIN chain ch ON ch.dedupe_key = 'retry:' || p.id::text WHERE ch.depth < 50
+     )
+     SELECT o.id AS call_id, o.started_at, k.tenant_id, k.contact_hash
+       FROM chain ch JOIN case_actions a ON a.id = ch.id JOIN cases k ON k.id = a.case_id
+       JOIN calls o ON o.id::text = substring(ch.dedupe_key from '^transfer-callback:(.*)$')
+      WHERE ch.dedupe_key LIKE 'transfer-callback:%' LIMIT 1`, [actionId])).rows[0];
+  return r ? { callId: r.call_id, startedAt: r.started_at, tenantId: r.tenant_id, hash: r.contact_hash } : null;
+}
+
+/** Calls of this contact, started after `since` and ended, on which they were served. */
+const SERVED = `
+  SELECT s.id FROM calls s LEFT JOIN cases sk ON sk.id = s.case_id
+   WHERE s.tenant_id = $1 AND coalesce(s.contact_hash, sk.contact_hash) = $2 AND s.started_at > $3 AND s.ended_at IS NOT NULL
+     AND (s.transfer_accepted_at IS NOT NULL
+          OR EXISTS (SELECT 1 FROM workflow_runs r JOIN workflow_run_steps st ON st.run_id = r.id
+                      WHERE r.call_id = s.id AND r.kind = 'live' AND r.status = 'ended' AND r.error IS NULL
+                        AND st.type = 'end' AND st.payload->>'contact' = 'contacted'))`;
+
+/** Whether the contact a callback is for has been served since the hang-up it began from; null if it is no such callback. */
+async function servedSinceHangUp(c: pg.PoolClient, actionId: string): Promise<string | null> {
+  const o = await transferOrigin(c, actionId);
+  if (!o) return null;
+  return ((await c.query(`${SERVED} ORDER BY s.started_at LIMIT 1`, [o.tenantId, o.hash, o.startedAt])).rows[0]?.id as string | undefined) ?? null;
+}
+
+/**
+ * A call has ended. If the contact was served on it, every callback still waiting from an earlier hang-up of theirs, and
+ * every retry following from one, is cancelled, and the case says why. Each case is locked first, in id order (lesson
+ * L-030). An action the dispatcher has claimed is left to it: it checks again, under the case lock, just before it dials.
+ */
+export async function cancelServedTransferCallbacks(c: pg.PoolClient, callId: string) {
+  const call = (await c.query(
+    `SELECT ca.tenant_id, coalesce(ca.contact_hash, k.contact_hash) AS hash, ca.started_at FROM calls ca LEFT JOIN cases k ON k.id = ca.case_id WHERE ca.id = $1`,
+    [callId])).rows[0];
+  if (!call?.hash) return 0;
+  const served = (await c.query(`${SERVED} AND s.id = $4`, [call.tenant_id, call.hash, new Date(0), callId])).rowCount;
+  if (!served) return 0;
+  const candidates = (await c.query(
+    `SELECT a.id, a.case_id FROM case_actions a JOIN cases k ON k.id = a.case_id
+      WHERE k.tenant_id = $1 AND k.contact_hash = $2 AND a.status = 'pending' AND (a.dedupe_key LIKE 'transfer-callback:%' OR a.dedupe_key LIKE 'retry:%')
+      ORDER BY a.case_id, a.id`, [call.tenant_id, call.hash])).rows as { id: string; case_id: string }[];
+  for (const caseId of [...new Set(candidates.map((x) => x.case_id))].sort()) await lockCase(c, caseId);
+  let n = 0;
+  for (const a of candidates) {
+    const o = await transferOrigin(c, a.id);
+    if (!o || new Date(o.startedAt).getTime() >= new Date(call.started_at).getTime()) continue;   // only hang-ups before this call
+    const gone = (await c.query(`UPDATE case_actions SET status = 'cancelled', note = 'No longer needed: the caller was served on a later call.', updated_at = now() WHERE id = $1 AND status = 'pending' RETURNING id`, [a.id])).rowCount;
+    if (gone) { n++; await event(c, a.case_id, 'callback.no_longer_needed', { action: a.id, servedOn: callId }); }
+  }
+  return n;
 }
 
 const cancelActions = (c: pg.PoolClient, caseId: string, why: string, keepThanks = false) =>
@@ -281,6 +333,16 @@ export async function dispatchDue(d: CaseDeps, now: Date | (() => Date) = () => 
 type Outcome = 'placed' | 'missed' | 'deferred' | 'blocked' | 'failed' | 'unknown' | 'cancelled';
 const canBeCalled = (cs: { status: string; close_reason: string | null }, kind: string) => cs.status === 'open' || (kind === 'thanks' && cs.status === 'closed' && cs.close_reason === 'paid_in_full');
 
+/** A claimed callback whose contact has been served since the hang-up it began from is cancelled, not dialled. */
+async function cancelIfServed(c: pg.PoolClient, a: { id: string; case_id: string; kind: string }) {
+  if (a.kind !== 'callback' && a.kind !== 'retry') return false;
+  const servedOn = await servedSinceHangUp(c, a.id);
+  if (!servedOn) return false;
+  const gone = (await c.query(`UPDATE case_actions SET status = 'cancelled', note = 'No longer needed: the caller was served on a later call.', updated_at = now() WHERE id = $1 AND status = 'leased' RETURNING id`, [a.id])).rowCount;
+  if (gone) await event(c, a.case_id, 'callback.no_longer_needed', { action: a.id, servedOn });
+  return true;
+}
+
 async function dispatchOne(d: CaseDeps, a: { id: string; case_id: string; kind: string; locked_for: Date; attempt: number }, clock: () => Date): Promise<Outcome> {
   const hold = (c: pg.PoolClient, id: string, until: Date, note: string) => c.query(`UPDATE case_actions SET status = 'pending', scheduled_for = $2, lease_until = NULL, note = $3, updated_at = now() WHERE id = $1 AND status = 'leased'`, [id, until, note]);
   const plan = await asInternal(d, async (c) => {
@@ -291,6 +353,7 @@ async function dispatchOne(d: CaseDeps, a: { id: string; case_id: string; kind: 
       await c.query(`UPDATE case_actions SET status = 'cancelled', note = $2, updated_at = now() WHERE id = $1 AND status = 'leased'`, [a.id, `The case is ${cs.status.replace('_', ' ')}.`]);
       return { done: 'cancelled' as const };
     }
+    if (await cancelIfServed(c, a)) return { done: 'cancelled' as const };
     const lateBy = now.getTime() - new Date(a.locked_for).getTime();
     if (lateBy > s.callbackLatenessMin * 60_000) {
       await c.query(`UPDATE case_actions SET status = 'missed', note = 'Not placed within the agreed lateness of its time.', updated_at = now() WHERE id = $1 AND status = 'leased'`, [a.id]);
@@ -324,6 +387,9 @@ async function dispatchOne(d: CaseDeps, a: { id: string; case_id: string; kind: 
       await c.query(`UPDATE case_actions SET status = 'cancelled', note = 'The case changed before the call was made.', updated_at = now() WHERE id = $1 AND status = 'leased'`, [a.id]);
       return false;
     }
+    // The contact may have been served while this was claimed or held back: checked under the case lock, which the end of
+    // a call takes too, so a callback is never both placed and cancelled.
+    if (await cancelIfServed(c, a)) return false;
     if (!to) {
       await c.query(`UPDATE case_actions SET status = 'failed', note = 'No number could be found for this contact, so nothing was dialled.', updated_at = now() WHERE id = $1 AND status = 'leased'`, [a.id]);
       await event(c, cs.id, `${a.kind}.failed`, { action: a.id, reason: 'no_number' });

@@ -38,13 +38,19 @@ export async function reconcileCall(d: CallDeps, actorId: string | null, callId:
     const cost = (await c.query(`SELECT id FROM call_costs WHERE call_id = $1 AND status = 'estimated'`, [callId])).rows[0];
     if (!cost) throw new AppError(409, 'This call has no estimated cost to check.');
     const provider = await loadProvider(c, call.provider_id);
-    return { call, provider, costId: cost.id as string, done: null };
+    // A call put through to a person has a second leg at the provider (ours to the agent), costed with it: checked with it.
+    const agentLeg = (await c.query(`SELECT 1 FROM call_cost_lines WHERE call_cost_id = $1 AND leg = 'agent' LIMIT 1`, [cost.id])).rowCount! > 0;
+    return { call, provider, costId: cost.id as string, agentLeg, done: null };
   });
   if (ctx.done) return { outcome: 'matched', detail: ctx.done.detail, alreadyReconciled: true };
   const { call, provider } = ctx;
 
   // What the provider reports. Network calls happen outside any transaction.
   let reportedSeconds: number | undefined; let reportedCost: string | undefined; let currency = 'USD';
+  // The agent's leg as Twilio reports it, looked up by its own id. A costed leg with no id to look it up by (one a person
+  // settled by hand) cannot be checked automatically and is left for a person, never passed on the caller's leg alone.
+  let leg: { seconds: number; cost: string; currency: string } | null = null;
+  let legUncheckable = false;
   if (input.source === 'provider_api') {
     if (provider!.adapter_key !== 'twilio') {
       throw new AppError(400, 'Only Twilio has an automatic usage check so far. Send the provider\'s figures with source "manual" instead.');
@@ -54,6 +60,12 @@ export async function reconcileCall(d: CallDeps, actorId: string | null, callId:
       const u = await twilioFetchCallUsage(credentials<TwilioCreds>(provider!, d.key), d.http, call.provider_call_id);
       if (u.state === 'pending') return { outcome: 'pending', detail: 'Twilio has not published this call\'s price yet. Try again later.' };
       reportedSeconds = u.seconds; reportedCost = u.cost; currency = u.currency;
+      if (ctx.agentLeg && !call.transfer_leg_sid) legUncheckable = true;
+      else if (ctx.agentLeg) {
+        const l = await twilioFetchCallUsage(credentials<TwilioCreds>(provider!, d.key), d.http, call.transfer_leg_sid);
+        if (l.state === 'pending') return { outcome: 'pending', detail: 'Twilio has not published the price of the leg to the agent yet. Try again later.' };
+        leg = { seconds: l.seconds, cost: l.cost, currency: l.currency };
+      }
     } catch (err) { throw new AppError(502, redactNumbers((err as Error).message)); }
   } else {
     // A duration alone cannot show the rate was right, so the provider's price is required.
@@ -70,23 +82,26 @@ export async function reconcileCall(d: CallDeps, actorId: string | null, callId:
       `SELECT detail FROM call_reconciliations WHERE call_id = $1 AND outcome = 'matched' ORDER BY id DESC LIMIT 1`, [callId])).rows[0];
     if (done) return { outcome: 'matched', detail: done.detail, alreadyReconciled: true };
     const lines = (await c.query(
-      // The caller's leg only: the agent's leg of a transfer is a separate call at the provider, priced separately.
-      `SELECT sum(amount_usd) AS usd FROM call_cost_lines WHERE call_cost_id = $1 AND provider_id = $2 AND leg = 'caller'`, [ctx.costId, call.provider_id])).rows[0];
+      // Both legs: the provider's figures (looked up for each leg, or entered by hand as the total) cover both.
+      `SELECT sum(amount_usd) AS usd FROM call_cost_lines WHERE call_cost_id = $1 AND provider_id = $2`, [ctx.costId, call.provider_id])).rows[0];
     const ourCostUsd = lines.usd ?? '0.00000000';
     let reportedUsd: string | undefined;
     if (reportedCost !== undefined) {
-      const fx = await perUsd(c, currency, call.started_at);
-      reportedUsd = fromScaled(mulDiv(toScaled(reportedCost), SCALE, fx));
+      // Each leg is turned into US dollars on its own, since Twilio may price them in different currencies.
+      const toUsd = async (amount: string, cur: string) => mulDiv(toScaled(amount), SCALE, await perUsd(c, cur, call.started_at));
+      reportedUsd = fromScaled((await toUsd(reportedCost, currency)) + (leg ? await toUsd(leg.cost, leg.currency) : 0n));
     }
-    const verdict = compare({
-      ourSeconds: Number(call.duration_seconds ?? 0), reportedSeconds, ourCostUsd, reportedCostUsd: reportedUsd, tolerancePct,
-    });
+    const ourSeconds = Number(call.duration_seconds ?? 0) + (ctx.agentLeg ? Number(call.transfer_seconds ?? 0) : 0);
+    const theirSeconds = reportedSeconds === undefined ? undefined : reportedSeconds + (leg?.seconds ?? 0);
+    const verdict = legUncheckable
+      ? { matched: false, detail: 'The leg to the agent has no Twilio id to look it up by, so it cannot be checked automatically. Check both legs by hand (manual figures are the total for both legs).' }
+      : compare({ ourSeconds, reportedSeconds: theirSeconds, ourCostUsd, reportedCostUsd: reportedUsd, tolerancePct });
     const outcome = verdict.matched ? 'matched' : 'variance';
     await c.query(
       `INSERT INTO call_reconciliations (call_id, provider_id, source, outcome, tolerance_pct, our_seconds, reported_seconds,
                                          our_cost_usd, reported_cost_usd, detail)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [callId, call.provider_id, input.source, outcome, tolerancePct, call.duration_seconds, reportedSeconds ?? null,
+      [callId, call.provider_id, input.source, outcome, tolerancePct, ourSeconds, theirSeconds ?? null,
         ourCostUsd, reportedUsd ?? null, verdict.detail],
     );
     if (verdict.matched) {

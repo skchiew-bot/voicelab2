@@ -4,8 +4,11 @@
 -- separately, so the call's one cost record carries it as its own line. Null until reported.
 ALTER TABLE calls ADD COLUMN transfer_seconds numeric(10,3) CHECK (transfer_seconds >= 0);
 
--- Which leg of the call a cost line prices: the caller's own, or the agent's leg of a transfer. Reconciliation checks the
--- caller's leg against the provider's price for the call; the agent's leg is a separate provider call.
+-- The agent's leg's own id at Twilio (`DialCallSid`, never a number), so its price can be looked up and checked.
+ALTER TABLE calls ADD COLUMN transfer_leg_sid text CHECK (transfer_leg_sid ~ '^[A-Za-z0-9_]{2,64}$');
+
+-- Which leg of the call a cost line prices: the caller's own, or the agent's leg of a transfer (a separate call at the
+-- provider). Reconciliation checks both legs against the provider's figures.
 ALTER TABLE call_cost_lines ADD COLUMN leg text NOT NULL DEFAULT 'caller' CHECK (leg IN ('caller', 'agent'));
 
 -- For now an agent number must be Malaysian (+60), and not one of Malaysia's special-rate or premium ranges (1-300,

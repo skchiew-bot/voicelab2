@@ -5,6 +5,7 @@ import WebSocket from 'ws';
 import { parseKey } from '../src/secrets.js';
 import { relayCallToken } from '../src/store/relay.js';
 import { twimlRelay } from '../src/telephony/relay.js';
+import { localParts } from '../src/cases/policy.js';
 import { agentNumberAllowed, dialOutcome, dialSeconds, twimlDialAgent, twimlWhisper, whisperText } from '../src/telephony/transfer.js';
 import type { WorkflowDefinition } from '../src/workflows/definition.js';
 
@@ -458,8 +459,9 @@ describe('a live caller passed to a person', () => {
     expect(await head(a.callId)).toEqual([{ total_usd: '0.04500000', credits_drawn: '2.0000' }]);
     expect((await env.pool.query(`SELECT credits FROM credit_entries WHERE ref = $1`, [`call:${a.callId}`])).rows).toEqual([{ credits: '-2.0000' }]);
 
-    // Reconciliation checks the caller's leg against Twilio's price for the call; the agent leg is a separate call there.
-    const rec = await must(post(`/internal/calls/${a.callId}/reconcile`, { source: 'manual', reportedSeconds: 90, reportedCost: '0.0170' }));
+    // Checked by hand: the operator's figures are the total for both legs (90 + 61 seconds, 0.0450 USD).
+    expect((await must(post(`/internal/calls/${a.callId}/reconcile`, { source: 'manual', reportedSeconds: 90, reportedCost: '0.0170' }))).json().outcome).toBe('variance');
+    const rec = await must(post(`/internal/calls/${a.callId}/reconcile`, { source: 'manual', reportedSeconds: 151, reportedCost: '0.0450' }));
     expect(rec.json().outcome).toBe('matched');
     const reconciled = (await env.pool.query(
       `SELECT k.total_usd, array_agg(l.leg ORDER BY l.leg DESC) AS legs FROM call_costs k JOIN call_cost_lines l ON l.call_cost_id = k.id
@@ -646,5 +648,159 @@ describe('a live caller passed to a person', () => {
     expect((await relayEnded(callSid, callId)).body).toBe(HANGUP);
     expect(await callRow(callId)).toMatchObject({ transfer_status: null });
     expect(await callbacks(callId)).toEqual([]);
+  });
+
+  it('checks both legs against Twilio, each by its own id and in its own currency, and leaves a leg it cannot look up for a person', async () => {
+    const end = (callSid: string, seconds: string) => twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: callSid, CallStatus: 'completed', CallDuration: seconds, Direction: 'inbound', From: CUSTOMER, To: OUR });
+    const putThrough = async (legSid: string | null) => {
+      const x = await handedOver();
+      await relayEnded(x.callSid, x.callId); await whisperReq(x.callSid, x.callId); await acceptReq(x.callSid, x.callId, '1');
+      await dialled(x.callSid, x.callId, { DialCallSid: legSid ?? '', DialCallDuration: '61' });
+      await end(x.callSid, '90');
+      return x;
+    };
+    const recon = async (callId: string) => (await must(post(`/internal/calls/${callId}/reconcile`, { source: 'provider_api' }))).json();
+    const said = (byId: Record<string, unknown>) => {
+      const seen: string[] = [];
+      env.provider.state.respond = (url) => {
+        seen.push(url);
+        const hit = Object.entries(byId).find(([id]) => url.endsWith(`/Calls/${id}.json`));
+        return new Response(JSON.stringify(hit ? hit[1] : {}), { status: hit ? 200 : 404 });
+      };
+      return seen;
+    };
+    try {
+      // Our estimate: caller 0.0170 + agent 0.0280 = 0.0450 USD, 90 + 61 seconds. Twilio prices the agent leg in MYR here
+      // (0.126 MYR at 4.5 to the dollar is 0.0280 USD), so each leg is converted on its own.
+      const a = await putThrough('CA_leg_a');
+      expect((await env.pool.query('SELECT transfer_leg_sid FROM calls WHERE id = $1', [a.callId])).rows[0].transfer_leg_sid).toBe('CA_leg_a');
+      const seen = said({ [a.callSid]: { duration: '90', price: '-0.0170', price_unit: 'USD' }, CA_leg_a: { duration: '61', price: '-0.126', price_unit: 'MYR' } });
+      expect(await recon(a.callId)).toMatchObject({ outcome: 'matched' });
+      expect(seen.map((u) => u.split('/Calls/')[1])).toEqual([`${a.callSid}.json`, 'CA_leg_a.json']);
+      expect((await env.pool.query('SELECT our_seconds, reported_seconds, our_cost_usd, reported_cost_usd FROM call_reconciliations WHERE call_id = $1', [a.callId])).rows)
+        .toEqual([{ our_seconds: '151.000', reported_seconds: '151.000', our_cost_usd: '0.04500000', reported_cost_usd: '0.04500000' }]);
+      expect((await env.pool.query(`SELECT credits FROM credit_entries WHERE ref = $1`, [`call:${a.callId}`])).rows).toEqual([{ credits: '-2.0000' }]);   // no second draw
+
+      // The agent leg costs more at Twilio than we estimated: a variance, though the caller's leg matches.
+      const b = await putThrough('CA_leg_b');
+      said({ [b.callSid]: { duration: '90', price: '-0.0170', price_unit: 'USD' }, CA_leg_b: { duration: '61', price: '-0.0500', price_unit: 'USD' } });
+      expect(await recon(b.callId)).toMatchObject({ outcome: 'variance' });
+
+      // The agent leg's price is not published yet: try again later, nothing recorded.
+      const c = await putThrough('CA_leg_c');
+      said({ [c.callSid]: { duration: '90', price: '-0.0170', price_unit: 'USD' }, CA_leg_c: { duration: '61', price: null } });
+      expect(await recon(c.callId)).toMatchObject({ outcome: 'pending' });
+      expect((await env.pool.query('SELECT count(*)::int AS n FROM call_reconciliations WHERE call_id = $1', [c.callId])).rows[0].n).toBe(0);
+
+      // No id for the agent leg (Twilio sent none): it cannot be looked up, so it is never passed on the caller's leg alone.
+      const d = await putThrough(null);
+      said({ [d.callSid]: { duration: '90', price: '-0.0450', price_unit: 'USD' } });
+      const r = await recon(d.callId);
+      expect(r).toMatchObject({ outcome: 'variance' });
+      expect(r.detail).toContain('no Twilio id');
+
+      // A call whose agent never picked up has no agent leg: only the caller's call is looked up.
+      const n = await handedOver();
+      await relayEnded(n.callSid, n.callId);
+      await dialled(n.callSid, n.callId, { DialCallStatus: 'no-answer', DialCallSid: 'CA_leg_n', DialCallDuration: '0' });
+      await end(n.callSid, '50');
+      const only = said({ [n.callSid]: { duration: '50', price: '-0.0085', price_unit: 'USD' } });
+      expect(await recon(n.callId)).toMatchObject({ outcome: 'matched' });
+      expect(only).toHaveLength(1);
+    } finally { env.provider.state.respond = () => new Response('{}', { status: 200 }); }
+  });
+
+  it('calls a caller on a case back after they hang up waiting for a person: in a quarter of an hour, or when quiet hours end', async () => {
+    const KL = 'Asia/Kuala_Lumpur';
+    const hhmm = (d: Date) => { const p = localParts(d, KL); return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`; };
+    const hours = (h: number) => new Date(Date.now() + h * 3_600_000);
+    const policy = (quietStart: string, quietEnd: string) => must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart, quietEnd, maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
+    const onCase = async () => {
+      const ref = `T-${++n}`;
+      const caseId = (await must(post(`/internal/tenants/${tenantId}/cases`, { caseRef: ref, contactRef: `client-${ref}`, phone: CUSTOMER, country: 'MY', currency: 'MYR', openingBalance: '100.00', timeZone: KL }))).json().id as string;
+      const h = await handedOver();
+      await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [h.callId, caseId]);
+      return { ...h, caseId };
+    };
+    const callbackFor = async (caseId: string) => (await env.pool.query(`SELECT kind, channel, scheduled_for, locked_for, status FROM case_actions WHERE case_id = $1 AND dedupe_key LIKE 'transfer-callback:%'`, [caseId])).rows;
+    try {
+      // Hung up before the dial, quiet hours far from now: our own dial (through the gate) in about 15 minutes, no note.
+      await policy(hhmm(hours(6)), hhmm(hours(8)));
+      const a = await onCase();
+      const before = Date.now();
+      await relayEnded(a.callSid, a.callId, { CallStatus: 'completed' });
+      const [cb] = await callbackFor(a.caseId);
+      expect(cb).toMatchObject({ kind: 'callback', channel: 'voice', status: 'pending' });
+      const due = new Date(cb.scheduled_for).getTime();
+      expect(due).toBeGreaterThanOrEqual(before + 15 * 60_000 - 1000);
+      expect(due).toBeLessThanOrEqual(Date.now() + 15 * 60_000 + 1000);
+      expect(await callbacks(a.callId)).toEqual([]);
+      expect((await events(a.callId)).filter((e) => e.type === 'transfer.callback_scheduled')).toHaveLength(1);
+      // asked again, and the call's end reported: still one
+      await relayEnded(a.callSid, a.callId, { CallStatus: 'completed' });
+      await twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: a.callSid, CallStatus: 'completed', CallDuration: '20', Direction: 'inbound', From: CUSTOMER, To: OUR });
+      expect(await callbackFor(a.caseId)).toHaveLength(1);
+      expect(await callbacks(a.callId)).toEqual([]);
+
+      // Hung up while the agent's phone rang, inside quiet hours that end in two hours: called back when they end.
+      await policy(hhmm(hours(-1)), hhmm(hours(2)));
+      const b = await onCase();
+      await relayEnded(b.callSid, b.callId);
+      await dialled(b.callSid, b.callId, { CallStatus: 'completed', DialCallStatus: 'canceled', DialCallDuration: '0' });
+      const [late] = await callbackFor(b.caseId);
+      expect(hhmm(new Date(late.scheduled_for))).toBe(hhmm(hours(2)));
+      expect(new Date(late.scheduled_for).getTime()).toBeGreaterThan(Date.now() + 90 * 60_000);
+      expect(new Date(late.locked_for).getTime()).toBe(new Date(late.scheduled_for).getTime());
+      expect(await callbacks(b.callId)).toEqual([]);
+
+      // The call ends before Twilio asks what next: the case callback is scheduled from the call's end, once.
+      await policy(hhmm(hours(6)), hhmm(hours(8)));
+      const e = await onCase();
+      await twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: e.callSid, CallStatus: 'completed', CallDuration: '20', Direction: 'inbound', From: CUSTOMER, To: OUR });
+      await relayEnded(e.callSid, e.callId, { CallStatus: 'completed' });
+      expect(await callbackFor(e.caseId)).toHaveLength(1);
+      expect(await callbacks(e.callId)).toEqual([]);
+
+      // A case that is no longer open is not called: the client gets the plain request.
+      const f = await onCase();
+      await env.pool.query(`UPDATE cases SET status = 'decision_required' WHERE id = $1`, [f.caseId]);
+      await relayEnded(f.callSid, f.callId, { CallStatus: 'completed' });
+      expect(await callbackFor(f.caseId)).toEqual([]);
+      expect(await callbacks(f.callId)).toEqual(['the caller asked for a person and hung up before they were put through']);
+    } finally { await policy('21:00', '08:00'); }
+  });
+
+  it('locks a case callback to when it can really be placed: after the minimum gap since the call just ended, or leaves a request when the calls allowed today are used', async () => {
+    const KL = 'Asia/Kuala_Lumpur';
+    const hhmm = (d: Date) => { const p = localParts(d, KL); return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`; };
+    const later = (h: number) => hhmm(new Date(Date.now() + h * 3_600_000));
+    // the platform's default limits (an hour between calls, three a day), with quiet hours well away from now
+    await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: later(8), quietEnd: later(10), maxPerDay: 3, maxPerWeek: 10, minGapMinutes: 60 }));
+    const outboundCaseCall = async () => {
+      const ref = `G-${++n}`;
+      const caseId = (await must(post(`/internal/tenants/${tenantId}/cases`, { caseRef: ref, contactRef: `client-${ref}`, phone: `+6012${String(n).padStart(7, '0')}`, country: 'MY', currency: 'MYR', openingBalance: '100.00', timeZone: KL }))).json().id as string;
+      const h = await handedOver();
+      const hash = (await env.pool.query('SELECT contact_hash FROM cases WHERE id = $1', [caseId])).rows[0].contact_hash;
+      // our own dial to the contact, five minutes ago: it counts towards their limits
+      const startedAt = new Date(Date.now() - 5 * 60_000);
+      await env.pool.query(`UPDATE calls SET case_id = $2, direction = 'outbound', from_number_id = $3, contact_hash = $4, started_at = $5 WHERE id = $1`, [h.callId, caseId, handNumber, hash, startedAt]);
+      return { ...h, caseId, hash, startedAt };
+    };
+    try {
+      const a = await outboundCaseCall();
+      await relayEnded(a.callSid, a.callId, { CallStatus: 'completed' }, CUSTOMER);
+      const [cb] = (await env.pool.query(`SELECT scheduled_for FROM case_actions WHERE case_id = $1 AND dedupe_key = $2`, [a.caseId, `transfer-callback:${a.callId}`])).rows;
+      // not in 15 minutes, which the dispatcher would hold back and then miss, but when the hour since that call is up
+      expect(Math.abs(new Date(cb.scheduled_for).getTime() - (a.startedAt.getTime() + 60 * 60_000))).toBeLessThan(2000);
+
+      // the day's calls already used: a callback could only be held back and missed, so the client gets a request instead
+      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: later(8), quietEnd: later(10), maxPerDay: 1, maxPerWeek: 10, minGapMinutes: 60 }));
+      const b = await outboundCaseCall();
+      await relayEnded(b.callSid, b.callId, { CallStatus: 'completed' }, CUSTOMER);
+      expect((await env.pool.query(`SELECT count(*)::int AS n FROM case_actions WHERE case_id = $1`, [b.caseId])).rows[0].n).toBe(0);
+      expect(await callbacks(b.callId)).toEqual(['the caller asked for a person and hung up before they were put through']);
+    } finally {
+      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
+    }
   });
 });

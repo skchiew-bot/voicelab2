@@ -194,6 +194,29 @@ async function scheduleNext(c: pg.PoolClient, cs: { id: string; tenant_id: strin
   return at;
 }
 
+/**
+ * A caller on a case asked for a person and hung up before reaching one: they are called back. The time is locked to
+ * the first moment the dispatcher may really place it, so our own rules never make it miss: no sooner than `from`, not
+ * before the contact's minimum gap since their last call has passed (the call they just hung up counts), and outside
+ * their quiet hours. It is placed like any other callback (claimed, through the gate, within its lateness or not at
+ * all). Once per call. Null when it cannot be scheduled: the case is not open, or the contact has had as many calls as
+ * the day or week allows, so a callback would only be held back and missed; the caller of this then leaves the client a
+ * callback request instead.
+ */
+export async function scheduleTransferCallback(c: pg.PoolClient, caseId: string, callId: string, from: Date, now = new Date()): Promise<Date | null> {
+  await lockCase(c, caseId);
+  const cs = (await c.query('SELECT id, tenant_id, time_zone, status, contact_hash FROM cases WHERE id = $1', [caseId])).rows[0];
+  if (!cs || cs.status !== 'open') return null;
+  const pol = await getContactPolicy(c, cs.tenant_id);
+  let at = from;
+  if (pol) {
+    const w = await contactWindow(c, cs.tenant_id, cs.contact_hash, now);
+    if (w.dayCount >= pol.maxPerDay || w.weekCount >= pol.maxPerWeek) return null;
+    if (w.lastAt && pol.minGapMinutes > 0) at = new Date(Math.max(at.getTime(), new Date(w.lastAt).getTime() + pol.minGapMinutes * 60_000));
+  }
+  return scheduleNext(c, cs, at, { kind: 'callback', channel: 'voice', dedupeKey: `transfer-callback:${callId}`, note: 'The caller asked for a person and hung up before reaching one.' });
+}
+
 const cancelActions = (c: pg.PoolClient, caseId: string, why: string, keepThanks = false) =>
   c.query(`UPDATE case_actions SET status = 'cancelled', note = $2, updated_at = now() WHERE case_id = $1 AND status IN ('pending', 'leased') AND ($3::boolean IS FALSE OR kind <> 'thanks')`, [caseId, why, keepThanks]);
 

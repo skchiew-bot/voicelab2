@@ -20,6 +20,7 @@ import { isFull, providerLoad } from './concurrency.js';
 import { normalizeE164 } from './dnc.js';
 import { recordEvent } from './events.js';
 import { addCallbackRequest, getFallbackPlan } from './resilience.js';
+import { scheduleTransferCallback } from './cases.js';
 
 export interface TransferDeps { pool: pg.Pool; baseUrl: string }
 export interface TransferSettings { agentNumber: string; ringSeconds: number; whisper: boolean }
@@ -73,13 +74,13 @@ export type TransferStep = 'relay-ended' | 'whisper' | 'accept' | 'dialled';
 export const transferUrl = (baseUrl: string, providerId: string, step: TransferStep, callId: string) =>
   `${baseUrl}/webhooks/twilio/${providerId}/transfer/${step}?callId=${callId}`;
 
-type CallRow = { id: string; tenant_id: string; project_id: string | null; provider_id: string; provider_call_id: string | null; direction: string; status: string; from_number_id: string | null; relay_failed: boolean; transfer_status: string | null; transfer_accepted_at: Date | null; transfer_screened: boolean | null };
+type CallRow = { id: string; tenant_id: string; project_id: string | null; provider_id: string; provider_call_id: string | null; direction: string; status: string; from_number_id: string | null; relay_failed: boolean; transfer_status: string | null; transfer_accepted_at: Date | null; transfer_screened: boolean | null; case_id: string | null };
 
 /** The call, locked, if it is the one the request is for: on this provider, with the Twilio call id it names. */
 async function lockCall(c: pg.PoolClient, providerId: string, callId: string, callSid: string | undefined): Promise<CallRow> {
   const call = (await c.query(
     `SELECT id, tenant_id, project_id, provider_id, provider_call_id, direction, status, from_number_id, relay_failed, transfer_status,
-            transfer_accepted_at, transfer_screened
+            transfer_accepted_at, transfer_screened, case_id
        FROM calls WHERE id = $1 FOR UPDATE`, [callId])).rows[0] as CallRow | undefined;
   if (!call || call.provider_id !== providerId || !callSid || call.provider_call_id !== callSid) throw new AppError(404, 'Unknown call.');
   return call;
@@ -190,11 +191,27 @@ export async function afterRelay(d: TransferDeps, providerId: string, callId: st
   });
 }
 
+/** How long after hanging up a caller on a case is called back, at the soonest. Their contact rules may make it later. */
+export const CALLBACK_AFTER_HANGUP_MS = 15 * 60_000;
+
+/**
+ * The caller asked for a person and hung up before reaching one. A caller on a case is called back by the case
+ * dispatcher (so through `gateOutbound`, its claim and its lateness rule), at the soonest 15 minutes on and never inside
+ * the contact's limits or quiet hours. A caller not on a case, or one whose day's or week's calls are used up, is left as
+ * a callback request for the client: we never keep their number. Run once per call, on the step that records the
+ * hang-up (the transfer status moves forward under the call's lock).
+ */
+async function callerHungUp(c: pg.PoolClient, call: Pick<CallRow, 'id' | 'tenant_id' | 'project_id' | 'case_id'>, reason: string) {
+  const at = call.case_id ? await scheduleTransferCallback(c, call.case_id, call.id, new Date(Date.now() + CALLBACK_AFTER_HANGUP_MS)) : null;
+  if (at) { await event(c, call as CallRow, 'transfer.callback_scheduled', { at: at.toISOString() }); return; }
+  await addCallbackRequest(c, { tenantId: call.tenant_id, callId: call.id, reason });
+}
+
 const ABANDONED_BEFORE_DIAL = 'the caller asked for a person and hung up before they were put through';
-async function abandonBeforeDial(c: pg.PoolClient, call: Pick<CallRow, 'id' | 'tenant_id' | 'project_id'>) {
+async function abandonBeforeDial(c: pg.PoolClient, call: Pick<CallRow, 'id' | 'tenant_id' | 'project_id' | 'case_id'>) {
   await c.query(`UPDATE calls SET transfer_status = 'abandoned' WHERE id = $1`, [call.id]);
   await event(c, call as CallRow, 'transfer.abandoned', { when: 'before_dial' });
-  await addCallbackRequest(c, { tenantId: call.tenant_id, callId: call.id, reason: ABANDONED_BEFORE_DIAL });
+  await callerHungUp(c, call, ABANDONED_BEFORE_DIAL);
 }
 
 /**
@@ -255,21 +272,23 @@ export async function afterDial(d: TransferDeps, providerId: string, callId: str
     // person, or a voicemail) is, so a missing duration there stays unknown and the call's cost waits for a person.
     // Only a status that says the leg never connected means no time; anything else without a duration is unknown.
     const seconds = dialSeconds(params.DialCallDuration) ?? (NEVER_CONNECTED.includes(params.DialCallStatus ?? '') ? 0 : null);
+    // The agent's leg is a call of its own at Twilio: its id (never a number) is kept so its price can be checked.
+    const legSid = /^[A-Za-z0-9_]{2,64}$/.test(params.DialCallSid ?? '') ? params.DialCallSid! : null;
     if (call.transfer_status === 'dialing') {
       const next = outcome === 'answered' ? 'answered' : present ? outcome : 'abandoned';
-      await c.query('UPDATE calls SET transfer_status = $2, transfer_seconds = $3 WHERE id = $1', [callId, next, seconds]);
+      await c.query('UPDATE calls SET transfer_status = $2, transfer_seconds = $3, transfer_leg_sid = $4 WHERE id = $1', [callId, next, seconds, legSid]);
       await event(c, call, `transfer.${next}`, next === 'abandoned' ? { when: 'while_ringing' } : {});
       await costIfEnded(c, callId);
       if (next === 'unanswered' || next === 'failed') return ladder(c, call, 'the caller asked for a person and no one answered', true);
       // The caller hung up while the agent's phone rang (or before the agent took the call): they asked for a person and
       // did not reach one, so a callback is recorded, once.
-      if (next === 'abandoned') await addCallbackRequest(c, { tenantId: call.tenant_id, callId, reason: 'the caller asked for a person and hung up before anyone answered' });
+      if (next === 'abandoned') await callerHungUp(c, call, 'the caller asked for a person and hung up before anyone answered');
       return twimlHangup();
     }
     // The call's end was reported first, while the dial was still under way (lesson L-029): its outcome stays unknown
     // and its callback stays recorded, but the agent's leg can now be costed.
     if (call.transfer_status === 'unknown' && seconds !== null) {
-      await c.query('UPDATE calls SET transfer_seconds = $2 WHERE id = $1 AND transfer_seconds IS NULL', [callId, seconds]);
+      await c.query('UPDATE calls SET transfer_seconds = $2, transfer_leg_sid = $3 WHERE id = $1 AND transfer_seconds IS NULL', [callId, seconds, legSid]);
       await costIfEnded(c, callId);
       return twimlHangup();
     }
@@ -320,7 +339,7 @@ export async function settleTransferOnEnd(c: pg.PoolClient, callId: string) {
     // no one was rung and no one was reached, so a callback is recorded, once. A call the relay already fell back on
     // has its callback.
     const waiting = (await c.query(
-      `SELECT ca.id, ca.tenant_id, ca.project_id FROM calls ca JOIN workflow_runs r ON r.call_id = ca.id AND r.kind = 'live'
+      `SELECT ca.id, ca.tenant_id, ca.project_id, ca.case_id FROM calls ca JOIN workflow_runs r ON r.call_id = ca.id AND r.kind = 'live'
         WHERE ca.id = $1 AND ca.transfer_status IS NULL AND NOT ca.relay_failed
           AND r.status = 'ended' AND r.outcome = 'handoff_human' AND r.error IS NULL`, [callId])).rows[0] as CallRow | undefined;
     if (waiting) await abandonBeforeDial(c, waiting);

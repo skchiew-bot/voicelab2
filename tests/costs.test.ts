@@ -24,11 +24,11 @@ beforeAll(async () => {
   }))).json().id;
   voice = (await must(env.call(st, 'POST', '/internal/providers', { adapterKey: 'openai', name: 'oa', params: { apiKey: 'k' } }))).json().id;
 
-  await must(env.call(st, 'POST', `/internal/providers/${telephony}/charging`, {
+  await must(env.call(st, 'POST', `/internal/providers/${telephony}/charging`, { reason: 'Set up for this test.', 
     effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 6, burstPremiumMultiplier: 2,
     components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.0140', currency: 'USD' }],
   }));
-  await must(env.call(st, 'POST', `/internal/providers/${voice}/charging`, {
+  await must(env.call(st, 'POST', `/internal/providers/${voice}/charging`, { reason: 'Set up for this test.', 
     effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1,
     components: [
       { component: 'llm', unit: 'per_1m_tokens', rate: '2.50', currency: 'USD', billingLine: 'input' },
@@ -79,7 +79,7 @@ describe('per-call cost record', () => {
     const p = (await env.call(st, 'POST', '/internal/providers', {
       adapterKey: 'telnyx', name: 'tx-rates', params: { apiKey: 'k', webhookUrl: 'https://x.example/h' },
     })).json().id;
-    const add = (from: string, rate: string) => env.call(st, 'POST', `/internal/providers/${p}/charging`, {
+    const add = (from: string, rate: string) => env.call(st, 'POST', `/internal/providers/${p}/charging`, { reason: 'Set up for this test.', 
       effectiveFrom: from, billingIncrementSeconds: 1, components: [{ component: 'telephony_leg', unit: 'per_minute', rate, currency: 'USD' }],
     });
     await add('2026-01-01T00:00:00Z', '0.0070');
@@ -108,7 +108,7 @@ describe('per-call cost record', () => {
     const st = env.staffToken;
     await env.call(st, 'POST', '/internal/fx', { currency: 'EUR', perUsd: '0.8', effectiveFrom: '2026-01-01T00:00:00Z' });
     const p = (await env.call(st, 'POST', '/internal/providers', { adapterKey: 'elevenlabs', name: 'el-eur', params: { apiKey: 'k' } })).json().id;
-    await env.call(st, 'POST', `/internal/providers/${p}/charging`, {
+    await env.call(st, 'POST', `/internal/providers/${p}/charging`, { reason: 'Set up for this test.', 
       effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1,
       components: [{ component: 'platform', unit: 'per_minute', rate: '0.08', currency: 'EUR' }],
     });
@@ -156,7 +156,7 @@ describe('FX with no MYR rate', () => {
       const st = e2.staffToken;
       const t = (await e2.call(st, 'POST', '/internal/tenants', { name: 'T' })).json().id;
       const p = (await e2.call(st, 'POST', '/internal/providers', { adapterKey: 'telnyx', name: 'x', params: { apiKey: 'k', webhookUrl: 'https://x.example/h' } })).json().id;
-      await e2.call(st, 'POST', `/internal/providers/${p}/charging`, {
+      await e2.call(st, 'POST', `/internal/providers/${p}/charging`, { reason: 'Set up for this test.', 
         effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1,
         components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.01', currency: 'USD' }],
       });
@@ -203,7 +203,7 @@ describe('credits and the client meter', () => {
     const st = env.staffToken;
     const t3 = (await env.call(st, 'POST', '/internal/tenants', { name: 'Round Co' })).json().id;
     const p = (await env.call(st, 'POST', '/internal/providers', { adapterKey: 'telnyx', name: 'tx-round', params: { apiKey: 'k', webhookUrl: 'https://x.example/h' } })).json().id;
-    await env.call(st, 'POST', `/internal/providers/${p}/charging`, {
+    await env.call(st, 'POST', `/internal/providers/${p}/charging`, { reason: 'Set up for this test.', 
       effectiveFrom: '2027-01-01T00:00:00Z', billingIncrementSeconds: 1,
       components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.01', currency: 'USD' }],
     });

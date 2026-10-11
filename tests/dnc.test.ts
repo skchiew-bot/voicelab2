@@ -68,7 +68,7 @@ describe('national registry', () => {
   it('lets a number come off the list, which takes effect straight away', async () => {
     await load({ country: 'MY', numbers: ['+60155550000'] });
     expect((await check(tenantA, 'MY', '+60155550000')).allowed).toBe(false);
-    const gone = await env.call(st(), 'POST', '/internal/dnc/numbers/remove', { country: 'MY', number: '+60 15 555 0000' });
+    const gone = await env.call(st(), 'POST', '/internal/dnc/numbers/remove', { reason: 'Set up for this test.', country: 'MY', number: '+60 15 555 0000' });
     expect(gone.json()).toEqual({ removed: 1 });
     expect((await check(tenantA, 'MY', '+60155550000')).allowed).toBe(true);
   });

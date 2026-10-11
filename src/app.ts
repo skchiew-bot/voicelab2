@@ -20,6 +20,7 @@ import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, g
 import { addNumber, callKnown, callQueued, callTimedOut, costCall, costPendingCalls, retryFailedCosts, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, promoteWaiting, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
 import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, WAIT_LINE_MS, waitLine, type RelayDeps, type RelaySession } from './store/relay.js';
 import { recordingAudio } from './store/recordings.js';
+import { needsReason, reasonOf, recordRoutes, takeReason } from './change-reason.js';
 import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
 import { accept, afterDial, afterRelay, settleAgentLeg, transferUrl, twimlHangup, twimlHoldingThenHangup, whisper } from './store/transfer.js';
 import { DEFAULT_FALLBACK } from './resilience/fallback.js';
@@ -81,6 +82,7 @@ export interface Deps {
 export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): FastifyInstance {
   const http: Fetch = deps.fetch ?? fetch;
   const app = Fastify({ logger: false });
+  recordRoutes(app);
   const key = parseKey(config.VOICELAB_SECRET_KEY);
   const dncKey = dncKeyFrom(key);
   /** The gate judges quiet hours and contact limits by the keyed hash of the number; derive it for callers who only send the number. */
@@ -107,8 +109,16 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const s = await authenticate(req);
     if (s.actor.kind !== 'internal') throw new AppError(403, 'Internal access only.');
     if (s.actor.readOnly && req.method !== 'GET' && req.method !== 'HEAD') throw new AppError(403, 'Read-only access: this user can look but not change anything.');
-    return s;
+    const why = reasonOf(req);
+    return why ? { ...s, actor: { ...s.actor, reason: why } } : s;
   }
+
+  // A settings change needs a reason: checked once staff are known, before the route reads anything (src/change-reason.ts).
+  app.addHook('preHandler', async (req) => {
+    if (!needsReason(req)) return;
+    await internal(req);
+    takeReason(req);
+  });
 
   /** Managing who can sign in is for admins only. */
   async function admin(req: FastifyRequest): Promise<Session> {

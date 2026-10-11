@@ -83,13 +83,13 @@ beforeAll(async () => {
   const { createUser } = await import('../src/store/tenants.js');
   otherAdmin = (await withActor(env.pool, { kind: 'internal' }, (c) => createUser(c, null, { tenantId: null, email: 'reviewer@daythree.test', role: 'internal_admin' }))).token;
   voiceId = (await must(post('/internal/providers', { adapterKey: 'elevenlabs', name: 'el', params: { apiKey: 'k' } }))).json().id;
-  await must(post(`/internal/providers/${voiceId}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'tts', unit: 'per_1k_characters', rate: '0.30', currency: 'USD' }] }));
+  await must(post(`/internal/providers/${voiceId}/charging`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'tts', unit: 'per_1k_characters', rate: '0.30', currency: 'USD' }] }));
   const c = (await must(post(`/internal/tenants/${tenantId}/workflows`, { name: 'learn_flow', definition: flow }))).json();
   wfId = c.workflow.id;
   await goLive(wfId, c.version.id);
-  await must(put(`/internal/tenants/${tenantId}/learning/config`, { minSupport: 5, driftMinSamples: 5, voiceProviderId: voiceId }));
-  await must(put('/internal/model-config/council_quality', { tier: 'opus', modelId: 'q-opus', escalateTo: null }));
-  await must(put('/internal/model-config/council_cx', { tier: 'opus', modelId: 'cx-opus', escalateTo: null }));
+  await must(put(`/internal/tenants/${tenantId}/learning/config`, { reason: 'Set up for this test.', minSupport: 5, driftMinSamples: 5, voiceProviderId: voiceId }));
+  await must(put('/internal/model-config/council_quality', { reason: 'Set up for this test.', tier: 'opus', modelId: 'q-opus', escalateTo: null }));
+  await must(put('/internal/model-config/council_cx', { reason: 'Set up for this test.', tier: 'opus', modelId: 'cx-opus', escalateTo: null }));
 });
 afterAll(async () => { await env?.teardown(); });
 
@@ -287,7 +287,7 @@ describe('a model that writes the script', () => {
       const r = await startRun(runDeps, null, { workflowId: wf4.workflow.id, environment: 'production', kind: 'live', variables: { name: NAMES[i]!, amount: String(400 + i) }, callId: await newCall(wf4.workflow.id) });
       await replyRun(runDeps, r.id, 'yes thanks');
     }
-    await must(put('/internal/model-config/distill_script', { tier: 'sonnet', modelId: 'sonnet-model', escalateTo: 'opus' }));
+    await must(put('/internal/model-config/distill_script', { reason: 'Set up for this test.', tier: 'sonnet', modelId: 'sonnet-model', escalateTo: 'opus' }));
     const asked: string[] = [];
     const mk = (tier: 'sonnet' | 'opus', confidence: number, script: string) => ({ tier, model: `${tier}-model`, distill: async () => { asked.push(tier); return { script, confidence, inputTokens: 500, outputTokens: 50 }; } });
     const { distil } = await import('../src/store/learning.js');

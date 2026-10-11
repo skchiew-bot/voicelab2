@@ -381,7 +381,14 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
         }),
       })).min(1),
     }).parse(req.body);
-    return reply.status(201).send(await withActor(pool, s.actor, (c) => recordCallCost(c, s.userId, { callId, ...body })));
+    return reply.status(201).send(await withActor(pool, s.actor, async (c) => {
+      // A live call carried usage this route cannot see (its relay, its model tokens): it is costed from its own records
+      // (re-price), never from figures entered here that would leave them out and make it look complete.
+      if ((await c.query(`SELECT 1 FROM workflow_runs WHERE call_id = $1 AND kind = 'live'`, [callId])).rowCount) {
+        throw new AppError(409, 'This was a live call with a workflow: its relay and model usage are costed from its own records. Use re-price instead.');
+      }
+      return recordCallCost(c, s.userId, { callId, ...body });
+    }));
   });
   app.get('/internal/calls/:callId/cost', async (req) => {
     const s = await internal(req);

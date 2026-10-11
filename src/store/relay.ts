@@ -363,6 +363,8 @@ export async function failed(d: RelayDeps, session: RelaySession, already: Relay
     return (await getFallbackPlan(c, session.tenantId)) ?? DEFAULT_FALLBACK;
   }).catch(() => DEFAULT_FALLBACK);
   await event(d, session, 'relay.fallback', { steps: ['record_callback_request', 'holding_message'] }).catch(() => undefined);
+  // The relay's own voice speaks the holding message: its characters are speech on the call, priced with the rest.
+  await event(d, session, 'relay.holding_message', { synthChars: plan.holdingMessage.length }).catch(() => undefined);
   // The run ends now, whatever it was doing, so nothing sensitive is held for a call that has given up. A reply still being
   // applied cannot then land: its write needs the run to be as it left it. What that reply did to a client's system is
   // unknown, so the end says it was cut off (L-002).

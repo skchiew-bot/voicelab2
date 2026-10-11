@@ -763,6 +763,9 @@ describe('a live call through the speech relay', () => {
     expect(got[1]).toEqual({ type: 'end' });
     const cb = (await env.pool.query('SELECT reason FROM callback_requests WHERE call_id = $1', [callId])).rows;
     expect(cb).toEqual([{ reason: 'the live call could not carry on' }]);
+    // the relay's own voice spoke the holding message: its characters are recorded as speech on the call, to be priced
+    const said = (await env.pool.query(`SELECT payload FROM call_events WHERE call_id = $1 AND type = 'relay.holding_message'`, [callId])).rows;
+    expect(said).toEqual([{ payload: { synthChars: String(got[0]!.token).length } }]);
     line.ws.close(); await line.closed;
   });
 

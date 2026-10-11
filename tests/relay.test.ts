@@ -262,6 +262,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('carries on the same run when the relay reconnects, and starts the workflow once when two connections arrive together', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
     const { callSid, callId } = await ring();
     const [a, b] = await Promise.all([connect(), connect()]);
     a.send(setup(callSid, callId)); b.send(setup(callSid, callId));
@@ -287,13 +288,17 @@ describe('a live call through the speech relay', () => {
     const [a, b] = await Promise.all([connect(), connect()]);
     a.send(setup(callSid, callId));
     await a.until(2);                                                                          // the run exists, and a has put the question
-    b.send(setup(callSid, callId)); await settle();                                          // b arrives after it: it carries the call on, silently
-    const opened = (await env.pool.query(`SELECT payload->>'opening' AS o FROM call_events WHERE call_id = $1 AND type = 'relay.connected' ORDER BY id`, [callId])).rows.map((r) => r.o);
-    expect(opened).toEqual(['start', 'resume']);
+    b.send(setup(callSid, callId));                                                            // b arrives after it: it carries the call on, silently
+    const opened = async () => (await env.pool.query(`SELECT payload->>'opening' AS o FROM call_events WHERE call_id = $1 AND type = 'relay.connected' ORDER BY id`, [callId])).rows.map((r) => r.o);
+    expect(await waitFor(async () => (await opened()).length === 2)).toBe(true);
+    expect(await opened()).toEqual(['start', 'resume']);
     expect(b.got).toEqual([]);
-    // The question went out on a, so the caller may not have heard it on b's line: their words are not applied to it.
-    b.send(prompt('no'));
+    // The question went out on a, so the caller may not have heard it on b's line: nothing they say before b has asked
+    // it is applied to it, however many times they speak (here twice, before the first is handled).
+    b.send(prompt('no')); b.send(prompt('no, sorry'));
     expect((await b.until(2)).map((m) => m.type)).toEqual(['play', 'text']);
+    await settle(); await settle();
+    expect(b.got).toHaveLength(2);
     expect((await runOf(callId))[0]).toMatchObject({ status: 'awaiting_reply' });
     b.send(prompt('no'));                                                                      // the answer to the question b put
     await b.until(4); await settle();

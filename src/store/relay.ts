@@ -179,8 +179,9 @@ export async function openRelay(d: RelayDeps, providerId: string, setup: Extract
 /**
  * Something came from the relay. The caller's finished words are the answer to the question the call was on when they
  * finished speaking (`askedAt`); anything they say while that answer is being worked out was said before the next
- * question, so it is not applied to it. `askedAt` is null for words that arrived before this connection was serving the
- * call: on a connection that started the run they were said before the first question was heard, so they answer nothing.
+ * question, so it is not applied to it. `askedAt` is null for words that arrived before this connection had put a
+ * question to the caller itself (before its first lines, or, on a connection that carried the call on, before it asked
+ * again): they answer nothing.
  */
 export async function onRelayMessage(d: RelayDeps, session: RelaySession, m: RelayInbound, askedAt?: number | null): Promise<RelayOutbound[]> {
   if (session.ended || session.closed) return [];

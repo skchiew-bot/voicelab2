@@ -431,7 +431,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     return withActor(pool, s.actor, (c) => gateOutbound(c, dncKey, withContact(body)));
   });
 
-  registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerWorkflowRoutes(app, { pool, key, internal, productionDeployers: config.PRODUCTION_DEPLOYERS, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
   registerAppointmentRoutes(app, { pool, internal });
   registerKnowledgeRoutes(app, { pool, internal });
   registerCaseRoutes(app, { internal, cases: { calls: callDeps, ...deps.cases } });

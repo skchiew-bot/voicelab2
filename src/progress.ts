@@ -109,7 +109,7 @@ export const PHASES: PhaseProgress[] = [
       'Mood and intent are read by word lists (English and Bahasa Malaysia, extendable per client); a model for turns the lists cannot read is not connected',
       'QA judgement questions need a model; none is connected, so they are left out of the score and the scorecard says it is incomplete',
       'The council (Phase 6) does not exist, so ticket council notes are empty and changes are not reviewed by it',
-      'Changes can be proposed, approved and put live; a change to a live flow made some other way is not stopped from skipping this path',
+      'Production is reached only through an approved change, except by the deployers the owner names in PRODUCTION_DEPLOYERS (owner\'s decision, 2026-10-11); none is named until the owner sets it, so until then every production deploy and rollback needs a change. A rollback by anyone else means proposing the earlier version as a change, which needs it live in staging and rehearsed again',
     ],
   },
   {

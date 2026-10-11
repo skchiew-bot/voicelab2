@@ -47,6 +47,7 @@ Sources: [AWS Malaysia region launch](https://aws.amazon.com/blogs/aws/now-open-
 | `PUBLIC_BASE_URL` | Task environment | `https://voice.example.my` (no trailing slash) |
 | `PORT` | Task environment | `3000` (the load balancer forwards to it) |
 | `RECONCILE_TOLERANCE_PCT` | Task environment | `2` |
+| `PRODUCTION_DEPLOYERS` | Task environment | Sign-in emails, comma-separated, of the staff who may put a flow live in production without an approved change (the owner names them). Empty: every production deploy needs one |
 
 ## Scheduled jobs
 

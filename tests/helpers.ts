@@ -30,7 +30,7 @@ export function fakeProviderApi() {
   return { ...state, state, fetch: fetchFn };
 }
 
-export async function setupDb(opts: { integrationHttp?: import('../src/workflows/integrations.js').HttpDeps; judges?: import('../src/store/qa.js').QaDeps['judges']; learning?: import('../src/app.js').Deps['learning']; cases?: import('../src/app.js').Deps['cases']; mailer?: import('../src/app.js').Deps['mailer'] } = {}) {
+export async function setupDb(opts: { integrationHttp?: import('../src/workflows/integrations.js').HttpDeps; judges?: import('../src/store/qa.js').QaDeps['judges']; learning?: import('../src/app.js').Deps['learning']; cases?: import('../src/app.js').Deps['cases']; mailer?: import('../src/app.js').Deps['mailer']; productionDeployers?: string[] } = {}) {
   const name = `voicelab_test_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
   const admin = new pg.Client({ connectionString: ADMIN_URL });
   await admin.connect();
@@ -49,6 +49,9 @@ export async function setupDb(opts: { integrationHttp?: import('../src/workflows
     PUBLIC_BASE_URL: 'https://voicelab.test',
     RECONCILE_TOLERANCE_PCT: 2,
     SCHEDULER: 'off', // tests drive the scheduler with tick()
+    // The suite's staff admin is a named deployer, so tests can put flows live in production directly; the approval
+    // rule for everyone else is tested on its own (tests/production-approval.test.ts).
+    PRODUCTION_DEPLOYERS: opts.productionDeployers ?? ['staff@daythree.test'],
   };
   const provider = fakeProviderApi();
   const app = buildApp(pool, config, { fetch: provider.fetch, integrationHttp: opts.integrationHttp, judges: opts.judges, learning: opts.learning, cases: opts.cases, mailer: opts.mailer });

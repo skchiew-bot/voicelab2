@@ -143,7 +143,24 @@ async function referenceProblems(c: pg.PoolClient, wf: { tenant_id: string; name
  * environment and get the variables it needs. Production also needs the version to be live in staging and to
  * have passed a simulation there.
  */
-export async function deploy(c: pg.PoolClient, actorId: string | null, workflowId: string, e: { versionId: string; environment: Environment }) {
+/**
+ * Who is putting a version live: an approved change (`applyChange`), or a person directly. In production a person may do
+ * so only if they are one of the deployers the owner named (PRODUCTION_DEPLOYERS); anyone else proposes a change.
+ */
+export type DeployAuthority = { by: 'change' } | { by: 'person'; deployers: readonly string[] };
+
+/** Production is reached directly only by a named deployer; anything else goes through an approved change. */
+async function mayGoLive(c: pg.PoolClient, actorId: string | null, environment: Environment, how: DeployAuthority): Promise<boolean> {
+  if (environment !== 'production') return false;
+  if (how.by === 'change') return false;
+  const email = actorId ? (await c.query('SELECT lower(email) AS email FROM users WHERE id = $1 AND disabled_at IS NULL', [actorId])).rows[0]?.email as string | undefined : undefined;
+  if (!email || !how.deployers.includes(email)) {
+    throw new AppError(403, 'Putting a flow live in production needs an approved change: propose it, and a different person approves it. Only the deployers the owner has named go live directly.');
+  }
+  return true;
+}
+
+export async function deploy(c: pg.PoolClient, actorId: string | null, workflowId: string, e: { versionId: string; environment: Environment }, how: DeployAuthority) {
   await c.query('SELECT id FROM workflows WHERE id = $1 FOR UPDATE', [workflowId]);
   const wf = await getWorkflow(c, workflowId);
   await lockTenant(c, wf.tenant_id); // deploys of one tenant's workflows are checked against each other one at a time
@@ -184,15 +201,16 @@ export async function deploy(c: pg.PoolClient, actorId: string | null, workflowI
     if (problems.length) throw new AppError(409, `Version ${label} was simulated against different versions of the workflows it uses than the ones live in production. Simulate it again.`, problems);
   }
 
+  const direct = await mayGoLive(c, actorId, e.environment, how);
   const d = (await c.query(
     `INSERT INTO workflow_deployments (workflow_id, environment, version_id, kind, deployed_by) VALUES ($1,$2,$3,'deploy',$4) RETURNING *`,
     [workflowId, e.environment, version.id, actorId])).rows[0];
-  await audit(c, actorId, 'workflow.deploy', 'workflow', workflowId, { version: label, environment: e.environment });
+  await audit(c, actorId, 'workflow.deploy', 'workflow', workflowId, { version: label, environment: e.environment, ...(direct ? { approval: 'named deployer' } : {}), ...(how.by === 'change' ? { approval: 'change' } : {}) });
   return { ...d, version: label };
 }
 
 /** Go back to the version that was live before the current one. Calls already under way keep the version they started on. */
-export async function rollback(c: pg.PoolClient, actorId: string | null, workflowId: string, environment: Environment) {
+export async function rollback(c: pg.PoolClient, actorId: string | null, workflowId: string, environment: Environment, how: DeployAuthority) {
   await c.query('SELECT id FROM workflows WHERE id = $1 FOR UPDATE', [workflowId]);
   const wf = await getWorkflow(c, workflowId);
   await lockTenant(c, wf.tenant_id);
@@ -203,10 +221,11 @@ export async function rollback(c: pg.PoolClient, actorId: string | null, workflo
   if (refs.length) throw new AppError(409, `Version ${versionLabel(target)} cannot be restored: it depends on workflows that are no longer ready.`, refs.map((r) => r.message));
   const broken = await dependentProblems(c, wf, target.definition, environment);
   if (broken.length) throw new AppError(409, `Version ${versionLabel(target)} cannot be restored: it would break workflows that are live in ${environment} and depend on this one.`, broken);
+  const direct = await mayGoLive(c, actorId, environment, how);
   const d = (await c.query(
     `INSERT INTO workflow_deployments (workflow_id, environment, version_id, kind, deployed_by) VALUES ($1,$2,$3,'rollback',$4) RETURNING *`,
     [workflowId, environment, target.id, actorId])).rows[0];
-  await audit(c, actorId, 'workflow.rollback', 'workflow', workflowId, { to: versionLabel(target), environment });
+  await audit(c, actorId, 'workflow.rollback', 'workflow', workflowId, { to: versionLabel(target), environment, ...(direct ? { approval: 'named deployer' } : {}) });
   return { ...d, version: versionLabel(target) };
 }
 

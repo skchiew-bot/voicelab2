@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api, type FxRate, type RateCard } from './api';
+import { api, type FxRate, type ModelRate, type RateCard } from './api';
 import { Errors, Field, fmtDate, fmtDecimal, useAction, useLoad } from './ui';
 
 function Fx() {
@@ -74,6 +74,45 @@ function Card() {
   );
 }
 
+function Models() {
+  const rates = useLoad(() => api<ModelRate[]>('GET', '/internal/model-rates'));
+  const [model, setModel] = useState('');
+  const [input, setInput] = useState('');
+  const [output, setOutput] = useState('');
+  const [currency, setCurrency] = useState('USD');
+  const [from, setFrom] = useState('');
+  const { pending, error, run } = useAction();
+  return (
+    <section className="card" aria-label="Model rates">
+      <h2>Model rates</h2>
+      <p className="muted">What each model costs per million tokens, as its provider names it. A call's model decisions are priced at the rate in force when the call started; a new rate never changes a past call. <strong>A call whose model has no rate cannot be costed.</strong></p>
+      <Errors error={rates.error} />
+      {rates.data && rates.data.length === 0 && <div className="notice" role="status">No model rates yet: a call that used a model cannot be costed until its rate is added.</div>}
+      {rates.data && rates.data.length > 0 && (
+        <table>
+          <thead><tr><th>Model</th><th>Input / 1M tokens</th><th>Output / 1M tokens</th><th>Effective from</th></tr></thead>
+          <tbody>{rates.data.map((r) => (
+            <tr key={r.id}><td>{r.model}</td><td>{fmtDecimal(r.input_per_1m)} {r.currency}</td><td>{fmtDecimal(r.output_per_1m)} {r.currency}</td><td>{fmtDate(r.effective_from)}</td></tr>
+          ))}</tbody>
+        </table>
+      )}
+      <form className="grid" aria-label="Add model rate" onSubmit={async (e) => {
+        e.preventDefault();
+        const ok = await run(() => api('POST', '/internal/model-rates', { model: model.trim(), inputPer1m: input.trim(), outputPer1m: output.trim(), currency, effectiveFrom: new Date(from).toISOString() }));
+        if (ok) { setInput(''); setOutput(''); rates.reload(); }
+      }}>
+        <Field label="Model" help="As the provider names it, the same name the model decisions log."><input value={model} onChange={(e) => setModel(e.target.value)} required /></Field>
+        <Field label="Input per 1M tokens"><input inputMode="decimal" value={input} onChange={(e) => setInput(e.target.value)} required /></Field>
+        <Field label="Output per 1M tokens"><input inputMode="decimal" value={output} onChange={(e) => setOutput(e.target.value)} required /></Field>
+        <Field label="Currency"><input maxLength={3} value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase())} required /></Field>
+        <Field label="Effective from (your local time)"><input type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} required /></Field>
+        <div><button type="submit" disabled={pending}>Add model rate</button></div>
+      </form>
+      <Errors error={error} />
+    </section>
+  );
+}
+
 export function Rates() {
-  return <><h1>Rates</h1><Fx /><Card /></>;
+  return <><h1>Rates</h1><Fx /><Card /><Models /></>;
 }

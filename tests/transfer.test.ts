@@ -61,7 +61,7 @@ describe('the TwiML that puts a caller through to a person', () => {
 
 // ------------------------------------------------------------------ a call passed to a person, end to end, against fakes
 type Env = Awaited<ReturnType<typeof import('./helpers.js').setupDb>>;
-let env: Env; let tenantId: string; let bareTenant: string; let twilioId: string; let handNumber: string; let askNumber: string; let bareNumber: string;
+let env: Env; let voiceId: string; let tenantId: string; let bareTenant: string; let twilioId: string; let handNumber: string; let askNumber: string; let bareNumber: string;
 const BASE = 'https://voicelab.test';
 const TW_TOKEN = 'tw-transfer-token';
 const OUR = '+60300000881'; const ASK = '+60300000882'; const BARE = '+60300000883';
@@ -115,6 +115,10 @@ beforeAll(async () => {
   await must(put(`/internal/tenants/${tenantId}/transfer`, { agentNumber: '+60 3-8765 4321', ringSeconds: 20 }));
   // Twilio's rates, per started minute: an inbound caller and the outbound agent leg at different rates. Room for many calls.
   await rates(1000);
+  // The voice the speech relay speaks with, priced per character (28 characters say "Let me find someone for you.").
+  voiceId = (await must(post('/internal/providers', { adapterKey: 'elevenlabs', name: 'el-transfer', params: { apiKey: 'k' } }))).json().id;
+  await must(post(`/internal/providers/${voiceId}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'tts', unit: 'per_character', rate: '0.00002', currency: 'USD' }] }));
+  await env.pool.query(`UPDATE providers SET params = params || jsonb_build_object('relayVoiceProviderId', $2::text) WHERE id = $1`, [twilioId, voiceId]);
   await must(post('/internal/fx', { currency: 'MYR', perUsd: '4.5', effectiveFrom: '2026-01-01T00:00:00Z' }));
   await must(post('/internal/rate-card', { effectiveFrom: '2026-01-01T00:00:00Z', inboundCreditsPerMinute: '1', outboundCreditsPerMinute: '2', creditValueUsd: '0.01' }));
   await env.app.listen({ port: 0, host: '127.0.0.1' });
@@ -424,6 +428,7 @@ describe('a live caller passed to a person', () => {
       expect((await env.pool.query(
         `SELECT l.leg, l.component, l.amount_usd FROM call_cost_lines l JOIN call_costs k ON k.id = l.call_cost_id WHERE k.call_id = $1 ORDER BY l.leg DESC, l.component DESC`, [a])).rows)
         .toEqual([
+          { leg: 'caller', component: 'tts', amount_usd: '0.00056000' },               // the 28 characters synthesised
           { leg: 'caller', component: 'telephony_leg', amount_usd: '0.01700000' },
           { leg: 'caller', component: 'other', amount_usd: '0.14000000' },
           { leg: 'agent', component: 'telephony_leg', amount_usd: '0.02800000' },
@@ -445,13 +450,14 @@ describe('a live caller passed to a person', () => {
   it('costs the agent leg in the one cost record of the call, exactly, with credits only for the time of the caller', async () => {
     const lines = async (callId: string) => (await env.pool.query(
       `SELECT l.leg, l.billed_seconds, l.amount_usd FROM call_cost_lines l JOIN call_costs k ON k.id = l.call_cost_id
-        WHERE k.call_id = $1 AND k.status = 'estimated' ORDER BY l.leg DESC, l.id`, [callId])).rows;
+        WHERE k.call_id = $1 AND k.status = 'estimated' AND l.component = 'telephony_leg' ORDER BY l.leg DESC, l.id`, [callId])).rows;
     const head = async (callId: string) => (await env.pool.query(`SELECT total_usd, credits_drawn FROM call_costs WHERE call_id = $1 AND status = 'estimated'`, [callId])).rows;
     const end = (callSid: string, seconds: string) => twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: callSid, CallStatus: 'completed', CallDuration: seconds, Direction: 'inbound', From: CUSTOMER, To: OUR });
 
     // Put through: the dial ends (61 s of agent leg), then the call (90 s). Worked by hand: the caller's leg is 2 started
     // minutes inbound at 0.0085 = 0.0170; the agent's leg 2 started minutes outbound at 0.0140 = 0.0280; total 0.0450 USD.
-    // Credits: 2 minutes of the caller's time at 1 a minute = 2; the agent leg draws none.
+    // Credits: 2 minutes of the caller's time at 1 a minute = 2; the agent leg draws none. The 28 characters of speech
+    // synthesised (0.00056 USD) are in the total too: 0.04556 USD.
     const a = await handedOver();
     await relayEnded(a.callSid, a.callId); await whisperReq(a.callSid, a.callId); await acceptReq(a.callSid, a.callId, '1');
     await dialled(a.callSid, a.callId, { DialCallDuration: '61' });
@@ -460,7 +466,7 @@ describe('a live caller passed to a person', () => {
       { leg: 'caller', billed_seconds: 120, amount_usd: '0.01700000' },
       { leg: 'agent', billed_seconds: 120, amount_usd: '0.02800000' },
     ]);
-    expect(await head(a.callId)).toEqual([{ total_usd: '0.04500000', credits_drawn: '2.0000' }]);
+    expect(await head(a.callId)).toEqual([{ total_usd: '0.04556000', credits_drawn: '2.0000' }]);
     expect((await env.pool.query(`SELECT credits FROM credit_entries WHERE ref = $1`, [`call:${a.callId}`])).rows).toEqual([{ credits: '-2.0000' }]);
 
     // Checked by hand: the operator's figures are the total for both legs (90 + 61 seconds, 0.0450 USD).
@@ -468,9 +474,9 @@ describe('a live caller passed to a person', () => {
     const rec = await must(post(`/internal/calls/${a.callId}/reconcile`, { source: 'manual', reportedSeconds: 151, reportedCost: '0.0450' }));
     expect(rec.json().outcome).toBe('matched');
     const reconciled = (await env.pool.query(
-      `SELECT k.total_usd, array_agg(l.leg ORDER BY l.leg DESC) AS legs FROM call_costs k JOIN call_cost_lines l ON l.call_cost_id = k.id
+      `SELECT k.total_usd, array_agg(l.leg || ':' || l.component ORDER BY l.leg DESC, l.component DESC) AS legs FROM call_costs k JOIN call_cost_lines l ON l.call_cost_id = k.id
         WHERE k.call_id = $1 AND k.status = 'reconciled' GROUP BY k.id`, [a.callId])).rows;
-    expect(reconciled).toEqual([{ total_usd: '0.04500000', legs: ['caller', 'agent'] }]);
+    expect(reconciled).toEqual([{ total_usd: '0.04556000', legs: ['caller:tts', 'caller:telephony_leg', 'agent:telephony_leg'] }]);
 
     // No one picked up: a leg that never connected costs nothing, so only the caller's leg is priced.
     const n = await handedOver();
@@ -487,7 +493,7 @@ describe('a live caller passed to a person', () => {
     expect(await head(b.callId)).toEqual([]);
     expect((await events(b.callId)).filter((e) => e.type === 'call.cost_waiting')).toHaveLength(1);
     expect((await dialled(b.callSid, b.callId, { CallStatus: 'completed', DialCallDuration: '61' })).body).toBe(HANGUP);
-    expect(await head(b.callId)).toEqual([{ total_usd: '0.04500000', credits_drawn: '2.0000' }]);
+    expect(await head(b.callId)).toEqual([{ total_usd: '0.04556000', credits_drawn: '2.0000' }]);
     expect(await callRow(b.callId)).toMatchObject({ transfer_status: 'unknown' });   // still unknown whether anyone took it
     expect(await callbacks(b.callId)).toHaveLength(1);
     await dialled(b.callSid, b.callId, { CallStatus: 'completed', DialCallDuration: '61' });   // a retry prices nothing twice

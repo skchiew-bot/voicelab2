@@ -40,6 +40,7 @@ import { actionSchema, controlState, runAction } from './store/control-actions.j
 import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
 import { clientAddUser, clientCalls, clientDisableUser, clientSummary, clientUsers } from './store/portal.js';
 import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
+import { addModelRate, listModelRates } from './store/voice-usage.js';
 import { countsOf, createScheduler, drain, listJobs, runJobNow, updateJob, type Job } from './scheduler.js';
 import { sweepFaults } from './store/call-end.js';
 import { expireQueued } from './store/concurrency.js';
@@ -363,6 +364,20 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   app.get('/internal/rate-card', async (req) => {
     const s = await internal(req);
     return withActor(pool, s.actor, listRateCards);
+  });
+
+  // A model's price per million tokens, dated like every other rate; a change is a new row from a later moment.
+  app.post('/internal/model-rates', async (req, reply) => {
+    const s = await internal(req);
+    const body = z.object({
+      model: z.string().min(1).max(100), effectiveFrom: z.string().datetime({ offset: true }).transform((v) => new Date(v)),
+      inputPer1m: z.string().max(30), outputPer1m: z.string().max(30), currency: z.string().length(3),
+    }).strict().parse(req.body);
+    return reply.status(201).send(await withActor(pool, s.actor, (c) => addModelRate(c, s.userId, body)));
+  });
+  app.get('/internal/model-rates', async (req) => {
+    const s = await internal(req);
+    return withActor(pool, s.actor, listModelRates);
   });
 
   // ------------------------------------------------------ call costs

@@ -46,6 +46,8 @@ export const twilio: Adapter = {
       help: "Which of Twilio's voice services speaks the lines, e.g. ElevenLabs or Google. Twilio's default if empty." },
     { key: 'relayVoice', label: 'Live call voice', type: 'string', required: false,
       help: "The voice to speak with, as that service names it. Twilio's default if empty." },
+    { key: 'relayVoiceProviderId', label: 'Live call voice provider (for cost)', type: 'string', required: false,
+      help: 'The id of the voice provider whose per-character rate prices the speech on live calls: the one the voice service above speaks with. Without it, a call with synthesised speech cannot be priced.' },
     { key: 'relayTranscriptionProvider', label: 'Live call speech recognition', type: 'string', required: false,
       help: "Which of Twilio's speech services hears the caller, e.g. Deepgram or Google. Twilio's default if empty." },
   ],

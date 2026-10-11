@@ -69,7 +69,8 @@ export interface CallRow {
   id: string; tenant_id: string; provider_id: string; direction: string; status: string; country: string | null;
   started_at: string; ended_at: string | null; duration_seconds: string | null; end_reason: string | null; cost_status: string; cost_error?: string | null;
 }
-export interface CostLine { component: string; billing_line: string; unit: string; quantity: string; billed_seconds: number | null; rate: string; currency: string; amount: string; amount_usd: string }
+export interface CostLine { component: string; model?: string | null; billing_line: string; unit: string; quantity: string; billed_seconds: number | null; rate: string; currency: string; amount: string; amount_usd: string }
+export interface ModelRate { id: string; model: string; effective_from: string; input_per_1m: string; output_per_1m: string; currency: string; created_at: string }
 export interface CallCost { status: string; total_usd: string; total_myr: string; credits_drawn: string; margin_usd: string; lines: CostLine[] }
 export interface Reconciliation { id: number; source: string; outcome: string; our_cost_usd: string; reported_cost_usd: string | null; detail: string; created_at: string }
 export interface CampaignCost { project_id: string | null; project: string | null; calls: number; total_usd: string; total_myr: string; credits_drawn: string; margin_usd: string }

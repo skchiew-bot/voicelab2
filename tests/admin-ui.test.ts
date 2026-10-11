@@ -1212,6 +1212,41 @@ describe.skipIf(!run)('admin UI', () => {
     await ctx.close();
   }, 60_000);
 
+  it('enters model rates per million tokens, refuses a price that does not read, and shows them to read-only staff', async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 1000 } });
+    await signIn(page, env.staffToken);
+    await page.getByRole('link', { name: 'Rates', exact: true }).click();
+    const card = page.getByLabel('Model rates');
+    await expect(card.getByRole('status')).toContainText('No model rates yet');
+    const form = card.getByLabel('Add model rate');
+    await field(form, 'Model').fill('ui-model');
+    await field(form, 'Input per 1M tokens').fill('1,000');                    // not a plain amount: refused, never read as something else
+    await field(form, 'Output per 1M tokens').fill('5');
+    await field(form, 'Effective from').fill('2026-01-01T08:00');
+    await form.getByRole('button', { name: 'Add model rate' }).click();
+    await expect(card.getByRole('alert')).toContainText('plain amount');
+    expect((await env.pool.query(`SELECT count(*)::int AS n FROM model_rates WHERE model = 'ui-model'`)).rows[0].n).toBe(0);
+    await field(form, 'Input per 1M tokens').fill('0.8');
+    await form.getByRole('button', { name: 'Add model rate' }).click();
+    await expect(card.getByRole('row').filter({ hasText: 'ui-model' })).toContainText('0.8 USD');
+    expect((await env.pool.query(`SELECT input_per_1m, output_per_1m FROM model_rates WHERE model = 'ui-model'`)).rows).toEqual([{ input_per_1m: '0.80000000', output_per_1m: '5.00000000' }]);
+
+    const v = await env.call(env.staffToken, 'POST', '/internal/staff', { email: 'rates-viewer@daythree.test', role: 'internal_viewer' });
+    expect(v.statusCode).toBe(201);
+    const viewer = await browser.newPage({ viewport: { width: 1200, height: 1000 } });
+    await signIn(viewer, v.json().token);
+    await viewer.getByRole('link', { name: 'Rates', exact: true }).click();
+    const seen = viewer.getByLabel('Model rates');
+    await expect(seen.getByRole('row').filter({ hasText: 'ui-model' })).toBeVisible();
+    const vf = seen.getByLabel('Add model rate');
+    await field(vf, 'Model').fill('viewer-model'); await field(vf, 'Input per 1M tokens').fill('1'); await field(vf, 'Output per 1M tokens').fill('1');
+    await field(vf, 'Effective from').fill('2026-01-01T08:00');
+    await vf.getByRole('button', { name: 'Add model rate' }).click();
+    await expect(seen.getByRole('alert')).toContainText('Read-only access');
+    expect((await env.pool.query(`SELECT count(*)::int AS n FROM model_rates WHERE model = 'viewer-model'`)).rows[0].n).toBe(0);
+    await viewer.close(); await page.close();
+  }, 60_000);
+
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();
     await signIn(page, env.staffToken);

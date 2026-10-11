@@ -9,6 +9,7 @@ import { twilioHangup, twilioPlaceCall, type TwilioCreds } from '../telephony/tw
 import { ProviderRefused, redactNumbers, type Action, type NormalizedEvent } from '../telephony/types.js';
 import { audit } from './audit.js';
 import { recordCallCost } from './costs.js';
+import { callModelUsage, callSynthCharacters } from './voice-usage.js';
 import { getEntitlement, inboundAdmission, isFull, promoteQueued, providerLoad } from './concurrency.js';
 import { chooseDid, didLockedFor } from './dids.js';
 import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.js';
@@ -332,6 +333,18 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
   return call;
 }
 
+/**
+ * The voice provider whose rates price the speech on a call: the one an operator linked to the call's telephony provider
+ * (the voice its speech relay speaks with). None linked, or not a voice provider, refuses the cost: never a guess.
+ */
+async function speechProvider(c: pg.PoolClient, telephonyProviderId: string): Promise<string> {
+  const p = (await c.query('SELECT name, params FROM providers WHERE id = $1', [telephonyProviderId])).rows[0];
+  const linked = typeof p?.params?.relayVoiceProviderId === 'string' ? p.params.relayVoiceProviderId as string : null;
+  const voice = linked && /^[0-9a-f-]{36}$/.test(linked) ? (await c.query(`SELECT id FROM providers WHERE id = $1 AND kind = 'voice'`, [linked])).rows[0] : null;
+  if (!voice) throw new AppError(409, `Speech was synthesised on this call, but ${p?.name ?? 'its telephony provider'} has no voice provider linked to price it. Link the voice provider its live calls speak with, then re-price.`);
+  return voice.id as string;
+}
+
 /** Price a finished call and store the result. Failing to price never loses the call or fails the webhook. */
 export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'unchecked' | 'not_applicable' | 'pending'> {
   const call = (await c.query('SELECT * FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
@@ -351,6 +364,11 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
   }
   const agentSeconds = call.transfer_seconds === null ? 0 : Number(call.transfer_seconds);
   try {
+    // The call's voice usage (owner's decisions, 2026-10-11): the characters synthesised for it, priced at the voice
+    // provider its telephony provider's speech relay speaks with, and its model decisions' tokens, priced by model.
+    const synthChars = await callSynthCharacters(c, callId);
+    const speech = synthChars > 0 ? [{ providerId: await speechProvider(c, call.provider_id), usage: { characters: synthChars }, speech: true as const }] : [];
+    const models = await callModelUsage(c, callId);
     await recordCallCost(c, actorId, {
       callId, tenantId: call.tenant_id, projectId: call.project_id ?? undefined, direction: call.direction,
       occurredAt: call.started_at, creditMultiplier: call.credit_multiplier ?? undefined,
@@ -363,7 +381,9 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
         // The agent's leg: an outbound call from the provider, inside its concurrency ceiling (a full provider runs the
         // ladder instead), so never at the burst premium.
         ...(agentSeconds > 0 ? [{ providerId: call.provider_id, usage: { seconds: agentSeconds }, leg: 'agent' as const, direction: 'outbound' as const }] : []),
+        ...speech,
       ],
+      models,
     });
     await c.query(`UPDATE calls SET cost_status = 'recorded', cost_error = NULL WHERE id = $1`, [callId]);
     return 'recorded';

@@ -3,6 +3,7 @@ import { billedSeconds, lineAmount, quantityFor, type Unit, type Usage } from '.
 import { AppError } from '../errors.js';
 import { fromScaled, mulDiv, SCALE, toScaled } from '../money.js';
 import { audit } from './audit.js';
+import { modelRateAt } from './voice-usage.js';
 
 // ----------------------------------------------------------------- FX
 export async function addFxRate(
@@ -67,11 +68,13 @@ export interface CallCostInput {
    * leg is a separate call at the provider (priced at its own direction's rates and rounded on its own), and draws no
    * credits: the client pays for the caller's time, which already covers the transfer.
    */
-  usage: { providerId: string; usage: Usage; leg?: 'caller' | 'agent'; direction?: 'inbound' | 'outbound' }[];
+  usage: { providerId: string; usage: Usage; leg?: 'caller' | 'agent'; direction?: 'inbound' | 'outbound'; speech?: true }[];
+  /** Tokens the call's own model decisions used, by model, priced at each model's rate in force when the call started. */
+  models?: { model: string; inputTokens: number; outputTokens: number }[];
 }
 
 interface Line {
-  leg: 'caller' | 'agent'; providerId: string; chargingVersionId: string; component: string; billingLine: string; unit: string;
+  leg: 'caller' | 'agent'; providerId: string | null; chargingVersionId: string | null; modelRateId?: string; model?: string; component: string; billingLine: string; unit: string;
   quantity: string; billedSeconds: number | null; rate: string; currency: string;
   burstMultiplier: string | null; amount: bigint; perUsd: bigint; amountUsd: bigint;
 }
@@ -120,7 +123,9 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
 
     // The agent's leg is a plain call leg: only the telephony leg's own rate applies to it, never a per-call fee or a
     // per-minute charge for something it does not use (the speech relay ended before the dial began).
-    const own = leg === 'agent' ? comps.filter((x) => x.component === 'telephony_leg') : comps;
+    // The speech a voice provider synthesised for the call is priced at its own speech rate only, never its other lines.
+    const own = leg === 'agent' ? comps.filter((x) => x.component === 'telephony_leg')
+      : item.speech ? comps.filter((x) => x.component === 'tts' && (x.unit === 'per_character' || x.unit === 'per_1k_characters')) : comps;
     const before = lines.length;
     for (const comp of own) {
       const q = quantityFor(comp.unit as Unit, comp.billing_line, item.usage, billed);
@@ -136,8 +141,25 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
       });
     }
     // A leg with time on it and no rate to price it is refused, never recorded as free.
+    if (item.speech && lines.length === before) {
+      throw new AppError(409, `Provider ${item.providerId} has no per-character speech rate in force at ${input.occurredAt.toISOString()}, so the speech synthesised for this call cannot be priced. Add one before costing calls.`);
+    }
     if (leg === 'agent' && lines.length === before) {
       throw new AppError(409, `Provider ${item.providerId} has no outbound telephony rate in force at ${input.occurredAt.toISOString()} for the agent's leg of a transfer. Add one before costing calls.`);
+    }
+  }
+  // Each model's tokens at its rate in force when the call started, input and output as their own lines.
+  for (const m of input.models ?? []) {
+    const rate = await modelRateAt(c, m.model, input.occurredAt);
+    const fx = await perUsd(c, rate.currency, input.occurredAt);
+    for (const [line, tokens, perMillion] of [['input', m.inputTokens, rate.inputRate], ['output', m.outputTokens, rate.outputRate]] as const) {
+      if (tokens <= 0) continue;
+      const amount = lineAmount(perMillion, { num: BigInt(tokens), den: 1_000_000n });
+      lines.push({
+        leg: 'caller', providerId: null, chargingVersionId: null, modelRateId: rate.id, model: m.model, component: 'llm',
+        billingLine: line, unit: 'per_1m_tokens', quantity: String(tokens), billedSeconds: null, rate: perMillion, currency: rate.currency,
+        burstMultiplier: null, amount, perUsd: fx, amountUsd: mulDiv(amount, SCALE, fx),
+      });
     }
   }
   if (lines.length === 0) throw new AppError(400, 'The usage given does not match any billable component of those providers.');
@@ -173,10 +195,11 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
   for (const l of lines) {
     await c.query(
       `INSERT INTO call_cost_lines (call_cost_id, provider_id, charging_version_id, component, billing_line, unit,
-         quantity, billed_seconds, rate, currency, burst_multiplier, amount, per_usd, amount_usd, leg)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+         quantity, billed_seconds, rate, currency, burst_multiplier, amount, per_usd, amount_usd, leg, model_rate_id, model)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
       [head.id, l.providerId, l.chargingVersionId, l.component, l.billingLine, l.unit, l.quantity, l.billedSeconds,
-        l.rate, l.currency, l.burstMultiplier, fromScaled(l.amount), fromScaled(l.perUsd), fromScaled(l.amountUsd), l.leg],
+        l.rate, l.currency, l.burstMultiplier, fromScaled(l.amount), fromScaled(l.perUsd), fromScaled(l.amountUsd), l.leg,
+        l.modelRateId ?? null, l.model ?? null],
     );
   }
 

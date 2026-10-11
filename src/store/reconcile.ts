@@ -123,9 +123,9 @@ export async function reconcileCall(d: CallDeps, actorId: string | null, callId:
                 total_myr, credits_drawn, credit_value_usd, margin_usd FROM call_costs WHERE id = $1 RETURNING id`, [ctx.costId])).rows[0];
       await c.query(
         `INSERT INTO call_cost_lines (call_cost_id, provider_id, charging_version_id, component, billing_line, unit, quantity,
-                                      billed_seconds, rate, currency, burst_multiplier, amount, per_usd, amount_usd, leg)
+                                      billed_seconds, rate, currency, burst_multiplier, amount, per_usd, amount_usd, leg, model_rate_id, model)
          SELECT $2, provider_id, charging_version_id, component, billing_line, unit, quantity, billed_seconds, rate, currency,
-                burst_multiplier, amount, per_usd, amount_usd, leg FROM call_cost_lines WHERE call_cost_id = $1`, [ctx.costId, n.id]);
+                burst_multiplier, amount, per_usd, amount_usd, leg, model_rate_id, model FROM call_cost_lines WHERE call_cost_id = $1`, [ctx.costId, n.id]);
     }
     await c.query('UPDATE calls SET cost_status = $2 WHERE id = $1', [callId, verdict.matched ? 'reconciled' : outcome]);
     await recordEvent(c, {

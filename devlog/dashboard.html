@@ -433,7 +433,7 @@ function render(r) {
     : h('p', { class: 'empty' }, `Unavailable: ${rt.error ?? 'the routing policy in devlog/control-tower.json could not be read'}.`),
     h('p', { class: 'sub', style: 'padding: 10px 12px' }, led.length ? `Sessions led by each model: ${led.map(([m, n]) => `${m.replace('claude-', '')} ${n}`).join(', ')}.` : 'No session has been priced yet.'));
   const UNREC = 'Unavailable (not recorded)';
-  fill('pc-note', [rt.since ? `Helper-agent records begin ${day(rt.since)}; ${num(rt.agentsBefore)} helper agents started with no record of their own: their model and tokens are unavailable (not recorded), and their sessions' tokens are in the rows marked not split. ` : `No helper agent recorded on its own yet: ${num(rt.agentsBefore)} started before recording; their tokens are in the rows marked not split. `,
+  fill('pc-note', [rt.since ? `Helper-agent records begin ${day(rt.since)}; ${num(rt.agentsBefore)} helper agents started with no record of their own: their model and tokens are unavailable (not recorded), and what their sessions used beyond the recorded agents is in the rows marked not split. ` : `No helper agent recorded on its own yet: ${num(rt.agentsBefore)} started before recording; what their sessions used beyond the recorded agents is in the rows marked not split. `,
     'These rows are priced from the transcripts, so they can differ from Spend, which uses Claude Code\'s own checkpoints.']);
   // The main session's and the earlier sessions' rows have no helper-agent count to give: not applicable, not missing.
   const noAgents = (x) => x.process === 'main session' || x.unsplit === true;

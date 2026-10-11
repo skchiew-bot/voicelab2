@@ -369,7 +369,7 @@ export function agentRuns(events, cfg) {
 }
 
 /** The row label for sessions that have no helper-agent record: their totals hold the main session and any helper agents together. */
-export const BEFORE_RECORDING = 'not split: main session and helper agents together';
+export const BEFORE_RECORDING = 'not split: main session and unrecorded helper agents together';
 
 /** The helper-agent starts with no AgentRun of their own (by session and agent id); a start with no id never has one. */
 export const unrecordedStarts = (subagentStarts, runs) => {
@@ -425,35 +425,28 @@ export function processCost(runs, sessionRows, cfg, unrecordedSessions = new Set
       cost: cost === null ? null : money(cost, cfg), costUnits: cost,
     };
   });
-  // The main session: what a session's total holds beyond its own helper agents'. Worked out per session, and only for
-  // sessions that have an AgentRun: for any other session the total still holds helper agents nobody recorded, so the
-  // remainder is not "the main session". A negative remainder in one session makes that model's figure unavailable.
-  // A session that holds any helper agent with no record of its own cannot be split either: the tokens of that agent
-  // would land in its remainder as if the main session had used them.
-  const recorded = new Set(runs.map((r) => r.session).filter((id) => !unrecordedSessions.has(id)));
-  const restByModel = {}; const poisoned = new Set();
-  for (const s of sessionRows.filter((x) => recorded.has(x.id))) {
-    const agentTotals = {};
-    for (const r of runs.filter((x) => x.session === s.id)) for (const [m, raw] of Object.entries(r.tokens ?? {})) { const acc = agentTotals[m] ??= bucket(); const b = bucket(raw); for (const k of Object.keys(acc)) acc[k] += b[k]; }
-    for (const model of new Set([...Object.keys(s.models), ...Object.keys(agentTotals)])) {
-      const have = bucket(s.models[model]); const used = agentTotals[model] ?? bucket();
-      const rest = restByModel[model] ??= bucket();
-      for (const k of Object.keys(rest)) { const d = have[k] - used[k]; if (d < 0) poisoned.add(model); else rest[k] += d; }
+  // What each session's total holds beyond its recorded helper agents (their AgentRuns, counted once in their process
+  // rows above), per session and model. When every helper agent the session started has a record, that remainder is
+  // the main session. When any has none, the remainder holds the main session and those agents together, so it goes
+  // to the "not split" rows. A negative remainder makes that model's row unavailable, never clamped to zero.
+  const parts = { main: { rest: {}, bad: new Set() }, unsplit: { rest: {}, bad: new Set() } };
+  for (const s of sessionRows) {
+    const into = parts[unrecordedSessions.has(s.id) ? 'unsplit' : 'main'];
+    const used = {};
+    for (const r of runs.filter((x) => x.session === s.id)) for (const [m, raw] of Object.entries(r.tokens ?? {})) { const acc = used[m] ??= bucket(); const b = bucket(raw); for (const k of Object.keys(acc)) acc[k] += b[k]; }
+    for (const model of new Set([...Object.keys(s.models), ...Object.keys(used)])) {
+      const have = bucket(s.models[model]); const gone = used[model] ?? bucket();
+      const rest = into.rest[model] ??= bucket();
+      for (const k of Object.keys(rest)) { const d = have[k] - gone[k]; if (d < 0) into.bad.add(model); else rest[k] += d; }
     }
   }
-  const main = Object.keys(restByModel).sort().map((model) => {
-    if (poisoned.has(model)) return { process: 'main session', model, agents: null, tokens: null, medianTokens: null, cost: null, costUnits: null };
-    const cost = price(model, restByModel[model]);
-    return { process: 'main session', model, agents: null, tokens: tokenTotal(restByModel[model]), medianTokens: null, cost: cost === null ? null : money(cost, cfg), costUnits: cost };
+  const remainderRows = (kind, label, extra) => Object.keys(parts[kind].rest).sort().map((model) => {
+    if (parts[kind].bad.has(model)) return { process: label, model, agents: null, tokens: null, medianTokens: null, cost: null, costUnits: null, ...extra };
+    const cost = price(model, parts[kind].rest[model]);
+    return { process: label, model, agents: null, tokens: tokenTotal(parts[kind].rest[model]), medianTokens: null, cost: cost === null ? null : money(cost, cfg), costUnits: cost, ...extra };
   });
-  // Sessions with no AgentRun at all (before recording began): their totals hold the main session and any helper agents
-  // together, which cannot be told apart, so they are shown as one row per model and called that.
-  const before = {};
-  for (const s of sessionRows.filter((x) => !recorded.has(x.id))) for (const [m, t] of Object.entries(s.models)) { const acc = before[m] ??= bucket(); const b = bucket(t); for (const k of Object.keys(acc)) acc[k] += b[k]; }
-  const beforeRows = Object.keys(before).sort().map((model) => {
-    const cost = price(model, before[model]);
-    return { process: BEFORE_RECORDING, model, agents: null, tokens: tokenTotal(before[model]), medianTokens: null, cost: cost === null ? null : money(cost, cfg), costUnits: cost, unsplit: true };
-  });
+  const main = remainderRows('main', 'main session', {});
+  const beforeRows = remainderRows('unsplit', BEFORE_RECORDING, { unsplit: true });
   return [...rows.sort((a, b) => order(a.process) - order(b.process) || a.model.localeCompare(b.model)), ...main, ...beforeRows];
 }
 

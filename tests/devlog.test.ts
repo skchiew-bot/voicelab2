@@ -1924,8 +1924,10 @@ describe('routing and escalation', () => {
       // Session A: its agent started before the first Stop that wrote any record (that Stop is what `since` shows).
       start(0, 'a1'), { ...agent('a1', 'build', 'T-A', SONNET, 1), ts: iso(1500) }, start(5, 'gone'), start(6),
       usage('session_01A', { [SONNET]: tok(5000) }),
-      // Session B has no helper-agent record at all: its total holds the main session and its agents together.
+      // Session B has no helper agent at all: its whole total is the main session.
       { ts: iso(10), session: 'session_01B', event: 'UserPromptSubmit' }, usage('session_01B', { [OPUS]: tok(2000) }),
+      // Session F started one agent that has no record, and nothing else.
+      start(11, 'lost', 'session_01F'), usage('session_01F', { [OPUS]: tok(300) }),
       // Sessions C and D both have agents. C's agent used more Haiku than C's whole total; D has plenty over.
       { ...agent('c1', 'check', 'T-C', HAIKU, 20), session: 'session_01C', tokens: { [HAIKU]: tok(1000) } }, usage('session_01C', { [HAIKU]: tok(100) }),
       { ...agent('d1', 'check', 'T-D', HAIKU, 30), session: 'session_01D', tokens: { [HAIKU]: tok(100) } }, usage('session_01D', { [HAIKU]: tok(5000) }),
@@ -1934,19 +1936,25 @@ describe('routing and escalation', () => {
     ]);
     const r = reportOf(dir);
     // a1 has its record, so it is not "before recording"; the agent with no record and the start with no id are.
-    expect(r.routing).toMatchObject({ since: iso(22), agentsBefore: 2 }); // a1 started before `since` and is still not "before recording"
-    expect(r.routing.consistency.startedNoRecord).toBe(1);
+    expect(r.routing).toMatchObject({ since: iso(22), agentsBefore: 3 }); // a1 started before `since` and is still not "before recording"
+    expect(r.routing.consistency.startedNoRecord).toBe(2); // gone and lost
     const rows = Object.fromEntries(r.processCost.map((x: { process: string; model: string }) => [`${x.process}|${x.model}`, x]));
     expect(rows[`build|${SONNET}`]).toMatchObject({ agents: 2, tokens: 2000 }); // a1 and e1
     expect(rows[`not recorded|${SONNET}`]).toBeUndefined(); // an agent that began before the first Stop is not "not recorded"
-    // Session E's own remainder: 5000 less its agent's 1000 output tokens, at $10 per million.
+    // Nothing is counted twice: per model, the process rows, the main session and the not-split rows add up to the
+    // sessions' totals exactly, worked by hand. Sonnet: session A 5000 + session E 5000 = 10,000 = the build agents a1
+    // and e1 (1000 + 1000) + A's remainder of 4000 (A started two agents with no record, so its remainder is not split)
+    // + E's remainder of 4000 (every agent E started has a record, so its remainder is the main session).
+    // Opus: session B 2000 (no agent at all: all main session) + session F 300 (one unrecorded start: not split) = 2300.
+    const label = 'not split: main session and unrecorded helper agents together';
+    const sum = (model: string) => r.processCost.filter((x: { model: string }) => x.model === model).reduce((n: number, x: { tokens: number | null }) => n + (x.tokens ?? 0), 0);
+    expect(rows[`build|${SONNET}`]).toMatchObject({ agents: 2, tokens: 2000 });
     expect(rows[`main session|${SONNET}`]).toEqual({ process: 'main session', model: SONNET, agents: null, tokens: 4000, medianTokens: null, cost: { usd: '0.04000000' } });
-    // Session B has no record at all, and session A holds two agents that have none: their totals cannot be split, so
-    // they are rows of their own, saying so, and A's 5000 never lands in a main-session remainder.
-    const label = 'not split: main session and helper agents together';
-    expect(rows[`${label}|${OPUS}`]).toEqual({ process: label, model: OPUS, agents: null, tokens: 2000, medianTokens: null, cost: { usd: '0.04000000' }, unsplit: true });
-    expect(rows[`${label}|${SONNET}`]).toEqual({ process: label, model: SONNET, agents: null, tokens: 5000, medianTokens: null, cost: { usd: '0.05000000' }, unsplit: true });
-    expect(rows[`main session|${OPUS}`]).toBeUndefined();
+    expect(rows[`${label}|${SONNET}`]).toEqual({ process: label, model: SONNET, agents: null, tokens: 4000, medianTokens: null, cost: { usd: '0.04000000' }, unsplit: true });
+    expect(sum(SONNET)).toBe(10_000);
+    expect(rows[`main session|${OPUS}`]).toEqual({ process: 'main session', model: OPUS, agents: null, tokens: 2000, medianTokens: null, cost: { usd: '0.04000000' } });
+    expect(rows[`${label}|${OPUS}`]).toEqual({ process: label, model: OPUS, agents: null, tokens: 300, medianTokens: null, cost: { usd: '0.00600000' }, unsplit: true });
+    expect(sum(OPUS)).toBe(2300);
     // C is negative for Haiku (1000 used, 100 held): unavailable for the model, though C and D together come to a positive 4000.
     expect(rows[`main session|${HAIKU}`]).toMatchObject({ tokens: null, cost: null });
   }, REPO_TIMEOUT);

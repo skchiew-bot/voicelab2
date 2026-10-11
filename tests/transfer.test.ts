@@ -109,10 +109,10 @@ beforeAll(async () => {
   handNumber = (await must(post('/internal/numbers', { providerId: twilioId, e164: OUR, tenantId, country: 'MY' }))).json().id;
   askNumber = (await must(post('/internal/numbers', { providerId: twilioId, e164: ASK, tenantId, country: 'MY' }))).json().id;
   bareNumber = (await must(post('/internal/numbers', { providerId: twilioId, e164: BARE, tenantId: bareTenant, country: 'MY' }))).json().id;
-  await must(put(`/internal/numbers/${handNumber}/workflow`, { workflowId: await liveWorkflow(tenantId, 'hand_flow', handoff, [], 'handoff_human') }));
-  await must(put(`/internal/numbers/${askNumber}/workflow`, { workflowId: await liveWorkflow(tenantId, 'ask_flow', ask, ['yes'], 'promised') }));
-  await must(put(`/internal/numbers/${bareNumber}/workflow`, { workflowId: await liveWorkflow(bareTenant, 'bare_flow', handoff, [], 'handoff_human') }));
-  await must(put(`/internal/tenants/${tenantId}/transfer`, { agentNumber: '+60 3-8765 4321', ringSeconds: 20 }));
+  await must(put(`/internal/numbers/${handNumber}/workflow`, { reason: 'Set up for this test.', workflowId: await liveWorkflow(tenantId, 'hand_flow', handoff, [], 'handoff_human') }));
+  await must(put(`/internal/numbers/${askNumber}/workflow`, { reason: 'Set up for this test.', workflowId: await liveWorkflow(tenantId, 'ask_flow', ask, ['yes'], 'promised') }));
+  await must(put(`/internal/numbers/${bareNumber}/workflow`, { reason: 'Set up for this test.', workflowId: await liveWorkflow(bareTenant, 'bare_flow', handoff, [], 'handoff_human') }));
+  await must(put(`/internal/tenants/${tenantId}/transfer`, { reason: 'Set up for this test.', agentNumber: '+60 3-8765 4321', ringSeconds: 20 }));
   // Twilio's rates, per started minute: an inbound caller and the outbound agent leg at different rates. Room for many calls.
   await rates(1000);
   await must(post('/internal/fx', { currency: 'MYR', perUsd: '4.5', effectiveFrom: '2026-01-01T00:00:00Z' }));
@@ -135,7 +135,7 @@ async function rates(ceiling: number, components: Record<string, string>[] = [
 ]) {
   // Each version is a moment later than the last (and never in the future), so the newest is the one in force.
   rateClock = Math.min(Date.now() - 1000, Math.max(rateClock + 1000, Date.now() - 60_000));
-  await must(post(`/internal/providers/${twilioId}/charging`, {
+  await must(post(`/internal/providers/${twilioId}/charging`, { reason: 'Set up for this test.', 
     effectiveFrom: new Date(rateClock).toISOString(), billingIncrementSeconds: 60, concurrencyLimit: ceiling,
     components,
   }));
@@ -198,9 +198,9 @@ async function handedOver(to = OUR) {
 
 describe('a live caller passed to a person', () => {
   it('keeps the agent number to staff: refuses one of our own numbers or a malformed one, and audits the change without the number', async () => {
-    expect((await put(`/internal/tenants/${tenantId}/transfer`, { agentNumber: ASK })).statusCode).toBe(400);
-    expect((await put(`/internal/tenants/${tenantId}/transfer`, { agentNumber: '12345' })).statusCode).toBe(400);
-    expect((await put(`/internal/tenants/${tenantId}/transfer`, { agentNumber: AGENT, ringSeconds: 2 })).statusCode).toBe(400);
+    expect((await put(`/internal/tenants/${tenantId}/transfer`, { reason: 'Set up for this test.', agentNumber: ASK })).statusCode).toBe(400);
+    expect((await put(`/internal/tenants/${tenantId}/transfer`, { reason: 'Set up for this test.', agentNumber: '12345' })).statusCode).toBe(400);
+    expect((await put(`/internal/tenants/${tenantId}/transfer`, { reason: 'Set up for this test.', agentNumber: AGENT, ringSeconds: 2 })).statusCode).toBe(400);
     const got = await env.call(env.staffToken, 'GET', `/internal/tenants/${tenantId}/transfer`);
     expect(got.json()).toEqual({ agentNumber: AGENT, ringSeconds: 20, whisper: true });
     const audits = (await env.pool.query(`SELECT detail FROM audit_log WHERE action LIKE 'transfer.%'`)).rows;
@@ -257,7 +257,7 @@ describe('a live caller passed to a person', () => {
 
   it('runs the callback ladder when no one answers: the request is recorded first and once, then the holding message, then the end', async () => {
     const { callSid, callId } = await handedOver();
-    await must(put(`/internal/tenants/${tenantId}/fallback`, { holdingMessage: 'Sorry, no one is free. We will call you back.', offerCallback: true, humanTransfer: true, voicemail: false }));
+    await must(put(`/internal/tenants/${tenantId}/fallback`, { reason: 'Set up for this test.', holdingMessage: 'Sorry, no one is free. We will call you back.', offerCallback: true, humanTransfer: true, voicemail: false }));
     expect((await relayEnded(callSid, callId)).body).toContain('<Dial ');
     const twice = await Promise.all([dialled(callSid, callId, { DialCallStatus: 'no-answer' }), dialled(callSid, callId, { DialCallStatus: 'no-answer' })]);
     for (const d of twice) expect(d.body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, no one is free. We will call you back.</Say><Hangup/></Response>');
@@ -354,14 +354,14 @@ describe('a live caller passed to a person', () => {
 
   it('refuses an agent number outside Malaysia when it is set, and again at dial time for one stored before the rule', async () => {
     for (const abroad of ['+6512345678', '+14155550100', '+44 20 7946 0000']) {
-      const r = await put(`/internal/tenants/${bareTenant}/transfer`, { agentNumber: abroad });
+      const r = await put(`/internal/tenants/${bareTenant}/transfer`, { reason: 'Set up for this test.', agentNumber: abroad });
       expect(r.statusCode).toBe(400);
       expect(r.json().error).toContain('Malaysian number (+60)');
     }
     expect((await env.call(env.staffToken, 'GET', `/internal/tenants/${bareTenant}/transfer`)).json()).toBeNull();
     // a Malaysian 1-800 line is fine as an agent phone (owner's decision, 2026-10-11)
-    expect((await put(`/internal/tenants/${bareTenant}/transfer`, { agentNumber: '+60 1800-88-1234' })).statusCode).toBe(200);
-    await must(env.call(env.staffToken, 'DELETE', `/internal/tenants/${bareTenant}/transfer`));
+    expect((await put(`/internal/tenants/${bareTenant}/transfer`, { reason: 'Set up for this test.', agentNumber: '+60 1800-88-1234' })).statusCode).toBe(200);
+    await must(env.call(env.staffToken, 'DELETE', `/internal/tenants/${bareTenant}/transfer`, { reason: 'Set up for this test.' }));
     // the database refuses one too, whatever path writes it
     for (const bad of ['+6512345678', '+14155550100']) {
       await expect(env.pool.query(`INSERT INTO transfer_settings (tenant_id, agent_e164) VALUES ($1, $2)`, [bareTenant, bad])).rejects.toThrow(/transfer_settings_agent_malaysian/);
@@ -638,13 +638,13 @@ describe('a live caller passed to a person', () => {
   it('runs the ladder when Twilio asks again after the agent number was removed', async () => {
     const { callSid, callId } = await handedOver();
     expect((await relayEnded(callSid, callId)).body).toContain('<Dial ');
-    await must(env.call(env.staffToken, 'DELETE', `/internal/tenants/${tenantId}/transfer`));
+    await must(env.call(env.staffToken, 'DELETE', `/internal/tenants/${tenantId}/transfer`, { reason: 'Set up for this test.' }));
     try {
       const r = await relayEnded(callSid, callId);
       expect(r.body).not.toContain('<Dial'); expect(r.body).toContain('<Say>');
       expect(await callRow(callId)).toMatchObject({ transfer_status: 'failed' });
       expect(await callbacks(callId)).toHaveLength(1);
-    } finally { await must(put(`/internal/tenants/${tenantId}/transfer`, { agentNumber: AGENT, ringSeconds: 20 })); }
+    } finally { await must(put(`/internal/tenants/${tenantId}/transfer`, { reason: 'Set up for this test.', agentNumber: AGENT, ringSeconds: 20 })); }
   });
 
   it('puts a caller the workflow escalated (severe sentiment) through, and tells the agent why', async () => {
@@ -756,7 +756,7 @@ describe('a live caller passed to a person', () => {
     const KL = 'Asia/Kuala_Lumpur';
     const hhmm = (d: Date) => { const p = localParts(d, KL); return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`; };
     const hours = (h: number) => new Date(Date.now() + h * 3_600_000);
-    const policy = (quietStart: string, quietEnd: string) => must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart, quietEnd, maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
+    const policy = (quietStart: string, quietEnd: string) => must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart, quietEnd, maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
     const onCase = async () => {
       const ref = `T-${++n}`;
       const caseId = (await must(post(`/internal/tenants/${tenantId}/cases`, { caseRef: ref, contactRef: `client-${ref}`, phone: CUSTOMER, country: 'MY', currency: 'MYR', openingBalance: '100.00', timeZone: KL }))).json().id as string;
@@ -838,7 +838,7 @@ describe('a live caller passed to a person', () => {
     const hhmm = (d: Date) => { const p = localParts(d, KL); return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`; };
     const later = (h: number) => hhmm(new Date(Date.now() + h * 3_600_000));
     // the platform's default limits (an hour between calls, three a day), with quiet hours well away from now
-    await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: later(8), quietEnd: later(10), maxPerDay: 3, maxPerWeek: 10, minGapMinutes: 60 }));
+    await must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart: later(8), quietEnd: later(10), maxPerDay: 3, maxPerWeek: 10, minGapMinutes: 60 }));
     const outboundCaseCall = async () => {
       const ref = `G-${++n}`;
       const caseId = (await must(post(`/internal/tenants/${tenantId}/cases`, { caseRef: ref, contactRef: `client-${ref}`, phone: `+6012${String(n).padStart(7, '0')}`, country: 'MY', currency: 'MYR', openingBalance: '100.00', timeZone: KL }))).json().id as string;
@@ -857,21 +857,21 @@ describe('a live caller passed to a person', () => {
       expect(Math.abs(new Date(cb.scheduled_for).getTime() - (a.startedAt.getTime() + 60 * 60_000))).toBeLessThan(2000);
 
       // the day's calls already used: a callback could only be held back and missed, so the client gets a request instead
-      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: later(8), quietEnd: later(10), maxPerDay: 1, maxPerWeek: 10, minGapMinutes: 60 }));
+      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart: later(8), quietEnd: later(10), maxPerDay: 1, maxPerWeek: 10, minGapMinutes: 60 }));
       const b = await outboundCaseCall();
       await relayEnded(b.callSid, b.callId, { CallStatus: 'completed' }, CUSTOMER);
       expect((await env.pool.query(`SELECT count(*)::int AS n FROM case_actions WHERE case_id = $1`, [b.caseId])).rows[0].n).toBe(0);
       expect(await callbacks(b.callId)).toEqual(['the caller asked for a person and hung up before they were put through']);
 
       // the same when the week's calls are used up, with none made today: our call to them was three days ago
-      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: later(8), quietEnd: later(10), maxPerDay: 1, maxPerWeek: 1, minGapMinutes: 60 }));
+      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart: later(8), quietEnd: later(10), maxPerDay: 1, maxPerWeek: 1, minGapMinutes: 60 }));
       const w = await outboundCaseCall();
       await env.pool.query(`UPDATE calls SET started_at = now() - interval '3 days' WHERE id = $1`, [w.callId]);
       await relayEnded(w.callSid, w.callId, { CallStatus: 'completed' }, CUSTOMER);
       expect((await env.pool.query(`SELECT count(*)::int AS n FROM case_actions WHERE case_id = $1`, [w.caseId])).rows[0].n).toBe(0);
       expect(await callbacks(w.callId)).toHaveLength(1);
     } finally {
-      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
+      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
     }
   });
 
@@ -883,7 +883,7 @@ describe('a live caller passed to a person', () => {
       const key = parseKey(env.config.VOICELAB_SECRET_KEY);
       deps = { calls: { pool: env.pool, key, dncKey: dncKeyFrom(key), http: env.provider.fetch, baseUrl: BASE }, resolveNumber: async () => CUSTOMER };
       await must(post('/internal/dnc/registries', { country: 'MY', requirement: 'registry', source: 'test' }));
-      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '03:00', quietEnd: '03:01', maxPerDay: 50, maxPerWeek: 100, minGapMinutes: 0 }));
+      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart: '03:00', quietEnd: '03:01', maxPerDay: 50, maxPerWeek: 100, minGapMinutes: 0 }));
       // two numbers whose workflows end at once: one that reached the contact, one that found a third party
       const ends = (contact: string): WorkflowDefinition => ({ start: 'hi', variables: [], nodes: {
         hi: { type: 'speak', speech: 'fixed', text: 'Thank you.', transitions: [{ to: 'done' }] },
@@ -891,7 +891,7 @@ describe('a live caller passed to a person', () => {
       } });
       for (const [num, contact] of [[CONTACTED, 'contacted'], [THIRD, 'third_party']] as const) {
         const id = (await must(post('/internal/numbers', { providerId: twilioId, e164: num, tenantId, country: 'MY' }))).json().id;
-        await must(put(`/internal/numbers/${id}/workflow`, { workflowId: await liveWorkflow(tenantId, `end_${contact}`, ends(contact), [], 'done') }));
+        await must(put(`/internal/numbers/${id}/workflow`, { reason: 'Set up for this test.', workflowId: await liveWorkflow(tenantId, `end_${contact}`, ends(contact), [], 'done') }));
       }
       reachNumber = CONTACTED;
       // Twilio places the dispatcher's calls: each gets an id
@@ -900,7 +900,7 @@ describe('a live caller passed to a person', () => {
     });
     afterAll(async () => {
       env.provider.state.respond = () => new Response('{}', { status: 200 });
-      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
+      await must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
     });
 
     let caseN = 0;
@@ -977,14 +977,14 @@ describe('a live caller passed to a person', () => {
       await env.pool.query(`DELETE FROM workflow_runs WHERE call_id = $1`, [bare.callId]).catch(() => undefined);
       await end(bare.callSid, BARE);
       // put through with the whisper off: the line picking up may have been a voicemail
-      await must(put(`/internal/tenants/${tenantId}/transfer`, { agentNumber: AGENT, ringSeconds: 20, whisper: false }));
+      await must(put(`/internal/tenants/${tenantId}/transfer`, { reason: 'Set up for this test.', agentNumber: AGENT, ringSeconds: 20, whisper: false }));
       try {
         const u = await handedOver();
         await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [u.callId, a.caseId]);
         await relayEnded(u.callSid, u.callId);
         await dialled(u.callSid, u.callId, { DialCallDuration: '30' });
         await end(u.callSid, OUR);
-      } finally { await must(put(`/internal/tenants/${tenantId}/transfer`, { agentNumber: AGENT, ringSeconds: 20 })); }
+      } finally { await must(put(`/internal/tenants/${tenantId}/transfer`, { reason: 'Set up for this test.', agentNumber: AGENT, ringSeconds: 20 })); }
       expect((await actions(a.caseId)).map((x) => x.status)).toEqual(['pending']);
       expect(await noLongerNeeded(a.caseId)).toEqual([]);
       // a call that reached them before the hang-up does not cancel the callback the hang-up asked for

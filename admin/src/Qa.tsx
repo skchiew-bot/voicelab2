@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useClient } from './client';
 import { api, type AiUsage, type QaScore, type QaSet, type QaSummary, type Tenant } from './api';
-import { Errors, Field, fmtDate, useAction, useLoad } from './ui';
+import { Errors, Field, fmtDate, ReasonField, reasonOk, useAction, useLoad } from './ui';
 
 const STARTER = JSON.stringify([
   { id: 'intro', label: 'Introduced Voice Lab', type: 'must_say', phrases: ['voice lab'], weight: 2 },
@@ -18,6 +18,7 @@ export function Qa() {
   const usage = useLoad(() => api<AiUsage[]>('GET', `/internal/ai-usage${tenantId ? `?tenantId=${tenantId}` : ''}`), [tenantId]);
   const [useCase, setUseCase] = useState('*');
   const [text, setText] = useState(STARTER);
+  const [why, setWhy] = useState('');
   const [result, setResult] = useState<{ scored: number; skipped: number; usedModel: boolean } | null>(null);
   const save = useAction(); const score = useAction();
   const reloadAll = () => { sets.reload(); scores.reload(); summary.reload(); usage.reload(); };
@@ -80,11 +81,12 @@ export function Qa() {
             <Field label="Criteria (JSON)" help="Types: adherence_min, outcome_in, no_escalation, no_fault, must_say, must_not_say, max_latency_ms, sentiment_not_worse, max_misunderstood, judge. Saving makes a new version; older scores keep the version they used.">
               <textarea rows={10} spellCheck={false} className="code" value={text} onChange={(e) => setText(e.target.value)} />
             </Field>
+            <ReasonField value={why} onChange={setWhy} />
             <Errors error={save.error} />
-            <div><button disabled={save.pending} onClick={async () => {
+            <div><button disabled={save.pending || !reasonOk(why)} onClick={async () => {
               let criteria: unknown;
               try { criteria = JSON.parse(text); } catch { save.run(async () => { throw new Error('The criteria are not valid JSON.'); }); return; }
-              if (await save.run(() => api('POST', `/internal/tenants/${tenantId}/qa-criteria`, { useCase, criteria }))) reloadAll();
+              if (await save.run(() => api('POST', `/internal/tenants/${tenantId}/qa-criteria`, { useCase, criteria, reason: why }))) { setWhy(''); reloadAll(); }
             }}>Save criteria</button></div>
           </section>
         </>

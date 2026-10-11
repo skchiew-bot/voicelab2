@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useClient } from './client';
 import { api, type KnowledgeArticle, type KnowledgeRow, type PolicyOverview, type PolicyVersion, type Tenant } from './api';
-import { Errors, Field, useAction, useLoad } from './ui';
+import { Errors, Field, ReasonField, reasonOk, useAction, useLoad } from './ui';
 
 const STARTER = JSON.stringify([
   { id: 'no_waiver', kind: 'action', action: 'waive_fee', effect: 'deny', message: 'Only a person may waive a fee.' },
@@ -63,7 +63,7 @@ export function Knowledge() {
   const policy = useLoad(() => (tenantId ? api<PolicyOverview>('GET', `/internal/tenants/${tenantId}/policy`) : Promise.resolve(null)), [tenantId]);
   const act = useAction(); const pol = useAction();
   const [slug, setSlug] = useState(''); const [title, setTitle] = useState(''); const [body, setBody] = useState('');
-  const [levels, setLevels] = useState('Policy owner, Compliance'); const [rules, setRules] = useState(STARTER); const [summary, setSummary] = useState('');
+  const [levels, setLevels] = useState('Policy owner, Compliance'); const [rules, setRules] = useState(STARTER); const [summary, setSummary] = useState(''); const [levelsWhy, setLevelsWhy] = useState('');
   const [q, setQ] = useState(''); const [found, setFound] = useState<{ slug: string; text: string }[] | null>(null);
   const [action, setAction] = useState('waive_fee'); const [verdict, setVerdict] = useState<{ allowed: boolean; reason: string } | null>(null);
   const reload = () => { articles.reload(); policy.reload(); };
@@ -111,7 +111,8 @@ export function Knowledge() {
             </>}
             <Errors error={pol.error} />
             <Field label="Approval levels" help="At least two, in order, separated by commas."><input value={levels} onChange={(e) => setLevels(e.target.value)} /></Field>
-            <div><button disabled={pol.pending} onClick={async () => { if (await pol.run(() => api('PUT', `/internal/tenants/${tenantId}/policy/levels`, { levels: levels.split(',').map((l) => l.trim()).filter(Boolean) }))) reload(); }}>Save levels</button></div>
+            <ReasonField label="Reason for the new levels" value={levelsWhy} onChange={setLevelsWhy} />
+            <div><button disabled={pol.pending || !reasonOk(levelsWhy)} onClick={async () => { if (await pol.run(() => api('PUT', `/internal/tenants/${tenantId}/policy/levels`, { levels: levels.split(',').map((l) => l.trim()).filter(Boolean), reason: levelsWhy }))) { setLevelsWhy(''); reload(); } }}>Save levels</button></div>
             <Field label="Rules (JSON)" help="Action rules allow or deny what the bot may do (with a condition or a limit); must_not_say rules list words it may never say."><textarea rows={10} spellCheck={false} className="code" value={rules} onChange={(e) => setRules(e.target.value)} /></Field>
             <Field label="Why"><input value={summary} onChange={(e) => setSummary(e.target.value)} /></Field>
             <div><button disabled={pol.pending || !summary.trim()} onClick={async () => {

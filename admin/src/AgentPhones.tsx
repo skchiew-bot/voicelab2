@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api, type TransferSettingRow } from './api';
 import { useClientList } from './client';
-import { Errors, Field, fmtDate, useAction, useLoad } from './ui';
+import { Errors, Field, fmtDate, ReasonField, reasonOk, useAction, useLoad } from './ui';
 
 /**
  * Where each client's callers go when a workflow passes them to a person: the client's agent phone, how long it rings,
@@ -15,6 +15,7 @@ export function AgentPhones({ readOnly }: { readOnly: boolean }) {
   const [agent, setAgent] = useState('');
   const [ring, setRing] = useState('25');
   const [whisper, setWhisper] = useState(true);
+  const [reason, setReason] = useState('');
   const [local, setLocal] = useState<string | null>(null);
   const { pending, error, run } = useAction();
   const edit = (r: TransferSettingRow) => { setTenantId(r.tenantId); setAgent(r.agentNumber); setRing(String(r.ringSeconds)); setWhisper(r.whisper); setLocal(null); };
@@ -33,8 +34,11 @@ export function AgentPhones({ readOnly }: { readOnly: boolean }) {
               {!readOnly && <td>
                 <button type="button" className="link" onClick={() => edit(r)}>Edit</button>{' '}
                 <button type="button" className="link" disabled={pending} onClick={async () => {
-                  if (!confirm(`Remove ${r.tenant}'s agent phone? Callers who ask for a person will get a callback instead.`)) return;
-                  if (await run(() => api('DELETE', `/internal/tenants/${r.tenantId}/transfer`))) list.reload();
+                  const why = prompt(`Remove ${r.tenant}'s agent phone? Callers who ask for a person will get a callback instead. Say why (shown in the change log):`);
+                  if (why === null) return;
+                  if (!reasonOk(why)) { setLocal('Say why the agent phone is being removed, in a few words.'); return; }
+                  setLocal(null);
+                  if (await run(() => api('DELETE', `/internal/tenants/${r.tenantId}/transfer`, { reason: why }))) list.reload();
                 }}>Remove</button>
               </td>}
             </tr>
@@ -47,8 +51,8 @@ export function AgentPhones({ readOnly }: { readOnly: boolean }) {
           // Read strictly: a ring time that is not a whole number is refused here, never sent as something else (L-034).
           if (!/^[0-9]{1,2}$/.test(ring.trim())) { setLocal('Ring time must be a whole number of seconds, from 5 to 60.'); return; }
           setLocal(null);
-          if (await run(() => api('PUT', `/internal/tenants/${tenantId}/transfer`, { agentNumber: agent, ringSeconds: Number(ring.trim()), whisper }))) {
-            setTenantId(''); setAgent(''); setRing('25'); setWhisper(true); list.reload();
+          if (await run(() => api('PUT', `/internal/tenants/${tenantId}/transfer`, { agentNumber: agent, ringSeconds: Number(ring.trim()), whisper, reason }))) {
+            setTenantId(''); setAgent(''); setRing('25'); setWhisper(true); setReason(''); list.reload();
           }
         }}>
           <div className="grid">
@@ -66,9 +70,10 @@ export function AgentPhones({ readOnly }: { readOnly: boolean }) {
             <Field label="Whisper" help="The agent hears why the call came to them and must press 1 to take it, so a voicemail is never taken for a person.">
               <input type="checkbox" checked={whisper} onChange={(e) => setWhisper(e.target.checked)} />
             </Field>
+            <ReasonField value={reason} onChange={setReason} />
           </div>
           {local ? <div className="errors" role="alert"><strong>{local}</strong></div> : <Errors error={error} />}
-          <div><button type="submit" disabled={pending}>Save agent phone</button></div>
+          <div><button type="submit" disabled={pending || !reasonOk(reason)}>Save agent phone</button></div>
         </form>
       )}
     </section>

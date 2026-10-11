@@ -90,8 +90,10 @@ export function Learning() {
                 <div>
                   <button className="link" onClick={() => setOpen(open === p.id ? null : p.id)}>{open === p.id ? 'Hide history' : 'History and cost'}</button>
                   {p.status === 'in_review' && <>
-                    {' '}<button disabled={act.pending} onClick={() => call(`/internal/promotions/${p.id}/review`)}>Ask the councils</button>
-                    {' '}<button disabled={act.pending} onClick={() => call(`/internal/promotions/${p.id}/decision`, { decision: 'approved', note: note || undefined })}>Approve</button>
+                    {!p.reviewed && <>{' '}<button disabled={act.pending} onClick={() => call(`/internal/promotions/${p.id}/review`)}>Ask the councils</button></>}
+                    {p.mine
+                      ? <span className="muted"> You drew this script up, so someone else approves it.</span>
+                      : <>{' '}<button disabled={act.pending} onClick={() => call(`/internal/promotions/${p.id}/decision`, { decision: 'approved', note: note || undefined })}>Approve</button></>}
                     {' '}<button disabled={act.pending || !note.trim()} onClick={() => call(`/internal/promotions/${p.id}/decision`, { decision: 'rejected', note })}>Turn down</button>
                   </>}
                   {p.status === 'approved' && <>{' '}<button disabled={act.pending} onClick={() => call(`/internal/promotions/${p.id}/audio`)}>Check audio</button></>}

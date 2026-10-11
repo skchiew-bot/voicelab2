@@ -19,9 +19,9 @@ let n = 0;
 async function providers() {
   const tel = (await must(post('/internal/providers', { adapterKey: 'twilio', name: `tw-fund-${++n}`, params: { accountSid: 'AC1', authToken: 't', twimlAppVoiceUrl: 'https://x.example/v' } }))).json().id as string;
   const voice = (await must(post('/internal/providers', { adapterKey: 'openai', name: `oa-fund-${n}`, params: { apiKey: 'k' } }))).json().id as string;
-  await must(post(`/internal/providers/${tel}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 6,
+  await must(post(`/internal/providers/${tel}/charging`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 6,
     components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.0140', currency: 'USD' }] }));
-  await must(post(`/internal/providers/${voice}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [
+  await must(post(`/internal/providers/${voice}/charging`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [
     { component: 'llm', unit: 'per_1m_tokens', rate: '2.50', currency: 'USD', billingLine: 'input' },
     { component: 'llm', unit: 'per_1m_tokens', rate: '10.00', currency: 'USD', billingLine: 'output' },
     { component: 'tts', unit: 'per_1k_characters', rate: '0.30', currency: 'EUR' },

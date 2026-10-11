@@ -1958,7 +1958,7 @@
    }
   ],
   "head": "claude/phase-3-callback-times",
-  "head_sha": "b42fd616ef4bac19ec1b636e2ec701b59e31d281"
+  "head_sha": "c6e4d32395e5e17ee71c0f249497e66b2ac2b01d"
  },
  {
   "number": 47,
@@ -2710,10 +2710,10 @@
  {
   "number": 63,
   "title": "Phase 2: a model reads a reply the phrase rules cannot",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/63",
   "created_at": "2026-10-11T03:44:30Z",
-  "merged_at": null,
+  "merged_at": "2026-10-11T04:05:09Z",
   "findings": [
    {
     "severity": "High",
@@ -2753,31 +2753,27 @@
    },
    {
     "severity": "Unrated",
-    "fixed": true
-   },
-   {
-    "severity": "Unrated",
-    "fixed": true
-   },
-   {
-    "severity": "Unrated",
-    "fixed": true
-   },
-   {
-    "severity": "Unrated",
-    "fixed": true
-   },
-   {
-    "severity": "Unrated",
-    "fixed": true
-   },
-   {
-    "severity": "Unrated",
-    "fixed": true
-   },
-   {
-    "severity": "Unrated",
     "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
    },
    {
     "severity": "Unrated",
@@ -2822,5 +2818,38 @@
   ],
   "head": "claude/phase-3-did-failure-events",
   "head_sha": "01b3a181983cb3c4a711ca2776a17c08d1e1b77b"
+ },
+ {
+  "number": 65,
+  "title": "Phase 3: record P3-D as done on the dev Control Tower board",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/65",
+  "created_at": "2026-10-11T04:04:46Z",
+  "merged_at": "2026-10-11T04:06:06Z",
+  "findings": [],
+  "head": "claude/phase-3-board-catchup",
+  "head_sha": "e7f73dd5b5d9243c14934c17f9c4683bf6e1a48c"
+ },
+ {
+  "number": 66,
+  "title": "Dev Control Tower refresh: PR data to #64, merged tasks closed",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/66",
+  "created_at": "2026-10-11T04:05:28Z",
+  "merged_at": "2026-10-11T04:06:03Z",
+  "findings": [],
+  "head": "claude/phase-CT-dashboard-refresh",
+  "head_sha": "11a935e10e7df80502c58dfbd67b1d7661696d6f"
+ },
+ {
+  "number": 67,
+  "title": "Phase 3: record the end of the P3-D session on the dev Control Tower board",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/67",
+  "created_at": "2026-10-11T04:06:32Z",
+  "merged_at": "2026-10-11T04:11:30Z",
+  "findings": [],
+  "head": "claude/phase-3-board-wrapup",
+  "head_sha": "a7b1c8387d5f277d3f1156af5a50e568543e567c"
  }
 ]

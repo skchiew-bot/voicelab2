@@ -333,13 +333,13 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
 }
 
 /** Price a finished call and store the result. Failing to price never loses the call or fails the webhook. */
-export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'not_applicable' | 'pending'> {
+export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'unchecked' | 'not_applicable' | 'pending'> {
   const call = (await c.query('SELECT * FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
   if (!call) throw new AppError(404, 'Call not found.');
   if (!call.ended_at) throw new AppError(409, 'The call has not ended yet.');
   // Already priced and possibly checked: pricing again must not wipe a reconciled or variance flag.
   // A call that never connected has nothing to price, and re-pricing must not invent a cost for it.
-  if (['recorded', 'reconciled', 'variance', 'not_applicable'].includes(call.cost_status)) return call.cost_status;
+  if (['recorded', 'reconciled', 'variance', 'unchecked', 'not_applicable'].includes(call.cost_status)) return call.cost_status;
   // A transfer to a person rang the agent: that leg is billed separately and is part of the call's one cost. Until Twilio
   // says how long it lasted, the call is not priced (never with a guess); the dial's report prices it when it comes, and
   // a call left waiting shows in the Control Tower for a person to settle from the provider's records.

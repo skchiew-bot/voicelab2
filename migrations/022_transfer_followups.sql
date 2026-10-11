@@ -16,3 +16,11 @@ ALTER TABLE call_cost_lines ADD COLUMN leg text NOT NULL DEFAULT 'caller' CHECK 
 -- enforced for every new or changed setting; one already stored is refused at dial time.
 ALTER TABLE transfer_settings ADD CONSTRAINT transfer_settings_agent_malaysian
   CHECK (agent_e164 ~ '^\+60[1-9][0-9]{7,9}$' AND agent_e164 !~ '^\+60(1[36789]00[0-9]{6}|600[0-9]+)$') NOT VALID;
+
+-- A leg that cannot be checked against the provider automatically (no id to look it up by) is its own state, never a
+-- variance: nothing was found to differ. It waits for a person to check both legs by hand.
+ALTER TABLE call_reconciliations DROP CONSTRAINT call_reconciliations_outcome_check;
+ALTER TABLE call_reconciliations ADD CONSTRAINT call_reconciliations_outcome_check CHECK (outcome IN ('matched', 'variance', 'unchecked'));
+ALTER TABLE calls DROP CONSTRAINT calls_cost_status_check;
+ALTER TABLE calls ADD CONSTRAINT calls_cost_status_check
+  CHECK (cost_status IN ('pending', 'recorded', 'failed', 'reconciled', 'variance', 'not_applicable', 'unchecked'));

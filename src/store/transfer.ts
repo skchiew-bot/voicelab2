@@ -202,7 +202,14 @@ export const CALLBACK_AFTER_HANGUP_MS = 15 * 60_000;
  * hang-up (the transfer status moves forward under the call's lock).
  */
 async function callerHungUp(c: pg.PoolClient, call: Pick<CallRow, 'id' | 'tenant_id' | 'project_id' | 'case_id'>, reason: string) {
-  const at = call.case_id ? await scheduleTransferCallback(c, call.case_id, call.id, new Date(Date.now() + CALLBACK_AFTER_HANGUP_MS)) : null;
+  let at: Date | null = null;
+  if (call.case_id) {
+    // Scheduling on the case never takes the call down with it (the end of a call, a reply to Twilio): if it fails
+    // outright, only it is undone, and the client gets the plain callback request instead.
+    await c.query('SAVEPOINT transfer_case_callback');
+    try { at = await scheduleTransferCallback(c, call.case_id, call.id, new Date(Date.now() + CALLBACK_AFTER_HANGUP_MS)); await c.query('RELEASE SAVEPOINT transfer_case_callback'); }
+    catch { await c.query('ROLLBACK TO SAVEPOINT transfer_case_callback'); await audit(c, null, 'transfer.case_callback_failed', 'call', call.id, {}); }
+  }
   if (at) { await event(c, call as CallRow, 'transfer.callback_scheduled', { at: at.toISOString() }); return; }
   await addCallbackRequest(c, { tenantId: call.tenant_id, callId: call.id, reason });
 }
@@ -287,7 +294,7 @@ export async function afterDial(d: TransferDeps, providerId: string, callId: str
     }
     // The call's end was reported first, while the dial was still under way (lesson L-029): its outcome stays unknown
     // and its callback stays recorded, but the agent's leg can now be costed.
-    if (call.transfer_status === 'unknown' && seconds !== null) {
+    if ((call.transfer_status === 'unknown' || call.transfer_status === 'abandoned') && seconds !== null) {
       await c.query('UPDATE calls SET transfer_seconds = $2, transfer_leg_sid = $3 WHERE id = $1 AND transfer_seconds IS NULL', [callId, seconds, legSid]);
       await costIfEnded(c, callId);
       return twimlHangup();
@@ -308,7 +315,7 @@ export async function settleAgentLeg(c: pg.PoolClient, actorId: string | null, c
   if (!r.transfer_started_at) throw new AppError(409, 'This call never rang an agent, so it has no agent leg to settle.');
   if (r.transfer_seconds !== null) throw new AppError(409, 'This call\'s agent leg already has its duration.');
   // A call already priced (before agent legs were costed) is not changed after the fact: its cost record stands.
-  if (['recorded', 'reconciled', 'variance', 'not_applicable'].includes(r.cost_status)) throw new AppError(409, 'This call is already priced, so its agent leg cannot be added now.');
+  if (['recorded', 'reconciled', 'variance', 'unchecked', 'not_applicable'].includes(r.cost_status)) throw new AppError(409, 'This call is already priced, so its agent leg cannot be added now.');
   await c.query('UPDATE calls SET transfer_seconds = $2 WHERE id = $1', [callId, seconds]);
   await audit(c, actorId, 'transfer.agent_leg_settled', 'call', callId, { seconds });
 }
@@ -332,6 +339,17 @@ async function costIfEnded(c: pg.PoolClient, callId: string) {
  * an answer, and a callback request is recorded: the caller asked for a person. Nothing is dialled again.
  */
 export async function settleTransferOnEnd(c: pg.PoolClient, callId: string) {
+  // With the whisper on, a person was reached only if the agent pressed 1. The call ending while the dial was under way
+  // and no one had pressed 1 means the caller hung up before reaching a person, whichever of Twilio's reports comes
+  // first (lesson L-029): the same as hanging up while it rang. Only an unscreened dial, or one taken, is unknown.
+  const notReached = (await c.query(
+    `UPDATE calls SET transfer_status = 'abandoned' WHERE id = $1 AND transfer_status = 'dialing' AND transfer_screened IS NOT FALSE AND transfer_accepted_at IS NULL
+     RETURNING id, tenant_id, project_id, case_id`, [callId])).rows[0] as CallRow | undefined;
+  if (notReached) {
+    await event(c, notReached, 'transfer.abandoned', { when: 'while_ringing' });
+    await callerHungUp(c, notReached, 'the caller asked for a person and hung up before anyone answered');
+    return;
+  }
   const call = (await c.query(
     `UPDATE calls SET transfer_status = 'unknown' WHERE id = $1 AND transfer_status = 'dialing' RETURNING id, tenant_id, project_id`, [callId])).rows[0] as CallRow | undefined;
   if (!call) {

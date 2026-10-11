@@ -197,7 +197,8 @@ async function scheduleNext(c: pg.PoolClient, cs: { id: string; tenant_id: strin
 /**
  * A caller on a case asked for a person and hung up before reaching one: they are called back. The time is locked to
  * the first moment the dispatcher may really place it, so our own rules never make it miss: no sooner than `from`, not
- * before the contact's minimum gap since their last call has passed (the call they just hung up counts), and outside
+ * before the contact's minimum gap since their last call from us has passed (the call they just hung up counts when it
+ * was one of ours to them; the gap counts our dials, as the gate does), and outside
  * their quiet hours. It is placed like any other callback (claimed, through the gate, within its lateness or not at
  * all). Once per call. Null when it cannot be scheduled: the case is not open, or the contact has had as many calls as
  * the day or week allows, so a callback would only be held back and missed; the caller of this then leaves the client a

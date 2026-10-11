@@ -45,7 +45,7 @@ beforeAll(async () => {
   tenantId = (await must(env.call(st(), 'POST', '/internal/tenants', { name: 'Panel Co' }))).json().id;
   providerId = (await must(env.call(st(), 'POST', '/internal/providers', { adapterKey: 'twilio', name: 'tw-panel',
     params: { accountSid: 'AC1', authToken: 'tok', twimlAppVoiceUrl: 'https://x.example/v' } }))).json().id;
-  const v = (await must(env.call(st(), 'POST', `/internal/providers/${providerId}/charging/reference`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60 }))).json();
+  const v = (await must(env.call(st(), 'POST', `/internal/providers/${providerId}/charging/reference`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60 }))).json();
   await must(env.call(st(), 'POST', `/internal/charging/${v.id}/confirm`, { sourceUrl: 'https://example.com/pricing' }));
   await must(env.call(st(), 'POST', '/internal/fx', { currency: 'MYR', perUsd: '4.5', effectiveFrom: '2026-01-01T00:00:00Z' }));
 });

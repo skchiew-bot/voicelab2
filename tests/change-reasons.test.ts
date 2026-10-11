@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { REASON_ROUTES } from '../src/change-reason.js';
+import { REASON_ROUTES, routesOf } from '../src/change-reason.js';
 import { withActor } from '../src/db.js';
 import { createUser } from '../src/store/tenants.js';
 
@@ -15,12 +15,116 @@ async function must<T extends { statusCode: number; body: string }>(p: Promise<T
   return r;
 }
 const post = (u: string, b?: unknown) => env.call(st(), 'POST', u, b);
+/**
+ * Every other change route, and why it takes no settings reason: it asks for its own reason or note, it is a step in an
+ * approval that records its own, it adds a record (a client, a user, a rate, a booking), it is people management, or it
+ * does work (a run, a sweep, a check) rather than change a setting. A new change route fails the inventory test until it
+ * is listed here or in REASON_ROUTES.
+ */
+const EXEMPT: Record<string, 'asks its own' | 'approval' | 'people' | 'record' | 'work'> = {
+  // asks its own
+  'POST /internal/appointments/:appointmentId/delay': 'record',
+  'POST /internal/appointments/:appointmentId/cancel': 'asks its own',
+  'POST /internal/knowledge-versions/:versionId/publish': 'approval',
+  'POST /internal/knowledge-versions/:versionId/reject': 'asks its own',
+  'POST /internal/tenants/:tenantId/policy/proposals': 'asks its own',
+  'POST /internal/policy-versions/:versionId/decision': 'approval',
+  'POST /internal/policy-versions/:versionId/withdraw': 'asks its own',
+  'POST /internal/cases/:caseId/decision': 'asks its own',
+  'POST /internal/cases/:caseId/close': 'asks its own',
+  'POST /internal/promotions/:promotionId/decision': 'approval',
+  'POST /internal/promotions/:promotionId/demote': 'asks its own',
+  'POST /internal/calls/:callId/fault-ack': 'record',
+  'POST /internal/workflows/:workflowId/changes': 'asks its own',
+  'POST /internal/changes/:changeId/decision': 'approval',
+  'POST /internal/changes/:changeId/apply': 'approval',
+  'POST /internal/calls/:callId/did-failure': 'asks its own',
+  'PUT /internal/scheduler/:name': 'asks its own',
+  'POST /internal/scheduler/:name/run': 'asks its own',
+  'POST /internal/control-tower/actions': 'asks its own',
+  // approval
+  'POST /internal/workflows/:workflowId/deploy': 'approval',
+  'POST /internal/workflows/:workflowId/rollback': 'approval',
+  'POST /internal/policy-versions/:versionId/activate': 'approval',
+  // people
+  'POST /internal/staff': 'people',
+  'POST /internal/users/:id/approve': 'people',
+  'POST /internal/users/:id/disable': 'people',
+  'POST /internal/tenants/:tenantId/users': 'people',
+  // record
+  'POST /internal/tenants': 'record',
+  'POST /internal/tenants/:tenantId/projects': 'record',
+  'POST /internal/tenants/:tenantId/credits': 'record',
+  'POST /internal/providers': 'record',
+  'POST /internal/charging/:versionId/confirm': 'record',
+  'POST /internal/providers/:id/funding': 'record',
+  'POST /internal/fx': 'record',
+  'POST /internal/rate-card': 'record',
+  'POST /internal/calls/:callId/cost': 'record',
+  'POST /internal/dnc/registries': 'record',
+  'POST /internal/dnc/numbers': 'record',
+  'POST /internal/tenants/:tenantId/workflows': 'record',
+  'POST /internal/workflows/:workflowId/versions': 'record',
+  'POST /internal/tenants/:tenantId/workflows/from-template': 'record',
+  'POST /internal/tenants/:tenantId/integrations': 'record',
+  'POST /internal/tenants/:tenantId/locations': 'record',
+  'POST /internal/tenants/:tenantId/diaries': 'record',
+  'POST /internal/diaries/:diaryId/blocks': 'record',
+  'POST /internal/tenants/:tenantId/appointments': 'record',
+  'POST /internal/appointments/:appointmentId/reschedule': 'record',
+  'POST /internal/appointments/:appointmentId/no-show': 'record',
+  'POST /internal/appointments/:appointmentId/complete': 'record',
+  'POST /internal/tenants/:tenantId/knowledge': 'record',
+  'POST /internal/knowledge/:articleId/versions': 'record',
+  'POST /internal/knowledge/:articleId/retire': 'record',
+  'POST /internal/tenants/:tenantId/cases': 'record',
+  'POST /internal/cases/:caseId/callbacks': 'record',
+  'POST /internal/cases/:caseId/promises': 'record',
+  'POST /internal/case-actions/:actionId/complete': 'record',
+  'POST /internal/tickets/:ticketId/events': 'record',
+  'POST /internal/tenants/:tenantId/recordings': 'record',
+  'POST /internal/calls/:callId/outcome': 'record',
+  'POST /internal/numbers': 'record',
+  'POST /internal/calls/:callId/reconcile': 'record',
+  // work
+  'POST /internal/providers/:id/check': 'work',
+  'POST /internal/dial/check': 'work',
+  'POST /internal/dial/gate': 'work',
+  'POST /internal/workflows/validate': 'work',
+  'POST /internal/workflows/:workflowId/simulate': 'work',
+  'POST /internal/workflow-runs/sweep': 'work',
+  'POST /internal/workflows/:workflowId/runs': 'work',
+  'POST /internal/workflow-runs/:runId/reply': 'work',
+  'POST /internal/notifications/:notificationId/mark': 'work',
+  'POST /internal/tenants/:tenantId/appointments/sweep-reminders': 'work',
+  'POST /internal/tenants/:tenantId/policy/check': 'work',
+  'POST /internal/cases/dispatch': 'work',
+  'POST /internal/tenants/:tenantId/cases/check-payments': 'work',
+  'POST /internal/tenants/:tenantId/cases/sweep-ageing': 'work',
+  'POST /internal/tenants/:tenantId/learning/scan': 'work',
+  'POST /internal/learning/sweep': 'work',
+  'POST /internal/promotions/:promotionId/review': 'work',
+  'POST /internal/promotions/:promotionId/audio': 'work',
+  'POST /internal/promotions/:promotionId/drift-check': 'work',
+  'POST /internal/faults/sweep': 'work',
+  'POST /internal/tenants/:tenantId/qa/score': 'work',
+  'POST /internal/providers/:providerId/samples': 'work',
+  'POST /internal/tenants/:tenantId/channel-charges': 'work',
+  'POST /internal/queue/expire': 'work',
+  'POST /internal/workflows/:workflowId/stitching-report': 'work',
+  'POST /internal/alerts/sweep': 'work',
+  'POST /internal/alerts/subscriptions/:userId/test': 'work',
+  'POST /internal/calls/outbound': 'work',
+  'POST /internal/reconcile/run': 'work',
+  'POST /internal/calls/:callId/cost/retry': 'work',
+};
 const auditCount = async () => (await env.pool.query('SELECT count(*)::int AS n FROM audit_log')).rows[0].n as number;
 
-let tenantId: string; let twilioId: string; let voiceId: string; let numberId: string; let diaryId: string; let viewer: string;
+let staffId: string; let tenantId: string; let twilioId: string; let voiceId: string; let numberId: string; let diaryId: string; let viewer: string;
 
 beforeAll(async () => {
   env = await (await import('./helpers.js')).setupDb();
+  staffId = (await env.pool.query(`SELECT id FROM users WHERE email = 'staff@daythree.test'`)).rows[0].id;
   tenantId = (await must(post('/internal/tenants', { name: 'Reasons Co' }))).json().id;
   twilioId = (await must(post('/internal/providers', { adapterKey: 'twilio', name: 'tw', params: { accountSid: 'AC1', authToken: 'tok', twimlAppVoiceUrl: `${BASE}/v` } }))).json().id;
   voiceId = (await must(post('/internal/providers', { adapterKey: 'elevenlabs', name: 'el', params: { apiKey: 'k' } }))).json().id;
@@ -45,6 +149,7 @@ function changes(): { method: string; route: string; path: string; body: Record<
     ['PUT', '/internal/tenants/:tenantId/entitlement', `${t}/entitlement`, { inboundChannels: 2 }, 'entitlement.set'],
     ['PUT', '/internal/providers/:providerId/funding-thresholds', `/internal/providers/${twilioId}/funding-thresholds`, { currency: 'USD', warnBelow: '50', criticalBelow: '10' }, 'funding.thresholds'],
     ['POST', '/internal/providers/:id/charging', `/internal/providers/${twilioId}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.0120', currency: 'USD' }] }, 'charging.add_version'],
+    ['POST', '/internal/providers/:id/charging/reference', `/internal/providers/${twilioId}/charging/reference`, { effectiveFrom: '2026-02-01T00:00:00Z', billingIncrementSeconds: 6 }, 'charging.add_version'],
     ['PUT', '/internal/providers/:id/capabilities/:capability', `/internal/providers/${voiceId}/capabilities/stt`, { support: 'composable' }, 'provider.capability'],
     ['PUT', '/internal/numbers/:numberId/workflow', `/internal/numbers/${numberId}/workflow`, { workflowId: null }, 'number.workflow'],
     ['POST', '/internal/dnc/numbers/remove', '/internal/dnc/numbers/remove', { country: 'MY', number: '+60198765432' }, 'dnc.remove'],
@@ -59,11 +164,21 @@ function changes(): { method: string; route: string; path: string; body: Record<
     ['PUT', '/internal/tenants/:tenantId/cancellation-policy', `${t}/cancellation-policy`, { freeUntilHours: 24 }, 'appointments.policy'],
     ['PUT', '/internal/diaries/:diaryId/hours', `/internal/diaries/${diaryId}/hours`, { hours }, 'diary.hours'],
     ['PUT', '/internal/tenants/:tenantId/policy/levels', `${t}/policy/levels`, { levels: ['Owner', 'Compliance'] }, 'policy.levels'],
+    ['PUT', '/internal/alerts/subscriptions', '/internal/alerts/subscriptions', { userId: staffId, minSeverity: 'high' }, 'alerts.subscribe'],
+    ['POST', '/internal/alerts/subscriptions/:userId/end', `/internal/alerts/subscriptions/${staffId}/end`, {}, 'alerts.unsubscribe'],
   ];
   return list.map(([method, route, path, body, action]) => ({ method, route, path, body, action }));
 }
 
 describe('a settings change made outside the Control Tower', () => {
+  it('holds every route that changes something to a decision: a reason, or exempt for a stated cause', () => {
+    const listed = new Set(REASON_ROUTES.map(([m, u]) => `${m} ${u}`));
+    const changing = routesOf(env.app).filter((r) => !/^(GET|HEAD) /.test(r) && r.includes(' /internal/'));
+    expect(changing.filter((r) => !listed.has(r) && !(r in EXEMPT))).toEqual([]);          // a new route must be decided
+    expect(Object.keys(EXEMPT).filter((r) => !changing.includes(r))).toEqual([]);          // and the list names only real routes
+    expect([...listed].filter((r) => !changing.includes(r) || r in EXEMPT)).toEqual([]);
+  });
+
   it('covers every settings route this test sends, and no other', () => {
     expect(changes().map((c) => `${c.method} ${c.route}`).sort()).toEqual(REASON_ROUTES.map(([m, u]) => `${m} ${u}`).sort());
   });
@@ -83,6 +198,20 @@ describe('a settings change made outside the Control Tower', () => {
     }
   });
 
+  it('asks for the reason before the route reads its body, and refuses a body that is not an object or is missing', async () => {
+    const say = 'Say why, in a few words.';
+    const bad = await env.call(st(), 'PUT', `/internal/tenants/${tenantId}/entitlement`, { inboundChannels: 'many' });   // wrong for the route too
+    expect([bad.statusCode, bad.json().error]).toEqual([400, say]);
+    for (const payload of [[{ reason: 'In an array.' }], null]) {
+      const r = await env.call(st(), 'PUT', `/internal/tenants/${tenantId}/entitlement`, payload);
+      expect([r.statusCode, r.json().error]).toEqual([400, say]);
+    }
+    const text = await env.app.inject({ method: 'PUT', url: `/internal/tenants/${tenantId}/entitlement`, payload: 'reason=because', headers: { authorization: `Bearer ${st()}`, 'content-type': 'text/plain' } });
+    expect(text.statusCode).toBeGreaterThanOrEqual(400); expect(text.statusCode).toBeLessThan(500);
+    const del = await env.app.inject({ method: 'DELETE', url: `/internal/tenants/${tenantId}/transfer`, headers: { authorization: `Bearer ${st()}` } });
+    expect([del.statusCode, del.json().error]).toEqual([400, say]);
+  });
+
   it('checks who is asking first: no token is a 401 and read-only staff a 403, with or without a reason', async () => {
     for (const ch of changes()) {
       for (const body of [ch.body, { ...ch.body, reason: 'A good reason.' }]) {
@@ -94,7 +223,8 @@ describe('a settings change made outside the Control Tower', () => {
 
   it('keeps the reason with the change, on every route, and the change log shows it', async () => {
     for (const ch of changes()) {
-      const why = `Why ${ch.action}: ${randomUUID().slice(0, 8)}.`;
+      // Letters only: a run of random digits could read as a phone number and be refused (lesson L-037).
+      const why = `Why ${ch.action}: ${randomUUID().replace(/[^a-f]/g, '').slice(0, 6)} changed.`;
       await must(env.call(st(), ch.method as 'PUT', ch.path, { ...ch.body, reason: why }));
       const row = (await env.pool.query(`SELECT action, detail FROM audit_log ORDER BY id DESC LIMIT 1`)).rows[0];
       expect([ch.route, row.action, row.detail.reason]).toEqual([ch.route, ch.action, why]);

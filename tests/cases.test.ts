@@ -41,6 +41,11 @@ const nextLocal = (hh: string, plusDays = 0): Date => {
   const t = localToInstant(day, hh, KL);
   return t.getTime() > Date.now() + 5 * 60_000 ? t : localToInstant(addDays(day, 1), hh, KL);
 };
+/**
+ * A daytime moment in Kuala Lumpur under 23 hours away, so calls placed now are inside its 24-hour window. The next
+ * 10:00 alone can be a day and five minutes off (just before 10:00), and calls placed now would not count (L-037).
+ */
+const soonDaytime = (): Date => [nextLocal('10:00'), nextLocal('14:00')].find((t) => t.getTime() - Date.now() < 23 * 3_600_000)!;
 const mins = (d: Date, m: number) => new Date(d.getTime() + m * 60_000);
 
 // ---- the customers' numbers: used for one dial and a keyed hash, never stored
@@ -109,7 +114,7 @@ describe('when and how often a contact may be called, for every dial', () => {
 
   it('holds a contact to the daily limit and the minimum gap, counting only calls that went out', async () => {
     await must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 2, maxPerWeek: 50, minGapMinutes: 0 }));
-    const phone = newPhone(); const now = nextLocal('10:00');
+    const phone = newPhone(); const now = soonDaytime();
     for (let i = 0; i < 2; i++) expect(await placeOutboundCall(calls, null, { tenantId, to: phone, country: 'MY', now })).toMatchObject({ allowed: true });
     const third = await placeOutboundCall(calls, null, { tenantId, to: phone, country: 'MY', now });
     expect(third).toMatchObject({ allowed: false, reason: 'contact_limit' });

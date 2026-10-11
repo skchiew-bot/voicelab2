@@ -306,6 +306,8 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(ref).toContainText('$0.014 per outbound minute');
     await field(ref, 'Billing increment').fill('60');
     await field(ref, 'Effective from').fill('2026-01-01T00:00');
+    await expect(ref.getByRole('button', { name: 'Add reference rates' })).toBeDisabled();   // a reason first
+    await field(ref, 'Why these rates').fill('Starting rates until the contract is signed.');
     await ref.getByRole('button', { name: 'Add reference rates' }).click();
     await expect(page.getByRole('heading', { name: /Version 1/ })).toContainText('Unconfirmed');
     await expect(page.getByRole('cell', { name: 'inbound only' })).toBeVisible();
@@ -1076,6 +1078,8 @@ describe.skipIf(!run)('admin UI', () => {
     const card = page.getByLabel('Email alerts');
     await card.getByLabel('Person').selectOption({ label: 'staff@daythree.test' });
     await card.getByLabel('Which alerts').selectOption('medium');
+    await expect(card.getByRole('button', { name: 'Get alerts by email' })).toBeDisabled();  // a reason first
+    await field(card, 'Why').fill('On call this month.');
     await card.getByRole('button', { name: 'Get alerts by email' }).click();
     await expect(card.getByLabel('Subscribers')).toContainText('staff@daythree.test');
     await expect(card.getByLabel('Subscribers')).toContainText('medium and high');
@@ -1084,7 +1088,7 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(card.getByLabel('Recent emails')).toContainText('not sent: no mail service');     // nothing is connected in these tests
     await page.reload();
     await expect(page.getByLabel('Needs attention')).toContainText('no mail service is connected');
-    expect((await env.call(env.staffToken, 'POST', `/internal/alerts/subscriptions/${(await env.call(env.staffToken, 'GET', '/internal/alerts/subscriptions')).json()[0].userId}/end`)).statusCode).toBe(200);
+    expect((await env.call(env.staffToken, 'POST', `/internal/alerts/subscriptions/${(await env.call(env.staffToken, 'GET', '/internal/alerts/subscriptions')).json()[0].userId}/end`, { reason: 'Set up for this test.' })).statusCode).toBe(200);
     await page.close();
   });
 

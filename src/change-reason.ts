@@ -5,7 +5,7 @@
  * audit row the change writes (the transaction carries it, so no store has to pass it on). A route added to this list
  * is covered by `tests/change-reasons.test.ts`, which sends every one of them.
  */
-import type { FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { AppError } from './errors.js';
 import { cleanNote } from './store/cases.js';
@@ -20,6 +20,7 @@ export const REASON_ROUTES = [
   ['PUT', '/internal/tenants/:tenantId/entitlement'],
   ['PUT', '/internal/providers/:providerId/funding-thresholds'],
   ['POST', '/internal/providers/:id/charging'],
+  ['POST', '/internal/providers/:id/charging/reference'],
   ['PUT', '/internal/providers/:id/capabilities/:capability'],
   ['PUT', '/internal/numbers/:numberId/workflow'],
   ['POST', '/internal/dnc/numbers/remove'],
@@ -34,9 +35,20 @@ export const REASON_ROUTES = [
   ['PUT', '/internal/tenants/:tenantId/cancellation-policy'],
   ['PUT', '/internal/diaries/:diaryId/hours'],
   ['PUT', '/internal/tenants/:tenantId/policy/levels'],
+  ['PUT', '/internal/alerts/subscriptions'],
+  ['POST', '/internal/alerts/subscriptions/:userId/end'],
 ] as const;
 
 const routes = new Set(REASON_ROUTES.map(([m, u]) => `${m} ${u}`));
+
+const registered = new WeakMap<FastifyInstance, string[]>();
+/** Keeps every route the app registers, so a test can hold each change route to a decision: a reason, or exempt on purpose. */
+export function recordRoutes(app: FastifyInstance): void {
+  const list: string[] = [];
+  registered.set(app, list);
+  app.addHook('onRoute', (r) => { for (const m of [r.method].flat()) list.push(`${m} ${r.url}`); });
+}
+export const routesOf = (app: FastifyInstance): string[] => [...(registered.get(app) ?? [])];
 
 /** True when the request is a settings change that needs a reason. */
 export function needsReason(req: FastifyRequest): boolean {

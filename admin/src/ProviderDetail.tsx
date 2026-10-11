@@ -72,22 +72,24 @@ function ReferenceRates({ provider, onAdded }: { provider: Provider; onAdded: ()
   const refs = useLoad(() => api<{ adapterKey: string; summary: string }[]>('GET', '/internal/reference-rates'));
   const [from, setFrom] = useState('');
   const [increment, setIncrement] = useState('');
+  const [reason, setReason] = useState('');
   const { pending, error, run } = useAction();
   const ref = refs.data?.find((r) => r.adapterKey === provider.adapter_key);
   if (!ref) return null;
   return (
     <form className="card" aria-label="Use reference rates" onSubmit={async (e) => {
       e.preventDefault();
-      if (await run(() => api('POST', `/internal/providers/${provider.id}/charging/reference`, { effectiveFrom: new Date(from).toISOString(), billingIncrementSeconds: Number(increment) }))) { setFrom(''); setIncrement(''); onAdded(); }
+      if (await run(() => api('POST', `/internal/providers/${provider.id}/charging/reference`, { effectiveFrom: new Date(from).toISOString(), billingIncrementSeconds: Number(increment), reason }))) { setFrom(''); setIncrement(''); setReason(''); onAdded(); }
     }}>
       <h2>Start from reference rates</h2>
       <p className="muted">{ref.summary} These come from the blueprint's research, are approximate, and are saved as <strong>unconfirmed</strong>: check them against the provider's pricing page. You choose the billing increment, because the research gives none.</p>
       <div className="grid">
         <Field label="Billing increment (seconds)" help="e.g. 1, 6, 30 or 60."><input type="number" min="1" value={increment} onChange={(e) => setIncrement(e.target.value)} required /></Field>
         <Field label="Effective from (your local time)"><input type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} required /></Field>
+        <ReasonField label="Why these rates" value={reason} onChange={setReason} />
       </div>
       <Errors error={error} />
-      <div><button type="submit" className="secondary" disabled={pending}>Add reference rates</button></div>
+      <div><button type="submit" className="secondary" disabled={pending || !reasonOk(reason)}>Add reference rates</button></div>
     </form>
   );
 }

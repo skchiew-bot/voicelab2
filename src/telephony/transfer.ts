@@ -16,11 +16,15 @@ const DOC = '<?xml version="1.0" encoding="UTF-8"?>';
 
 /**
  * Where an agent phone may be. For now only Malaysian numbers (+60), so a changed setting cannot send the agent's leg,
- * which we pay for, to an expensive destination abroad (toll fraud). Checked when the number is set and again at dial
- * time. It can be widened per client later.
+ * which we pay for, to an expensive destination abroad (toll fraud). Malaysia's special-rate and premium ranges are
+ * refused too (owner's decision, 2026-10-11): 1-300 (shared cost), 1-700, 1-800 (free to the caller, not a staff line),
+ * 1-900, and the premium-rate 600 and 1-600. These special numbers have ten digits after +60, so an ordinary mobile
+ * such as 013-123 4567 is not caught. Checked when the number is set and again at dial time. It can be widened per
+ * client later. The ranges come from public listings (Wikipedia, operators' rate pages), not yet MCMC's own plan.
  */
 const AGENT_NUMBER = /^\+60[1-9][0-9]{7,9}$/;
-export const agentNumberAllowed = (e164: string) => AGENT_NUMBER.test(e164);
+const SPECIAL_RATE = /^\+60(?:1[36789]00[0-9]{6}|600[0-9]+)$/;
+export const agentNumberAllowed = (e164: string) => AGENT_NUMBER.test(e164) && !SPECIAL_RATE.test(e164);
 
 export interface DialPlan { agent: string; callerId: string; ringSeconds: number; actionUrl: string; whisperUrl: string | null }
 

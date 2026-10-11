@@ -57,7 +57,7 @@ export function AgentPhones({ readOnly }: { readOnly: boolean }) {
                 <option value="">Choose…</option>{tenants?.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
             </Field>
-            <Field label="Agent phone" help="The client's own staff line. For now, a Malaysian number (+60).">
+            <Field label="Agent phone" help="The client's own staff line. For now, a Malaysian number (+60), and not a 1-300, 1-600, 1-700, 1-800, 1-900 or 600 number.">
               <input inputMode="tel" value={agent} onChange={(e) => setAgent(e.target.value)} required />
             </Field>
             <Field label="Ring for (seconds)" help="From 5 to 60.">

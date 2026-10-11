@@ -158,11 +158,57 @@ describe('a live call on a case whose workflow ends with a promise', () => {
       try {
         await client.query('BEGIN');
         expect(await recordPromiseFromCall(client, { callId, runId: randomUUID(), amount, days: 0 })).toBeNull();
-        await client.query('SELECT 1');                                                              // the transaction carries on afterwards
         await client.query('COMMIT');
       } finally { client.release(); }
       expect(await promisesOf(cs)).toEqual([]);
       expect((await caseEvents(cs)).filter((e) => e.kind === 'promise.not_recorded').map((e) => e.detail.reason)).toEqual([reason]);
+    }
+  });
+
+  it('works the due date out from the moment the call ends, in the case\'s own time zone: the next such weekday, today included, or a number of days on, across a month\'s end', async () => {
+    const { recordPromiseFromCall } = await import('../src/store/cases.js');
+    const due = async (tz: string, at: string, when: { days: number } | { weekday: number }) => {
+      const cs = await caseWith('500', tz);
+      const client = await env.pool.connect();
+      try {
+        await client.query('BEGIN');
+        expect(await recordPromiseFromCall(client, { callId: await liveCall(cs), runId: randomUUID(), amount: '100', ...when }, new Date(at))).not.toBeNull();
+        await client.query('COMMIT');
+      } finally { client.release(); }
+      return (await promisesOf(cs))[0].due_on;
+    };
+    // 2026-10-09T23:30Z is Friday 9 October in UTC and in Pago Pago, but already Saturday 10 October in Kiritimati.
+    const at = '2026-10-09T23:30:00Z';
+    expect(await due('Pacific/Kiritimati', at, { weekday: 5 })).toBe('2026-10-16');             // Saturday there: the Friday after
+    expect(await due('Pacific/Pago_Pago', at, { weekday: 5 })).toBe('2026-10-09');              // Friday there: today
+    expect(await due('Pacific/Kiritimati', at, { weekday: 1 })).toBe('2026-10-12');
+    expect(await due('Pacific/Pago_Pago', at, { weekday: 1 })).toBe('2026-10-12');
+    expect(await due('Pacific/Kiritimati', at, { days: 2 })).toBe('2026-10-12');
+    expect(await due('Pacific/Pago_Pago', at, { days: 2 })).toBe('2026-10-11');
+    expect(await due(KL, '2026-10-31T12:00:00Z', { days: 3 })).toBe('2026-11-03');               // 20:00 on the 31st in Kuala Lumpur
+    expect(await due('Pacific/Kiritimati', '2026-10-31T12:00:00Z', { days: 3 })).toBe('2026-11-04');
+  });
+
+  it('keeps the call\'s step going when the database itself refuses the promise: the refusal is rolled back to its savepoint and recorded', async () => {
+    const { recordPromiseFromCall } = await import('../src/store/cases.js');
+    // A trigger made only for this test refuses one amount, so a real SQL error happens inside the savepoint.
+    await env.pool.query(`CREATE FUNCTION test_refuse_promise() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused for the test'; END $$`);
+    await env.pool.query(`CREATE TRIGGER test_refuse_promise BEFORE INSERT ON promises FOR EACH ROW WHEN (NEW.amount = 123.45) EXECUTE FUNCTION test_refuse_promise()`);
+    try {
+      const cs = await caseWith('500');
+      const callId = await liveCall(cs);
+      const client = await env.pool.connect();
+      try {
+        await client.query('BEGIN');
+        expect(await recordPromiseFromCall(client, { callId, runId: randomUUID(), amount: '123.45', days: 0 })).toBeNull();
+        await client.query(`UPDATE calls SET status = 'completed' WHERE id = $1`, [callId]);    // the step carries on in the same transaction
+        await client.query('COMMIT');
+      } finally { client.release(); }
+      expect((await env.pool.query('SELECT status FROM calls WHERE id = $1', [callId])).rows[0].status).toBe('completed');
+      expect(await promisesOf(cs)).toEqual([]);
+      expect((await caseEvents(cs)).filter((e) => e.kind === 'promise.not_recorded').map((e) => e.detail.reason)).toEqual(['The promise could not be recorded.']);
+    } finally {
+      await env.pool.query('DROP TRIGGER test_refuse_promise ON promises; DROP FUNCTION test_refuse_promise()');
     }
   });
 

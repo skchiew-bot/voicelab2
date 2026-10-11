@@ -61,6 +61,21 @@ export interface SpeakerResult {
   text: string; model?: string; reasoning?: string; policy?: string; inputTokens?: number; outputTokens?: number; confidence?: number;
 }
 
+/**
+ * A model that reads a reply the phrase rules could not: none matched ("unknown"), or several did ("ambiguous"). It is
+ * given the words with any number taken out, and the intents it may choose from with their example phrases; never a
+ * variable of the call, and never a sensitive answer. `intent` null means it could not tell either.
+ */
+export interface InterpretRequest { reply: string; intents: Record<string, string[]>; language?: string }
+export interface InterpretResult { intent: string | null; confidence: number; reason?: string; inputTokens: number; outputTokens: number }
+export interface Interpreter { tier: 'haiku' | 'sonnet' | 'opus'; model: string; interpret(q: InterpretRequest): Promise<InterpretResult> }
+/** The configured interpreter, the one a tier up for a low-confidence answer, and the confidence an answer needs to be taken. */
+export interface ReplyReader { primary: Interpreter; escalate?: Interpreter; minConfidence: number }
+/** Below this a model's reading of a reply is not taken: it is asked a tier up if one is configured, and otherwise the rules' answer stands. */
+export const INTERPRET_MIN_CONFIDENCE = 0.7;
+/** The most of a reply a model is shown. */
+const INTERPRET_MAX_CHARS = 500;
+
 export interface IntegrationCall { method: 'GET' | 'POST'; path: string; body?: Json }
 export interface Deps {
   /** The workflow definitions this call is pinned to, by name. */
@@ -68,6 +83,8 @@ export interface Deps {
   integrations?: { call(name: string, req: IntegrationCall): Promise<Json> };
   /** Pre-recorded audio to play where the words match. Without one every line is spoken live (the unstitched baseline). */
   recordings?: RecordingIndex;
+  /** Reads a reply the phrase rules could not. Without one, such a reply stays "unknown" or "ambiguous". */
+  interpreter?: ReplyReader;
   /** Writes a dynamic node's line. Without one, a dynamic node speaks its fallback text. */
   speaker?: { generate(node: SpeakNode, vars: Vars, lang: string | undefined, context?: SpeakContext): Promise<string | SpeakerResult> };
   /** What the client's bot may know, ranked against a question for a voice call. Given to the model that writes a line. */
@@ -215,6 +232,47 @@ export async function start(workflow: string, vars: Vars, deps: Deps): Promise<{
   return { state, records };
 }
 
+/**
+ * Ask a model what a reply means, a tier up when the first answer is not good enough to take. Each answer is kept, taken
+ * or not, with its model, tier and tokens, so every model call is in the audit trail and the call's cost (L-026).
+ * An answer is taken only if it is confident enough and names one of the intents offered; a confident "cannot tell"
+ * is taken too, and leaves the rules' answer as it was.
+ */
+async function readByModel(reply: string, intents: Record<string, string[]>, language: string | undefined, r: ReplyReader): Promise<{ intent: string | null; attempts: Json[] }> {
+  const attempts: Json[] = [];
+  const ask = async (m: Interpreter, escalatedFrom?: string): Promise<{ taken: boolean; intent: string | null }> => {
+    const rec: Record<string, Json> = { model: m.model, tier: m.tier, inputTokens: 0, outputTokens: 0 };
+    if (escalatedFrom) rec.escalatedFrom = escalatedFrom;
+    attempts.push(rec);
+    let a: InterpretResult;
+    try { a = await m.interpret({ reply: reply.slice(0, INTERPRET_MAX_CHARS), intents, ...(language ? { language } : {}) }); }
+    catch {
+      rec.decision = 'rejected'; rec.reason = 'The model gave no answer (it failed), so its tokens are not known.';
+      return { taken: false, intent: null };
+    }
+    rec.inputTokens = Number.isSafeInteger(a.inputTokens) && a.inputTokens > 0 ? a.inputTokens : 0;
+    rec.outputTokens = Number.isSafeInteger(a.outputTokens) && a.outputTokens > 0 ? a.outputTokens : 0;
+    const confident = typeof a.confidence === 'number' && a.confidence >= 0 && a.confidence <= 1;
+    if (confident) rec.confidence = a.confidence;
+    if (a.reason) rec.why = redactNumbers(String(a.reason)).slice(0, 500);
+    const named = a.intent === null ? null : String(a.intent);
+    if (named !== null) rec.intent = redactNumbers(named).slice(0, 100);
+    if (!confident) { rec.decision = 'rejected'; rec.reason = 'The model gave no usable confidence.'; return { taken: false, intent: null }; }
+    if (named !== null && !own(intents, named)) { rec.decision = 'rejected'; rec.reason = 'The model named an intent that was not offered.'; return { taken: false, intent: null }; }
+    if (a.confidence < r.minConfidence) {
+      rec.decision = 'rejected'; rec.reason = `The model's confidence (${a.confidence}) was below ${r.minConfidence}.`;
+      return { taken: false, intent: null };
+    }
+    rec.decision = 'proceeded';
+    rec.reason = named === null ? 'The model could not tell either, so the reply stays as the rules read it.' : `The model read the reply as "${named}".`;
+    return { taken: true, intent: named };
+  };
+  const first = await ask(r.primary);
+  if (first.taken || !r.escalate) return { intent: first.intent, attempts };
+  const second = await ask(r.escalate, r.primary.tier);
+  return { intent: second.intent, attempts };
+}
+
 /** The caller said something: keep it, work out what they meant, and carry on. */
 export async function reply(state: RunState, text: string, deps: Deps): Promise<{ state: RunState; records: StepRecord[] }> {
   if (state.status !== 'awaiting_reply' || !state.awaiting) throw new Error('This call is not waiting for a reply.');
@@ -228,9 +286,18 @@ export async function reply(state: RunState, text: string, deps: Deps): Promise<
   const payload: Record<string, Json> = { text: sensitive ? '[hidden]' : heard };
   if (intents) {
     const d = interpretDetail(text, intents);
-    setVar(next, `${captureAs}_intent`, d.intent); payload.intent = d.intent;
+    let intent = d.intent;
     // The words that decided it, unless the answer is sensitive (then nothing of it is recorded).
     if (!sensitive) payload.matched = d.matched.map((m) => `${m.intent}: ${m.phrase}`);
+    // Rules first. Only a reply they could not read goes to a model, and never a sensitive one.
+    if ((intent === 'unknown' || intent === 'ambiguous') && !sensitive && deps.interpreter) {
+      const candidates = intent === 'ambiguous' ? [...new Set(d.matched.map((m) => m.intent))] : Object.keys(intents);
+      const lang = typeof next.vars.lang === 'string' ? next.vars.lang : undefined;
+      const read = await readByModel(heard, Object.fromEntries(candidates.map((k) => [k, intents[k]!])), lang, deps.interpreter);
+      payload.interpreted = read.attempts;
+      if (read.intent) { payload.rules = intent; intent = read.intent; }
+    }
+    setVar(next, `${captureAs}_intent`, intent); payload.intent = intent;
   }
   // Read the turn (kind, topic, sentiment) unless the answer is sensitive, in which case nothing of it is looked at or kept.
   let decision: ReturnType<typeof observeTurn> = { escalate: false };

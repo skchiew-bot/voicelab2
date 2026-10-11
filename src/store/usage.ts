@@ -46,11 +46,11 @@ async function relayUsage(c: pg.PoolClient, call: CallRow): Promise<Item[]> {
 }
 
 /**
- * The decisions that are part of a live call: lines a model wrote while the caller was on. Anything else that names the
+ * The decisions that are part of a live call: lines a model wrote, and replies a model read, while the caller was on. Anything else that names the
  * call (scoring it afterwards, the learning loop) runs later in batches and is the platform's running cost, not this
  * call's; a new kind of decision is left out until it is added here.
  */
-const ON_THE_CALL = ['speak_dynamic'];
+const ON_THE_CALL = ['speak_dynamic', 'interpret_reply'];
 const AFTER_THE_CALL_MS = 2 * 60_000;
 
 /**

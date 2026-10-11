@@ -47,11 +47,23 @@ async function tierOf(c: pg.PoolClient, model: string | null | undefined): Promi
   return ((await c.query('SELECT tier FROM model_config WHERE model_id = $1 LIMIT 1', [model])).rows[0]?.tier as Tier | undefined) ?? null;
 }
 
-/** The decisions recorded in a run's steps (a model's line that was used, tidied or turned down), put in the audit trail. */
+/** The decisions recorded in a run's steps (a model's line that was used, tidied or turned down, and each model that read a reply), put in the audit trail. */
 export async function recordStepDecisions(
   c: pg.PoolClient, e: { tenantId: string; callId: string | null; runId: string; records: { type: string; node?: string; payload: Record<string, Json> }[] },
 ) {
   for (const r of e.records) {
+    // Every model asked to read a reply, whether its answer was taken or not (a heard step can hold two: one a tier up).
+    if (r.type === 'heard' && Array.isArray(r.payload.interpreted)) {
+      for (const a of r.payload.interpreted as Record<string, Json>[]) {
+        await recordDecision(c, {
+          tenantId: e.tenantId, task: 'interpret_reply', subjectType: 'run_step', subjectId: `${e.runId}:${r.node ?? ''}`, callId: e.callId,
+          decision: a.decision as Decision, reason: String(a.reason ?? 'No reason given.'),
+          model: (a.model as string | undefined) ?? null, tier: (a.tier as Tier | undefined) ?? null, escalatedFrom: (a.escalatedFrom as string | undefined) ?? null,
+          inputTokens: Number(a.inputTokens ?? 0), outputTokens: Number(a.outputTokens ?? 0), confidence: a.confidence === undefined ? null : Number(a.confidence),
+        });
+      }
+      continue;
+    }
     const ai = r.type === 'say' ? (r.payload.ai as Record<string, Json> | undefined) : undefined;
     if (!ai?.decision) continue;
     await recordDecision(c, {

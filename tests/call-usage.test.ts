@@ -104,6 +104,15 @@ describe('a call\'s cost record holds everything the call used', () => {
     expect(await credits(call.id)).toEqual([{ credits: '-2.0000' }]);
   });
 
+  it('prices the tokens a model used reading a caller\'s reply as part of the call, as it does a line a model wrote', async () => {
+    const reader = await modelProvider('test-model-reader', '1.00', '5.00');
+    const call = await finishedCall(60);
+    await decision(call.id, 'test-model-reader', 1000, 200, { task: 'interpret_reply' });
+    expect(await cost(call.id)).toBe('recorded');
+    // worked out by hand: 1000 input tokens at 1.00 per million, 200 output at 5.00
+    expect((await lines(call.id)).filter((l) => l.provider_id === reader).map((l) => [l.line, l.amount]).sort()).toEqual([['llm:input', '0.00100000'], ['llm:output', '0.00100000']]);
+  });
+
   it('refuses to cost a call whose model nothing prices, or prices only in part, saying which, and costs them all again on one request', async () => {
     const unpriced = await finishedCall(60);
     await decision(unpriced.id, 'test-model-later', 100, 10);

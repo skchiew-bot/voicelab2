@@ -72,7 +72,8 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   const [last24h, last7d] = [await money('24 hours'), await money('7 days')];
 
   const problems = (await c.query(
-    `SELECT count(*) FILTER (WHERE cost_status = 'failed')::int AS failed, count(*) FILTER (WHERE cost_status = 'variance')::int AS variance FROM calls`)).rows[0];
+    `SELECT count(*) FILTER (WHERE cost_status = 'failed')::int AS failed, count(*) FILTER (WHERE cost_status = 'variance')::int AS variance,
+            count(*) FILTER (WHERE cost_status = 'unchecked')::int AS unchecked FROM calls`)).rows[0];
   const hasMyr = (await c.query(`SELECT 1 FROM fx_rates WHERE currency = 'MYR' AND effective_from <= now() LIMIT 1`)).rowCount === 1;
   const hasRateCard = (await c.query(`SELECT 1 FROM rate_cards WHERE effective_from <= now() LIMIT 1`)).rowCount === 1;
   const registries = (await c.query('SELECT count(*)::int AS n FROM dnc_registries')).rows[0].n as number;
@@ -98,6 +99,7 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
     else if (j.last_outcome === 'partly') add('medium', 'job_partly', `The scheduled job "${j.name}" has failed for some clients ${j.consecutive_failures} runs in a row.`, '#/jobs', j.name);
     else add('high', 'job_failing', `The scheduled job "${j.name}" has failed ${j.consecutive_failures} times in a row.`, '#/jobs', j.name);
   }
+  if (problems.unchecked > 0) add('medium', 'cost_unchecked', `${problems.unchecked} call${problems.unchecked === 1 ? ' has' : 's have'} a leg that could not be checked against the provider automatically; check ${problems.unchecked === 1 ? 'it' : 'them'} by hand.`, '#/calls');
   if (problems.variance > 0) add('medium', 'cost_variance', `${problems.variance} call${problems.variance === 1 ? '' : 's'} differ${problems.variance === 1 ? 's' : ''} from the provider's own figures.`, '#/calls');
 
   const health = await healthMap(c);

@@ -1,0 +1,25 @@
+-- Follow-ups to passing a live caller to a person (020).
+
+-- How long the agent's leg lasted, as Twilio reports it when the dial ends (`DialCallDuration`). Twilio bills that leg
+-- separately, so the call's one cost record carries it as its own line. Null until reported.
+ALTER TABLE calls ADD COLUMN transfer_seconds numeric(10,3) CHECK (transfer_seconds >= 0);
+
+-- The agent's leg's own id at Twilio (`DialCallSid`, never a number), so its price can be looked up and checked.
+ALTER TABLE calls ADD COLUMN transfer_leg_sid text CHECK (transfer_leg_sid ~ '^[A-Za-z0-9_]{2,64}$');
+
+-- Which leg of the call a cost line prices: the caller's own, or the agent's leg of a transfer (a separate call at the
+-- provider). Reconciliation checks both legs against the provider's figures.
+ALTER TABLE call_cost_lines ADD COLUMN leg text NOT NULL DEFAULT 'caller' CHECK (leg IN ('caller', 'agent'));
+
+-- For now an agent number must be Malaysian (+60), any +60 number (owner's decision, 2026-10-11), so a changed setting
+-- cannot send calls to an expensive destination abroad (toll fraud). NOT VALID: enforced for every new or changed
+-- setting; one already stored is refused at dial time.
+ALTER TABLE transfer_settings ADD CONSTRAINT transfer_settings_agent_malaysian CHECK (agent_e164 ~ '^\+60[1-9][0-9]{7,9}$') NOT VALID;
+
+-- A leg that cannot be checked against the provider automatically (no id to look it up by) is its own state, never a
+-- variance: nothing was found to differ. It waits for a person to check both legs by hand.
+ALTER TABLE call_reconciliations DROP CONSTRAINT call_reconciliations_outcome_check;
+ALTER TABLE call_reconciliations ADD CONSTRAINT call_reconciliations_outcome_check CHECK (outcome IN ('matched', 'variance', 'unchecked'));
+ALTER TABLE calls DROP CONSTRAINT calls_cost_status_check;
+ALTER TABLE calls ADD CONSTRAINT calls_cost_status_check
+  CHECK (cost_status IN ('pending', 'recorded', 'failed', 'reconciled', 'variance', 'not_applicable', 'unchecked'));

@@ -56,7 +56,28 @@ export type ContactOutcome = (typeof CONTACT_OUTCOMES)[number];
  * refused, a wrong number, someone else answered); it is recorded as the call's outcome when a live outbound call's run
  * ends here. An end inside a subflow hands back to its parent, so only the end the call finishes at counts.
  */
-export interface EndNode extends Common { type: 'end'; outcome: string; contact?: ContactOutcome }
+export interface EndNode extends Common { type: 'end'; outcome: string; contact?: ContactOutcome; callback?: CallbackAsked }
+/**
+ * When the person asked to be called back, read from what the call captured: each part names a variable (usually a
+ * captured answer's intent, such as `when_intent`) and maps its values to a number. A value the map does not hold means
+ * the time was not understood, and no callback time is recorded.
+ */
+export interface CallbackAsked {
+  /** Day of the week, 0 (Sunday) to 6. */
+  day: { var: string; map: Record<string, number> };
+  /** Hour of the day, 0 to 23, in `timeZone`. */
+  hour: { var: string; map: Record<string, number> };
+  /** The person's time zone, such as Asia/Kuala_Lumpur. */
+  timeZone: string;
+}
+/** A callback time read from a call: the parts of `CallbackAsked`, resolved. */
+export interface CallbackTime { day: number; hour: number; timeZone: string }
+/** A time zone's one standard spelling (`asia/kuala_lumpur` is `Asia/Kuala_Lumpur`), so one zone is never counted under two names. */
+export const canonicalTimeZone = (tz: string): string => new Intl.DateTimeFormat('en', { timeZone: tz }).resolvedOptions().timeZone;
+export const validTimeZone = (tz: unknown): tz is string => {
+  if (typeof tz !== 'string' || tz.length === 0 || tz.length > 64) return false;
+  try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch { return false; }
+};
 
 export type WorkflowNode = SpeakNode | ApiNode | SubflowNode | HandoffNode | EndNode;
 

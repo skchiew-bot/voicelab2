@@ -1,6 +1,6 @@
 import { redactNumbers } from '../telephony/types.js';
 import { evalCondition, type Vars } from './conditions.js';
-import { CONTACT_OUTCOMES, own, RESERVED_NAMES, SLOT_RE, type ApiNode, type Json, type SpeakNode, type WorkflowDefinition, type WorkflowNode } from './definition.js';
+import { canonicalTimeZone, CONTACT_OUTCOMES, validTimeZone, type CallbackAsked, type CallbackTime, own, RESERVED_NAMES, SLOT_RE, type ApiNode, type Json, type SpeakNode, type WorkflowDefinition, type WorkflowNode } from './definition.js';
 import { interpretDetail } from './interpret.js';
 import { analyseTurn, intentChanged, observeTurn, type JourneyConfig, type JourneyState } from '../journey/tracker.js';
 import { planSpeech, synthOnly, type RecordingIndex, type Segment, type SpeechPlan } from './stitch.js';
@@ -166,6 +166,26 @@ function endWithHuman(state: RunState, out: StepRecord[], node: string, reason: 
   out.push({ type: 'end', workflow: wf, payload: { outcome: 'handoff_human', reason } });
 }
 
+/**
+ * The callback time the person asked for, read from what the call captured through the end's maps. Nothing is guessed: a
+ * variable that is missing, sensitive, or holds a value the map does not have means no callback time.
+ */
+function callbackFrom(cb: CallbackAsked | undefined, state: RunState): CallbackTime | undefined {
+  if (!cb || typeof cb !== 'object' || !validTimeZone(cb.timeZone)) return undefined;
+  const part = (p: CallbackAsked['day'] | undefined, max: number): number | undefined => {
+    if (!p || typeof p.var !== 'string' || !p.map || typeof p.map !== 'object') return undefined;
+    if (state.sensitive.some((s) => p.var === s || p.var === `${s}_intent`) || !own(state.vars, p.var)) return undefined;
+    const v = state.vars[p.var];
+    if (typeof v !== 'string' && typeof v !== 'number') return undefined;
+    const key = String(v);
+    if (!own(p.map, key)) return undefined;
+    const n = p.map[key];
+    return typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= max ? n : undefined;
+  };
+  const day = part(cb.day, 6); const hour = part(cb.hour, 23);
+  return day === undefined || hour === undefined ? undefined : { day, hour, timeZone: canonicalTimeZone(cb.timeZone) };
+}
+
 function withoutSensitive(state: RunState): Vars {
   return Object.fromEntries(Object.entries(state.vars).filter(([k]) => !state.sensitive.includes(k)));
 }
@@ -266,9 +286,9 @@ export async function reply(state: RunState, text: string, deps: Deps): Promise<
 }
 
 /** The current workflow ended cleanly (or by an end node): finish the call, or return to the parent of a subflow. */
-function leave(state: RunState, out: StepRecord[], outcome: string, deps: Deps, contact?: string): void {
+function leave(state: RunState, out: StepRecord[], outcome: string, deps: Deps, contact?: string, callback?: CallbackTime): void {
   const frame = state.stack.pop();
-  if (!frame) { state.status = 'ended'; state.outcome = outcome; state.node = null; scrub(state); out.push({ type: 'end', workflow: state.workflow, payload: { outcome, ...(contact ? { contact } : {}) } }); return; }
+  if (!frame) { state.status = 'ended'; state.outcome = outcome; state.node = null; scrub(state); out.push({ type: 'end', workflow: state.workflow, payload: { outcome, ...(contact ? { contact } : {}), ...(callback ? { callback: { ...callback } } : {}) } }); return; }
   out.push({ type: 'subflow_exit', workflow: state.workflow, node: frame.node, payload: { outcome } });
   state.vars[`${frame.node}_outcome`] = outcome;
   state.workflow = frame.workflow;
@@ -407,8 +427,9 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
       case 'end': {
         // Only a known call outcome is carried (a version saved before outcomes were checked may hold anything there).
         const contact = (CONTACT_OUTCOMES as readonly unknown[]).includes(node.contact) ? node.contact : undefined;
-        out.push({ type: 'reached_end', workflow: wf, node: id, payload: { outcome: node.outcome, ...(contact ? { contact } : {}) } });
-        leave(state, out, node.outcome, deps, contact);
+        const callback = contact && contact !== 'wrong_number' ? callbackFrom(node.callback, state) : undefined;
+        out.push({ type: 'reached_end', workflow: wf, node: id, payload: { outcome: node.outcome, ...(contact ? { contact } : {}), ...(callback ? { callback: { ...callback } } : {}) } });
+        leave(state, out, node.outcome, deps, contact, callback);
         break;
       }
     }

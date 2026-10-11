@@ -5,7 +5,7 @@ import { AppError } from '../errors.js';
 import { lineAmount, quantityFor, type Unit } from '../billing.js';
 import { fromScaled, mulDiv, SCALE } from '../money.js';
 import { decryptSecrets, encryptSecrets } from '../secrets.js';
-import { CONTACT_OUTCOMES, own, type ContactOutcome, type Json, type WorkflowDefinition } from '../workflows/definition.js';
+import { canonicalTimeZone, CONTACT_OUTCOMES, own, validTimeZone, type ContactOutcome, type Json, type WorkflowDefinition } from '../workflows/definition.js';
 import { PhoneInVariable, reply as engineReply, start as engineStart, type Deps, type RunState, type StepRecord } from '../workflows/engine.js';
 import { callIntegration, type HttpDeps } from '../workflows/integrations.js';
 import { referencesOf } from '../workflows/refs.js';
@@ -145,13 +145,20 @@ export async function startRun(d: RunDeps, actorId: string | null, e: StartInput
 type StartInput = { workflowId: string; environment: Environment; kind: RunKind; variables: Record<string, Json>; callId?: string };
 
 /**
- * A live call whose run ends at an end that says how the call turned out records that as the call's outcome, in the same
- * step that ends the run. Rehearsals and runs with no call record nothing.
+ * A live call whose run ends at an end that says how the call turned out records that as the call's outcome, with the
+ * callback time the person asked for when the end could read one, in the same step that ends the run. Rehearsals and runs with no call record nothing.
  */
 async function recordContact(c: pg.PoolClient, kind: string, callId: string | null, runId: string, records: StepRecord[]) {
   if (kind !== 'live' || !callId) return;
-  const contact = records.find((r) => r.type === 'end')?.payload.contact;
-  if (typeof contact === 'string' && (CONTACT_OUTCOMES as readonly string[]).includes(contact)) await recordWorkflowOutcome(c, { callId, runId, contact: contact as ContactOutcome });
+  const end = records.find((r) => r.type === 'end')?.payload;
+  const contact = end?.contact;
+  if (typeof contact !== 'string' || !(CONTACT_OUTCOMES as readonly string[]).includes(contact)) return;
+  const cb = end?.callback as { day?: unknown; hour?: unknown; timeZone?: unknown } | undefined;
+  // Checked again here, so a callback time that could not be stored loses only itself, never the outcome or the step (L-006).
+  const inRange = (v: unknown, max: number) => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= max;
+  const callback = cb && inRange(cb.day, 6) && inRange(cb.hour, 23) && validTimeZone(cb.timeZone) && contact !== 'wrong_number'
+    ? { day: cb.day as number, hour: cb.hour as number, timeZone: canonicalTimeZone(cb.timeZone) } : undefined;
+  await recordWorkflowOutcome(c, { callId, runId, contact: contact as ContactOutcome, callback });
 }
 
 /** As startRun, and also the lines to say, for the live call voice link. */

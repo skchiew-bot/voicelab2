@@ -88,8 +88,8 @@ describe('read-only staff', () => {
   });
 
   it('says who they are, so the console can show it is read-only', async () => {
-    expect((await inject(viewer, 'GET', '/me')).json()).toEqual({ email: 'viewer@daythree.test', role: 'internal_viewer', readOnly: true });
-    expect((await inject(env.staffToken, 'GET', '/me')).json()).toEqual({ email: 'staff@daythree.test', role: 'internal_admin', readOnly: false });
+    expect((await inject(viewer, 'GET', '/me')).json()).toEqual({ email: 'viewer@daythree.test', role: 'internal_viewer', readOnly: true, production: 'change' });
+    expect((await inject(env.staffToken, 'GET', '/me')).json()).toEqual({ email: 'staff@daythree.test', role: 'internal_admin', readOnly: false, production: 'direct' });   // the suite's staff admin is a named deployer (tests/helpers.ts)
   });
 });
 

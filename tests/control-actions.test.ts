@@ -35,7 +35,7 @@ beforeAll(async () => {
   twilioId = (await must(post('/internal/providers', { adapterKey: 'twilio', name: 'tw', params: { accountSid: 'AC1', authToken: 'tok', twimlAppVoiceUrl: `${BASE}/v` } }))).json().id;
   telnyxId = (await must(post('/internal/providers', { adapterKey: 'telnyx', name: 'tx', params: { apiKey: 'KEY', webhookUrl: `${BASE}/h`, connectionId: 'c1', webhookPublicKey: 'AAAA' } }))).json().id;
   voiceId = (await must(post('/internal/providers', { adapterKey: 'elevenlabs', name: 'el', params: { apiKey: 'k' } }))).json().id;
-  const rates = (id: string, rate: string, limit: number) => post(`/internal/providers/${id}/charging`, {
+  const rates = (id: string, rate: string, limit: number) => post(`/internal/providers/${id}/charging`, { reason: 'Set up for this test.', 
     effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, concurrencyLimit: limit,
     components: [{ component: 'telephony_leg', unit: 'per_minute', rate, currency: 'USD' }],
   });
@@ -115,7 +115,7 @@ describe('a drain that leaves no provider', () => {
     await must(act({ action: 'restore', providerId: twilioId, reason: 'Maintenance done.' }));
     expect((await must(dial(t))).json().status).toBe('dialing');
     // A client whose only voice route is this provider would be left with none: refused, with the reason.
-    await must(env.call(st(), 'PUT', `/internal/tenants/${t}/routes/voice`, { providerIds: [voiceId] }));
+    await must(env.call(st(), 'PUT', `/internal/tenants/${t}/routes/voice`, { reason: 'Set up for this test.', providerIds: [voiceId] }));
     const v = await act({ action: 'drain', providerId: voiceId, reason: 'Testing.' });
     expect(v.statusCode).toBe(409); expect(v.json().error).toContain('only usable voice provider for 1 client');
     await clearActive();
@@ -124,7 +124,7 @@ describe('a drain that leaves no provider', () => {
 
 describe('forcing a failover', () => {
   it('fails the provider over at once, logs it as an operator\'s failover, and lets it earn its way back like any other', async () => {
-    await must(env.call(st(), 'PUT', '/internal/resilience/policy', { recoveryOkSamples: 2, recoveryDwellMs: 0 }));
+    await must(env.call(st(), 'PUT', '/internal/resilience/policy', { reason: 'Set up for this test.', recoveryOkSamples: 2, recoveryDwellMs: 0 }));
     await must(act({ action: 'force_failover', providerId: twilioId, reason: 'Twilio latency spike seen by the team.' }));
     expect((await act({ action: 'force_failover', providerId: twilioId, reason: 'again' })).statusCode).toBe(409);
     const health = (await must(env.call(st(), 'GET', '/internal/resilience/health'))).json().find((h: { provider_id: string }) => h.provider_id === twilioId);

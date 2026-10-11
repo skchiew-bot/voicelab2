@@ -81,7 +81,9 @@ export async function logLearningTurns(
   c: pg.PoolClient,
   e: { tenantId: string; runId: string; callId: string | null; kind: string; records: Rec[]; vars: Record<string, unknown>; sensitive: readonly string[]; context: { kind: string; topic: string | null } },
 ) {
-  if (e.kind === 'simulation') return;                    // a rehearsal is not evidence
+  // Only real callers are evidence: a rehearsal or a staging test call is someone trying the flow out, not the people
+  // the script would be spoken to (and a test may run a version that was never put live).
+  if (e.kind !== 'live' || !e.callId) return;
   for (const r of e.records) {
     if (r.type !== 'say' || r.payload.strategy !== 'dynamic' || r.payload.promotion !== undefined || !r.node) continue;
     const line = String(r.payload.text ?? '');
@@ -94,6 +96,14 @@ export async function logLearningTurns(
   }
 }
 
+/**
+ * A run that is evidence: a live call that really happened, for this client. A run started by hand as "live" with no
+ * call, a staging test or a rehearsal is someone trying the flow out, and a person must not be able to supply the
+ * evidence for a script they will then judge. Applied where evidence is read, so turns logged before the rule are held
+ * to it too.
+ */
+const LIVE_CALL = (r: string) => `${r}.kind = 'live' AND ${r}.call_id IS NOT NULL AND EXISTS (SELECT 1 FROM calls cl WHERE cl.id = ${r}.call_id AND cl.tenant_id = ${r}.tenant_id)`;
+
 // ------------------------------------------------------------------------------------------------ status
 export type PromotionStatus = 'in_review' | 'approved' | 'promoted' | 'demoted' | 'rejected';
 const STATUS: Record<string, PromotionStatus> = {
@@ -103,11 +113,12 @@ const STATUS: Record<string, PromotionStatus> = {
 const LIVE: PromotionStatus[] = ['in_review', 'approved', 'promoted'];
 
 const PROMO_COLS = `p.id, p.tenant_id, p.workflow, p.node, p.language, p.context_kind, p.context_topic, p.script, p.slots, p.support, p.variants,
-  p.avg_synth_chars, p.avg_slot_chars, p.distilled_by, p.supersedes, p.created_at,
+  p.avg_synth_chars, p.avg_slot_chars, p.distilled_by, p.supersedes, p.created_at, p.created_by,
+  EXISTS (SELECT 1 FROM promotion_events e WHERE e.promotion_id = p.id AND e.kind = 'reviewed') AS reviewed,
   (SELECT e.kind FROM promotion_events e WHERE e.promotion_id = p.id AND e.kind <> 'regenerated' ORDER BY e.id DESC LIMIT 1) AS last_kind`;
 export interface PromotionRow {
   id: string; tenant_id: string; workflow: string; node: string; language: string; context_kind: string; context_topic: string; script: string; slots: string[];
-  support: number; variants: number; avg_synth_chars: number; avg_slot_chars: number; distilled_by: string; supersedes: string | null; created_at: Date; last_kind: string; status: PromotionStatus;
+  support: number; variants: number; avg_synth_chars: number; avg_slot_chars: number; distilled_by: string; supersedes: string | null; created_at: Date; created_by: string | null; reviewed: boolean; last_kind: string; status: PromotionStatus;
 }
 const shape = (r: Record<string, unknown>): PromotionRow => ({ ...r, status: STATUS[r.last_kind as string] ?? 'in_review', avg_synth_chars: Number(r.avg_synth_chars), avg_slot_chars: Number(r.avg_slot_chars) }) as PromotionRow;
 
@@ -165,7 +176,7 @@ interface Group { workflow: string; node: string; language: string; contextKind:
 export async function clusterGroups(c: pg.PoolClient, tenantId: string, cfg: LearningConfig, only?: { workflow?: string; node?: string }): Promise<Group[]> {
   const rows = (await c.query(
     `SELECT t.workflow, t.node, t.language, t.context_kind, t.context_topic, t.text, count(*)::int AS n, avg(t.synth_chars) AS synth, avg(t.slot_chars) AS slot
-       FROM learning_turns t
+       FROM learning_turns t JOIN workflow_runs r ON r.id = t.run_id AND ${LIVE_CALL('r')}
       WHERE t.tenant_id = $1 AND ($2::text IS NULL OR t.workflow = $2) AND ($3::text IS NULL OR t.node = $3)
         AND t.created_at > coalesce((SELECT max(e.created_at) FROM promotion_events e JOIN promotions p ON p.id = e.promotion_id
                                       WHERE p.tenant_id = t.tenant_id AND p.workflow = t.workflow AND p.node = t.node AND p.language = t.language AND e.kind = 'demoted'), '-infinity')
@@ -241,7 +252,7 @@ export async function distil(d: LearnDeps, actorId: string | null, e: { tenantId
     const top = g.clusters[0];
     if (!top || top.support < plan.cfg.minSupport) continue;
     const ctx = await withActor(d.pool, { kind: 'internal' }, async (c) => {
-      const last = (await c.query('SELECT run_id FROM learning_turns WHERE tenant_id = $1 AND workflow = $2 AND node = $3 ORDER BY id DESC LIMIT 1', [e.tenantId, g.workflow, g.node])).rows[0];
+      const last = (await c.query(`SELECT t.run_id FROM learning_turns t JOIN workflow_runs r ON r.id = t.run_id AND ${LIVE_CALL('r')} WHERE t.tenant_id = $1 AND t.workflow = $2 AND t.node = $3 ORDER BY t.id DESC LIMIT 1`, [e.tenantId, g.workflow, g.node])).rows[0];
       const def = last ? await definitionFor(c, last.run_id, g.workflow) : undefined;
       const earlier = (await c.query(
         `SELECT ${PROMO_COLS} FROM promotions p WHERE p.tenant_id = $1 AND p.workflow = $2 AND p.node = $3 AND p.language = $4 AND p.context_kind = $5 AND p.context_topic = $6`,
@@ -312,7 +323,7 @@ const COUNCILS = [['quality', 'council_quality'], ['cx', 'council_cx']] as const
 
 /** The rule checks a script must pass, against the node as it is defined now. */
 async function scriptChecks(c: pg.PoolClient, p: PromotionRow) {
-  const last = (await c.query('SELECT run_id FROM learning_turns WHERE tenant_id = $1 AND workflow = $2 AND node = $3 ORDER BY id DESC LIMIT 1', [p.tenant_id, p.workflow, p.node])).rows[0];
+  const last = (await c.query(`SELECT t.run_id FROM learning_turns t JOIN workflow_runs r ON r.id = t.run_id AND ${LIVE_CALL('r')} WHERE t.tenant_id = $1 AND t.workflow = $2 AND t.node = $3 ORDER BY t.id DESC LIMIT 1`, [p.tenant_id, p.workflow, p.node])).rows[0];
   const def = last ? await definitionFor(c, last.run_id, p.workflow) : undefined;
   const node = def && Object.hasOwn(def.nodes, p.node) ? def.nodes[p.node] as { prompt?: string } : undefined;
   return { checks: checkScript(p.script, { variables: def?.variables ?? [], sensitive: def?.sensitiveVariables ?? [] }), nodePrompt: node?.prompt ?? '' };
@@ -327,9 +338,13 @@ export async function reviewPromotion(d: LearnDeps, actorId: string | null, prom
   const ctx = await withActor(d.pool, { kind: 'internal' }, async (c) => {
     const p = await getPromotion(c, promotionId);
     if (p.status !== 'in_review') throw new AppError(409, `This script is ${p.status}; it is not waiting for review.`);
+    // The councils are asked once. Asking again until a sampled answer happens to pass would let the person who drew the
+    // script up get it approved with nobody else involved; an unsure answer goes to a person.
+    if ((p.events as { kind: string }[]).some((e) => e.kind === 'reviewed')) throw new AppError(409, 'The councils have already reviewed this script, so a person decides it now.');
     const cfg = await getLearningConfig(c, p.tenant_id as string);
     const examples = (await c.query(
-      `SELECT text FROM learning_turns WHERE tenant_id = $1 AND workflow = $2 AND node = $3 AND language = $4 GROUP BY text ORDER BY count(*) DESC LIMIT 5`, [p.tenant_id, p.workflow, p.node, p.language])).rows.map((r) => r.text as string);
+      `SELECT t.text FROM learning_turns t JOIN workflow_runs r ON r.id = t.run_id AND ${LIVE_CALL('r')}
+        WHERE t.tenant_id = $1 AND t.workflow = $2 AND t.node = $3 AND t.language = $4 GROUP BY t.text ORDER BY count(*) DESC LIMIT 5`, [p.tenant_id, p.workflow, p.node, p.language])).rows.map((r) => r.text as string);
     const { checks, nodePrompt } = await scriptChecks(c, p);
     const picks = [];
     for (const [name, task] of COUNCILS) picks.push({ name, task, cfg: await modelFor(c, task) });
@@ -380,6 +395,9 @@ export async function decidePromotion(d: LearnDeps, actorId: string, promotionId
     await lock(c, `promo:${promotionId}`);
     const p = await getPromotion(c, promotionId);
     if (p.status !== 'in_review') throw new AppError(409, `This script is ${p.status}; it is not waiting for a decision.`);
+    // The person who drew the script up does not decide it: someone else hears it first.
+    // The person who drew the script up may withdraw it (turning it down is always safe), but not approve it.
+    if (e.decision === 'approved' && p.created_by !== null && p.created_by === actorId) throw new AppError(403, 'You drew this script up, so someone else must approve it. You can still turn it down.');
     if (e.decision === 'approved') {
       const { checks } = await scriptChecks(c, p);
       if (!checks.ok) throw new AppError(409, `This script fails the rule checks, so it cannot be approved: ${checks.problems.join(' ')}`);
@@ -466,7 +484,7 @@ async function reactions(
                     (r.state->'escalation'->>'node' = s.node) AS escalated
                FROM workflow_run_steps s JOIN workflow_runs r ON r.id = s.run_id
                JOIN LATERAL (SELECT payload FROM workflow_run_steps h WHERE h.run_id = s.run_id AND h.seq > s.seq AND h.type = 'heard' AND h.node = s.node AND h.workflow = s.workflow ORDER BY h.seq LIMIT 1) h ON true
-              WHERE r.tenant_id = $1 AND r.kind IN ('live', 'test') AND s.type = 'say' AND s.workflow = $2 AND s.node = $3
+              WHERE r.tenant_id = $1 AND ${LIVE_CALL('r')} AND s.type = 'say' AND s.workflow = $2 AND s.node = $3
                 AND coalesce(s.payload->>'lang', 'en') = $4
                 AND (CASE WHEN $5::text IS NULL THEN NOT (s.payload ? 'promotion') ELSE s.payload->>'promotion' = $5 END)
                 AND h.payload ? 'analysis'
@@ -495,7 +513,7 @@ export async function driftVerdict(c: pg.PoolClient, promotionId: string): Promi
   const reasons: string[] = [];
   const latest = (await c.query(
     `SELECT s.run_id FROM workflow_run_steps s JOIN workflow_runs r ON r.id = s.run_id
-      WHERE r.tenant_id = $1 AND r.kind IN ('live', 'test') AND s.workflow = $2 AND s.node = $3 AND s.type = 'say' AND s.created_at > $4 ORDER BY r.started_at DESC, s.id DESC LIMIT 1`, [p.tenant_id, p.workflow, p.node, at])).rows[0];
+      WHERE r.tenant_id = $1 AND ${LIVE_CALL('r')} AND s.workflow = $2 AND s.node = $3 AND s.type = 'say' AND s.created_at > $4 ORDER BY r.started_at DESC, s.id DESC LIMIT 1`, [p.tenant_id, p.workflow, p.node, at])).rows[0];
   if (latest) {
     const def = await definitionFor(c, latest.run_id, p.workflow as string);
     const stored = (await c.query('SELECT node_hash FROM promotions WHERE id = $1', [promotionId])).rows[0].node_hash as string;
@@ -519,7 +537,7 @@ async function replaysFor(c: pg.PoolClient, p: { tenant_id: string; workflow: st
     `SELECT s.run_id AS "runId", r.call_id AS "callId", (h.payload->'analysis'->>'sentiment')::numeric AS sentiment
        FROM workflow_run_steps s JOIN workflow_runs r ON r.id = s.run_id
        JOIN LATERAL (SELECT payload FROM workflow_run_steps h WHERE h.run_id = s.run_id AND h.seq > s.seq AND h.type = 'heard' AND h.node = s.node ORDER BY h.seq LIMIT 1) h ON true
-      WHERE r.tenant_id = $1 AND s.workflow = $2 AND s.node = $3 AND s.type = 'say' AND s.payload ? 'promotion' AND s.created_at > $4 AND h.payload ? 'analysis'
+      WHERE r.tenant_id = $1 AND ${LIVE_CALL('r')} AND s.workflow = $2 AND s.node = $3 AND s.type = 'say' AND s.payload ? 'promotion' AND s.created_at > $4 AND h.payload ? 'analysis'
       ORDER BY sentiment ASC LIMIT 5`, [p.tenant_id, p.workflow, p.node, since])).rows.map((r) => ({ runId: r.runId as string, callId: r.callId as string | null, sentiment: Number(r.sentiment) }));
 }
 
@@ -582,7 +600,7 @@ export async function assess(c: pg.PoolClient, p: PromotionRow, direction: 'prom
   const oneTime = fixedChars(p.script as string);
   const uses = (await c.query(
     `SELECT count(*)::int AS n FROM workflow_run_steps s JOIN workflow_runs r ON r.id = s.run_id
-      WHERE r.tenant_id = $1 AND s.workflow = $2 AND s.node = $3 AND s.type = 'say' AND s.payload ? 'promotion' AND s.payload->>'promotion' = $4`, [p.tenant_id, p.workflow, p.node, p.id])).rows[0].n as number;
+      WHERE r.tenant_id = $1 AND ${LIVE_CALL('r')} AND s.workflow = $2 AND s.node = $3 AND s.type = 'say' AND s.payload ? 'promotion' AND s.payload->>'promotion' = $4`, [p.tenant_id, p.workflow, p.node, p.id])).rows[0].n as number;
   let price: ((n: number) => bigint) | null = null; let confirmed: boolean | null = null;
   if (cfg.voiceProviderId) { const pr = await ttsPricing(c, cfg.voiceProviderId, new Date()); price = pr.price; confirmed = pr.confirmed; }
   const usd = (chars: number) => (price ? fromScaled(price(chars)) : null);

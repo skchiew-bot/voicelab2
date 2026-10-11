@@ -176,6 +176,28 @@ describe('a reply the phrase rules cannot read', () => {
     expect(INTERPRET_TIMEOUT_MS * 2).toBeLessThan(30_000);                   // two attempts fit well inside a turn on the voice link
   });
 
+  it('keeps an answer the workflow marked sensitive, sealed, for a later node to route on, while still keeping it from the model and the record', async () => {
+    const haiku = model('haiku', { intent: 'given', confidence: 0.99 });
+    const dob: WorkflowDefinition = { start: 'ask', sensitiveVariables: ['dob'], nodes: {
+      ask: { type: 'speak', speech: 'fixed', text: 'Your date of birth?', listen: { captureAs: 'dob', intents: { given: ['born'] } }, transitions: [{ to: 'mid' }] },
+      mid: { type: 'speak', speech: 'fixed', text: 'Thank you.', transitions: [{ when: { var: 'dob_intent', op: 'eq', value: 'given' }, to: 'ok' }, { to: 'bad' }] },
+      ok: { type: 'end', outcome: 'ok' }, bad: { type: 'end', outcome: 'bad' } } };
+    const d: Deps = { load: () => dob, interpreter: reader(haiku.m) };
+    const r = await reply((await start('w', {}, d)).state, 'I was born in May', d);
+    expect(r.state.outcome).toBe('ok');
+    expect(heardOf(r.records)).toMatchObject({ text: '[hidden]' });
+    expect(JSON.stringify(r.records)).not.toContain('May');
+    expect(haiku.asked).toEqual([]);
+  });
+
+  it('records a model that fails after its time is up as late, once, with nothing left to go wrong after', async () => {
+    const lateFail: Interpreter = { tier: 'haiku', model: 'haiku-model', interpret: () => new Promise((_, no) => setTimeout(() => no(new Error('late failure')), 80)) };
+    const s = await start('w', {}, deps());
+    const r = await reply(s.state, 'hmm well', deps(reader(lateFail, undefined, 20)));
+    await new Promise((res) => setTimeout(res, 120));                        // the late failure lands with no one listening, harmlessly
+    expect(heardOf(r.records).interpreted).toEqual([expect.objectContaining({ decision: 'rejected', reason: expect.stringContaining('did not answer within') })]);
+  });
+
   it('takes a tier up\'s answer when the first model fails, and refuses an intent the rules ruled out of an ambiguous reply', async () => {
     const broken = model('haiku', async () => { throw new Error('down'); });
     const sonnet = model('sonnet', { intent: 'yes', confidence: 0.9 });
@@ -298,6 +320,9 @@ describe('reading replies with a model, through the database', () => {
     await replyRun({ ...d, interpreters: { haiku: lowFirst, sonnet: broken } }, again.id, 'money is tight');
     expect((await env.pool.query(`SELECT tier, input_tokens, output_tokens FROM ai_decisions WHERE subject_id = $1 ORDER BY id`, [`${again.id}:ask`])).rows)
       .toEqual([{ tier: 'haiku', input_tokens: 40, output_tokens: 2 }, { tier: 'sonnet', input_tokens: null, output_tokens: null }]);
+    // the rollup says how many calls' tokens are unknown, rather than showing a smaller total as complete
+    const sonnetUse = (await get('/internal/ai-usage')).json().find((u: { task: string; tier: string }) => u.task === 'interpret_reply' && u.tier === 'sonnet');
+    expect(sonnetUse.unknown_tokens).toBeGreaterThanOrEqual(1);
   });
 
   it('asks the model with the turn claimed and no database connection held, so a second reply meanwhile is refused and the pool stays free', async () => {

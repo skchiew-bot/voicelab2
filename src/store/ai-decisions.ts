@@ -87,7 +87,8 @@ export const listDecisions = async (c: pg.PoolClient, o: { tenantId?: string; ca
 export const tokenUsage = async (c: pg.PoolClient, o: { tenantId?: string } = {}) =>
   (await c.query(
     `SELECT task, coalesce(model, 'rules') AS model, coalesce(tier, 'rules') AS tier, count(*)::int AS decisions,
-            sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens,
+            coalesce(sum(input_tokens), 0)::bigint AS input_tokens, coalesce(sum(output_tokens), 0)::bigint AS output_tokens,
+            count(*) FILTER (WHERE input_tokens IS NULL OR output_tokens IS NULL)::int AS unknown_tokens,
             count(*) FILTER (WHERE decision = 'rejected')::int AS rejected, count(*) FILTER (WHERE decision = 'reworked')::int AS reworked,
             count(*) FILTER (WHERE escalated_from IS NOT NULL)::int AS escalations
        FROM ai_decisions WHERE ($1::uuid IS NULL OR tenant_id = $1) GROUP BY 1, 2, 3 ORDER BY 1, 2`, [o.tenantId ?? null])).rows;

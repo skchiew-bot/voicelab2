@@ -296,6 +296,9 @@ export async function reply(state: RunState, text: string, deps: Deps): Promise<
   const { node, captureAs, intents, model } = next.awaiting!;
   // Sensitive if the question says so, or if the workflow (or a workflow that handed the call over) marked the variable so.
   const sensitive = next.awaiting!.sensitive === true || next.sensitive.includes(captureAs);
+  // Only an answer the question itself marks sensitive is forgotten once it has routed the call; one the workflow marks is
+  // held sealed until the call ends, so a later node can still route on it (it is never recorded or given to a model either way).
+  const forget = next.awaiting!.sensitive === true;
   // What was said can contain a number; it is kept without it. A sensitive answer is not recorded at all.
   const heard = sensitive ? text : redactNumbers(text);
   setVar(next, captureAs, heard);
@@ -332,7 +335,7 @@ export async function reply(state: RunState, text: string, deps: Deps): Promise<
   if (decision.escalate) {
     next.escalation = { trigger: decision.trigger, detail: decision.detail, node };
     records.push({ type: 'escalate', workflow: next.workflow, node, payload: { trigger: decision.trigger, detail: decision.detail, recoveries: next.journey!.recoveries, sentiment: analysis!.sentiment } });
-    if (sensitive) { delete next.vars[captureAs]; delete next.vars[`${captureAs}_intent`]; }
+    if (forget) { delete next.vars[captureAs]; delete next.vars[`${captureAs}_intent`]; }
     endWithHuman(next, records, node, `Escalated: ${decision.detail}`);
     return { state: next, records };
   }
@@ -344,7 +347,7 @@ export async function reply(state: RunState, text: string, deps: Deps): Promise<
   if (rerouted) records.push({ type: 'reroute', workflow: next.workflow, node, payload: { to: rerouted.to, kind: analysis!.kind, topic: analysis!.topic } });
   next.node = rerouted ? rerouted.to : goFrom(next, n, node, records);
   // A sensitive answer has done its job once the route is chosen: it is forgotten now, not at the end of the call.
-  if (sensitive) { delete next.vars[captureAs]; delete next.vars[`${captureAs}_intent`]; }
+  if (forget) { delete next.vars[captureAs]; delete next.vars[`${captureAs}_intent`]; }
   if (next.node === null) leave(next, records, 'completed', deps);
   await advance(next, deps, records);
   return { state: next, records };

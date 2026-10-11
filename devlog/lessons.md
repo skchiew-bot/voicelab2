@@ -89,13 +89,15 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/call-usage.test.ts` › "leaves a call waiting on a transfer agent leg to the dial report, so it never takes the place of a call the job can cost"
 
 ### L-007: Bill only for what was served
-- **Seen:** 2 times. A caller who hung up in the queue was charged credits, and a served caller was billed for their time on hold. A promoted caller lost their agreed premium ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). The new scheduler ran extra channel charges every day, billing a past month at today's entitlement, so a client added or upgraded mid-month would have paid for the whole month (Phase 0 scheduler independent review, 2026-10-10).
+- **Seen:** 3 times. A caller who hung up in the queue was charged credits, and a served caller was billed for their time on hold. A promoted caller lost their agreed premium ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). The new scheduler ran extra channel charges every day, billing a past month at today's entitlement, so a client added or upgraded mid-month would have paid for the whole month (Phase 0 scheduler independent review, 2026-10-10). On Twilio, where no event says the hold answered the line, a caller served from the queue was billed credits for their whole hold; a Telnyx caller served from the queue was hung up on when the hold message ended; and the hold went on for up to half a minute after a channel freed while credits ran (queued caller hand-over independent review, 2026-10-11).
 - **Rule:** Credits start when service starts. Provider time is still costed internally. Carry agreed terms through every state change.
 - **Guards:**
   - `tests/concurrency.test.ts` › "costs the provider time of a caller who gave up in the queue, and draws no credits for it"
   - `tests/concurrency.test.ts` › "bills a caller who waited and was then served only from the moment they were served"
   - `tests/concurrency.test.ts` › "keeps the agreed premium when a waiting caller is promoted beyond the channels"
   - `tests/scheduler.test.ts` › "does not schedule extra channel charges, which would bill a past month at today's entitlement"
+  - `tests/concurrency.test.ts` › "bills a caller who waited only from when they were served, even when the provider never reports the hold answering the line"
+  - `tests/concurrency.test.ts` › "serves a Telnyx caller whose turn comes when the hold message they are hearing ends, instead of hanging up on them"
 
 ### L-008: Key a rule on the real-world thing, not the database row
 - **Seen:** 3 times. The DID lock was keyed by row, so the same number registered at a second provider could be shown again to a contact it had failed for ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). Every overdue scheduled job shared one alert key, so a second job going wrong raised no new alert and no email (Phase 0 scheduler independent review, 2026-10-10). The wait line was first said once per relay connection, so a line reconnecting while the same start was stuck would have said "One moment, please." on every reconnect; it is now once per question of the call (wait line independent review, 2026-10-11).
@@ -438,3 +440,9 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/call-usage.test.ts` › "prices the speech relay on the Twilio provider, by its minutes on the call and every character it synthesised"
   - `tests/call-usage.test.ts` › "prices the tokens each model used at the rates of that model, as our cost only, and leaves out work about the call done later"
   - `tests/call-usage.test.ts` › "checks a relay call against Twilio by its phone line alone, since Twilio prices the relay as its own item"
+
+### L-052: Check who is asking before anything changes
+- **Seen:** The queue sweep's endpoint gave waiting callers their channels, starting their credits and asking Twilio to redirect their calls, before it checked the request's token: anyone could make it act and only then be refused (queued caller hand-over re-review, 2026-10-11).
+- **Rule:** A route authenticates and authorises first, before any read that leaks, any write, and any request to a provider. Work added to an existing route goes after that check, never in front of it; test the route with no token and assert that nothing moved.
+- **Guards:**
+  - `tests/concurrency.test.ts` › "checks who is asking before the queue sweep changes anything: without a token, no caller is served and no provider is called"

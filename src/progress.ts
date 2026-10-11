@@ -87,7 +87,7 @@ export const PHASES: PhaseProgress[] = [
     ], open: [
       'No voice provider is connected to live calls, so voice failover runs on a model of a provider and the bridge and replayed lines are not heard',
       'An outbound dial held back is not queued here: the dialler keeps its list and retries after the time given (a queue would have to keep the customer\'s number)',
-      'A caller waiting in the inbound queue hears a hold message; nothing yet starts the workflow when their turn comes',
+      'A caller waiting in the inbound queue is served the moment a channel frees, billed only from then: on Twilio the hold is cut short and the workflow begins (the redirect request is unchecked against the live service); a Telnyx caller hears the test message, as Telnyx has no voice link yet. Tested against fakes',
       'Funding is drawn down by each call\'s cost as it is recorded, tested only against fakes; the balance is our own estimate, not read back from any provider',
       'Failures are detected from errors at dial time and from reported samples, not yet from provider webhooks',
       'A failed provider recovers only through probes (`probeProviders` is not a scheduled job yet, because no voice provider is connected to probe; a telephony provider has no probe yet)',

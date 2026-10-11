@@ -1,6 +1,6 @@
 import { redactNumbers } from '../telephony/types.js';
 import { evalCondition, type Vars } from './conditions.js';
-import { canonicalTimeZone, CONTACT_OUTCOMES, validTimeZone, type CallbackAsked, type CallbackTime, own, RESERVED_NAMES, SLOT_RE, type ApiNode, type Json, type SpeakNode, type WorkflowDefinition, type WorkflowNode } from './definition.js';
+import { canonicalTimeZone, CONTACT_OUTCOMES, MAX_PROMISE_DAYS, validTimeZone, type CallbackAsked, type CallbackTime, type PromiseAsked, type PromiseMade, own, RESERVED_NAMES, SLOT_RE, type ApiNode, type Json, type SpeakNode, type WorkflowDefinition, type WorkflowNode } from './definition.js';
 import { interpretDetail } from './interpret.js';
 import { analyseTurn, intentChanged, observeTurn, type JourneyConfig, type JourneyState } from '../journey/tracker.js';
 import { planSpeech, synthOnly, type RecordingIndex, type Segment, type SpeechPlan } from './stitch.js';
@@ -186,6 +186,32 @@ function callbackFrom(cb: CallbackAsked | undefined, state: RunState): CallbackT
   return day === undefined || hour === undefined ? undefined : { day, hour, timeZone: canonicalTimeZone(cb.timeZone) };
 }
 
+const EXACT_AMOUNT = /^\d{1,16}(\.\d{1,8})?$/;
+const readable = (state: RunState, name: unknown) =>
+  typeof name === 'string' && !state.sensitive.some((s) => name === s || name === `${s}_intent`) && own(state.vars, name);
+
+/**
+ * The promise to pay the person made, read from what the call holds. Nothing is guessed: an amount that is not an exact
+ * decimal (a number from speech, say, or "about two hundred"), or an answer the map does not hold, means no promise.
+ */
+function promiseFrom(pr: PromiseAsked | undefined, state: RunState): PromiseMade | undefined {
+  if (!pr || typeof pr !== 'object' || !pr.amount || !pr.due) return undefined;
+  if (!readable(state, pr.amount.var)) return undefined;
+  const amount = state.vars[pr.amount.var];
+  if (typeof amount !== 'string' || !EXACT_AMOUNT.test(amount.trim())) return undefined;
+  let days: unknown;
+  if (own(pr.due, 'days')) days = (pr.due as { days: unknown }).days;
+  else {
+    const due = pr.due as { var: string; map: Record<string, number> };
+    if (!readable(state, due.var) || !due.map || typeof due.map !== 'object') return undefined;
+    const v = state.vars[due.var];
+    if (typeof v !== 'string' && typeof v !== 'number') return undefined;
+    if (!own(due.map, String(v))) return undefined;
+    days = due.map[String(v)];
+  }
+  return typeof days === 'number' && Number.isInteger(days) && days >= 0 && days <= MAX_PROMISE_DAYS ? { amount: amount.trim(), days } : undefined;
+}
+
 function withoutSensitive(state: RunState): Vars {
   return Object.fromEntries(Object.entries(state.vars).filter(([k]) => !state.sensitive.includes(k)));
 }
@@ -286,9 +312,9 @@ export async function reply(state: RunState, text: string, deps: Deps): Promise<
 }
 
 /** The current workflow ended cleanly (or by an end node): finish the call, or return to the parent of a subflow. */
-function leave(state: RunState, out: StepRecord[], outcome: string, deps: Deps, contact?: string, callback?: CallbackTime): void {
+function leave(state: RunState, out: StepRecord[], outcome: string, deps: Deps, contact?: string, callback?: CallbackTime, promise?: PromiseMade): void {
   const frame = state.stack.pop();
-  if (!frame) { state.status = 'ended'; state.outcome = outcome; state.node = null; scrub(state); out.push({ type: 'end', workflow: state.workflow, payload: { outcome, ...(contact ? { contact } : {}), ...(callback ? { callback: { ...callback } } : {}) } }); return; }
+  if (!frame) { state.status = 'ended'; state.outcome = outcome; state.node = null; scrub(state); out.push({ type: 'end', workflow: state.workflow, payload: { outcome, ...(contact ? { contact } : {}), ...(callback ? { callback: { ...callback } } : {}), ...(promise ? { promise: { ...promise } } : {}) } }); return; }
   out.push({ type: 'subflow_exit', workflow: state.workflow, node: frame.node, payload: { outcome } });
   state.vars[`${frame.node}_outcome`] = outcome;
   state.workflow = frame.workflow;
@@ -428,8 +454,9 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         // Only a known call outcome is carried (a version saved before outcomes were checked may hold anything there).
         const contact = (CONTACT_OUTCOMES as readonly unknown[]).includes(node.contact) ? node.contact : undefined;
         const callback = contact && contact !== 'wrong_number' ? callbackFrom(node.callback, state) : undefined;
-        out.push({ type: 'reached_end', workflow: wf, node: id, payload: { outcome: node.outcome, ...(contact ? { contact } : {}), ...(callback ? { callback: { ...callback } } : {}) } });
-        leave(state, out, node.outcome, deps, contact, callback);
+        const promise = promiseFrom(node.promise, state);
+        out.push({ type: 'reached_end', workflow: wf, node: id, payload: { outcome: node.outcome, ...(contact ? { contact } : {}), ...(callback ? { callback: { ...callback } } : {}), ...(promise ? { promise: { ...promise } } : {}) } });
+        leave(state, out, node.outcome, deps, contact, callback, promise);
         break;
       }
     }

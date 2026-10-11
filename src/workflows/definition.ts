@@ -56,7 +56,21 @@ export type ContactOutcome = (typeof CONTACT_OUTCOMES)[number];
  * refused, a wrong number, someone else answered); it is recorded as the call's outcome when a live outbound call's run
  * ends here. An end inside a subflow hands back to its parent, so only the end the call finishes at counts.
  */
-export interface EndNode extends Common { type: 'end'; outcome: string; contact?: ContactOutcome; callback?: CallbackAsked }
+export interface EndNode extends Common { type: 'end'; outcome: string; contact?: ContactOutcome; callback?: CallbackAsked; promise?: PromiseAsked }
+/** The furthest ahead a promise to pay can fall due, in days. */
+export const MAX_PROMISE_DAYS = 60;
+/**
+ * A promise to pay the person made on the call, recorded on the call's case. The amount is read from a variable holding
+ * an exact amount (such as `case_balance`); it falls due a fixed number of days from today in the case's time zone, or
+ * as many days as the answer maps to (such as `when_intent` mapping "friday" to the days until then). An amount that is
+ * not exact, or an answer the map does not hold, records no promise.
+ */
+export interface PromiseAsked {
+  amount: { var: string };
+  due: { days: number } | { var: string; map: Record<string, number> };
+}
+/** A promise read from a call: the amount as an exact decimal string, and the days from today it falls due. */
+export interface PromiseMade { amount: string; days: number }
 /**
  * When the person asked to be called back, read from what the call captured: each part names a variable (usually a
  * captured answer's intent, such as `when_intent`) and maps its values to a number. A value the map does not hold means

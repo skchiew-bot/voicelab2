@@ -52,8 +52,9 @@ export function leavesTheCall(def: WorkflowDefinition): Set<string> {
       for (const t of [...texts, ...(n.speech === 'dynamic' && n.prompt ? [n.prompt] : [])]) slotsIn(t).forEach((s) => out.add(s));
     } else if (n.type === 'api') {
       for (const t of [n.path, ...stringsIn(n.body as Json | undefined)]) slotsIn(t).forEach((s) => out.add(s));
-    } else if (n.type === 'end' && n.callback) {
-      for (const p of [n.callback.day, n.callback.hour]) {
+    } else if (n.type === 'end' && (n.callback || n.promise)) {
+      const due = n.promise?.due as { var?: unknown } | undefined;
+      for (const p of [n.callback?.day, n.callback?.hour, n.promise?.amount, due]) {
         if (typeof p?.var !== 'string') continue;
         out.add(p.var);
         if (p.var.endsWith('_intent')) out.add(p.var.slice(0, -'_intent'.length));

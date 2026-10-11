@@ -1,0 +1,3 @@
+{"ts":"2026-10-10T20:24:06.301Z","session":"8c9e05a9-5e78-40c0-aa35-334ed297dcc3","event":"SessionStart","source":"startup","branch":"main","head":"40f258a","behind_main":0}
+{"ts":"2026-10-10T20:24:06.700Z","session":"8c9e05a9-5e78-40c0-aa35-334ed297dcc3","event":"SessionEnd","reason":"other"}
+{"ts":"2026-10-10T20:24:06.700Z","session":"8c9e05a9-5e78-40c0-aa35-334ed297dcc3","event":"Usage","at":"SessionEnd","tokens":{},"costUSD":"0.00000000","costBasis":"transcript-only"}

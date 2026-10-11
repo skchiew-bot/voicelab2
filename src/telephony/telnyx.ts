@@ -96,7 +96,7 @@ export function parseTelnyx(body: any): NormalizedEvent | null {
 }
 
 /** What to do next on a Telnyx call. Telnyx is driven by commands, not by a TwiML reply. */
-export function telnyxNextActions(ev: NormalizedEvent, inboundRouted: boolean, queued = false): Action[] {
+export function telnyxNextActions(ev: NormalizedEvent, inboundRouted: boolean, queued = false, servedFromQueue = false): Action[] {
   const id = ev.providerCallId;
   if (ev.kind === 'initiated' && ev.direction === 'inbound') {
     return [inboundRouted ? { type: 'telnyx', action: 'answer', callControlId: id } : { type: 'telnyx', action: 'reject', callControlId: id, body: { cause: 'CALL_REJECTED' } }];
@@ -106,6 +106,8 @@ export function telnyxNextActions(ev: NormalizedEvent, inboundRouted: boolean, q
   }
   // A caller waiting for a channel is not hung up on: the hold message is said again.
   if (ev.kind === 'speak_ended' && queued) return [{ type: 'telnyx', action: 'speak', callControlId: id, body: { payload: HOLD_MESSAGE, voice: 'female', language: 'en-US' } }];
+  // A caller whose turn has just come is served, not hung up on when the hold message they were hearing ends.
+  if (ev.kind === 'speak_ended' && servedFromQueue) return [{ type: 'telnyx', action: 'speak', callControlId: id, body: { payload: TEST_CALL_MESSAGE, voice: 'female', language: 'en-US' } }];
   if (ev.kind === 'speak_ended') return [{ type: 'telnyx', action: 'hangup', callControlId: id }];
   return [];
 }

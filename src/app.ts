@@ -17,7 +17,7 @@ import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, gateOutbound, normalizeE164, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
-import { addNumber, callKnown, callQueued, costCall, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
+import { addNumber, callKnown, callQueued, callTimedOut, costCall, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, promoteWaiting, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
 import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, type RelayDeps, type RelaySession } from './store/relay.js';
 import { recordingAudio } from './store/recordings.js';
 import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
@@ -49,7 +49,7 @@ import { sweepAudio, sweepDrift } from './store/learning.js';
 import { sweepReminders } from './store/appointments.js';
 import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
 import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
-import { parseTwilio, twimlHold, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
+import { parseTwilio, twimlHold, twimlQueueTimedOut, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
 import { createProvider, getProvider, listProviders, preflight, recheckProvider, setCapability } from './store/providers.js';
 import { ACTIVE, approveAdmin, createProject, createTenant, createUser, disableUser, listProjects, listTenants, listUsers, STAFF_ROLES, type Role } from './store/tenants.js';
 
@@ -464,8 +464,10 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     // missed only because one batch is small. Bounded, and a batch smaller than its limit means nothing more is due.
     { name: 'cases-dispatch', everySeconds: 60, run: () => drain(() => dispatchDue(caseDeps, () => new Date(), 20), 20, 10) },
     { name: 'queue-expire', everySeconds: 60, run: async () => {
+      // A free channel goes to a waiting caller before anyone is timed out of the queue.
+      const served = await promoteWaiting(callDeps);
       const out = await sys((c) => expireQueued(c, null, 300));
-      return { expired: out.expired, hungUp: await hangUpCalls(callDeps, out.hangups) };
+      return { served, expired: out.expired, hungUp: await hangUpCalls(callDeps, out.hangups) };
     } },
     { name: 'faults-sweep', everySeconds: 300, run: () => sys((c) => sweepFaults(c)) },
     { name: 'workflow-runs-sweep', everySeconds: 900, run: () => abandonStaleRuns(runDeps, null, { olderThanMinutes: 60 }) },
@@ -625,6 +627,8 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     // A call with a workflow to run is handed to the speech relay; one without hears the test message.
     const relayed = known && !queued && ev ? await relayTarget(callDeps, provider.id, ev.providerCallId) : null;
     if (relayed) return reply.type('text/xml').send(twimlRelay(relayUrl(provider.id), relayed, relayCallToken(key, relayed), relaySettings(provider.params), transferUrl(callDeps.baseUrl!, provider.id, 'relay-ended', relayed)));
+    // A caller timed out of the queue whose line is still open (the hangup has not landed yet) hears that a callback is booked.
+    if (known && !queued && !relayed && ev && await callTimedOut(callDeps, provider.id, ev.providerCallId)) return reply.type('text/xml').send(twimlQueueTimedOut());
     return reply.type('text/xml').send(known ? (queued ? twimlHold(`${callDeps.baseUrl}/webhooks/twilio/${provider.id}/voice${callId ? `?callId=${callId}` : ''}`) : twimlTestCall()) : twimlReject());
   };
   app.post('/webhooks/twilio/:providerId/status', twilioHook(false));

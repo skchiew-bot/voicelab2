@@ -5,11 +5,11 @@ import { withActor } from '../db.js';
 import { AppError } from '../errors.js';
 import { decryptSecrets } from '../secrets.js';
 import { telnyxCommand, telnyxNextActions, telnyxPlaceCall, type TelnyxCreds } from '../telephony/telnyx.js';
-import { twilioHangup, twilioPlaceCall, type TwilioCreds } from '../telephony/twilio.js';
+import { twilioHangup, twilioPlaceCall, twilioRedirect, type TwilioCreds } from '../telephony/twilio.js';
 import { ProviderRefused, redactNumbers, type Action, type NormalizedEvent } from '../telephony/types.js';
 import { audit } from './audit.js';
 import { recordCallCost } from './costs.js';
-import { getEntitlement, inboundAdmission, isFull, promoteQueued, providerLoad } from './concurrency.js';
+import { getEntitlement, inboundAdmission, isFull, promoteQueued, providerLoad, tenantsWaiting, type Promoted } from './concurrency.js';
 import { chooseDid, didLockedFor } from './dids.js';
 import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.js';
 import { recordCallEnd } from './call-end.js';
@@ -292,7 +292,7 @@ const RANK: Record<string, number> = { queued: 0, dialing: 0, ringing: 1, in_pro
 interface CallRow {
   id: string; tenant_id: string; project_id: string | null; provider_id: string; direction: 'inbound' | 'outbound';
   status: string; started_at: Date; answered_at: Date | null; ended_at: Date | null; provider_call_id: string | null;
-  end_reason: string | null; cost_status: string;
+  end_reason: string | null; cost_status: string; queued_at?: Date | null;
 }
 
 async function findCall(c: pg.PoolClient, providerId: string, ev: NormalizedEvent, hint?: string): Promise<CallRow | null> {
@@ -361,7 +361,9 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
 }
 
 async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: NormalizedEvent, hint?: string, contactKey?: Buffer):
-  Promise<{ duplicate: boolean; actions: Action[] }> {
+  Promise<{ duplicate: boolean; actions: Action[]; promoted?: Promoted[] }> {
+  const promoted: Promoted[] = [];
+  let servedFromQueue = false;
   const fresh = await c.query('INSERT INTO webhook_events (provider_id, event_key) VALUES ($1,$2) ON CONFLICT DO NOTHING', [provider.id, ev.key]);
   if (!fresh.rowCount) return { duplicate: true, actions: [] };
 
@@ -425,20 +427,60 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
       const ended = call;
       await safely(c, 'case_call_ended', () => caseCallEnded(c, { id: ended.id, started_at: ended.started_at, answered_at: ended.answered_at, duration_seconds: seconds }, ev.endReason));
       await costCall(c, null, call.id);
-      // A channel has freed: whoever has waited longest moves up.
-      if (call.direction === 'inbound') await promoteQueued(c, call.tenant_id);
+      // A channel has freed: whoever has waited longest moves up, and is told their turn has come once this commits.
+      if (call.direction === 'inbound') promoted.push(...await promoteQueued(c, call.tenant_id));
       break;
     }
-    case 'speak_ended': await log('call.speak_ended'); break;
+    case 'speak_ended':
+      await log('call.speak_ended');
+      // A caller served from the queue is hearing the hold message when their turn comes; when it ends, they are served.
+      if (call.status === 'in_progress' && call.queued_at && !(await c.query(`SELECT 1 FROM call_events WHERE call_id = $1 AND type = 'call.service_started'`, [call.id])).rowCount) {
+        servedFromQueue = true;
+        await log('call.service_started');
+      }
+      break;
     case 'initiated': break; // inbound calls were logged when the row was created
   }
-  const actions = isTelnyx ? telnyxNextActions(ev, routed, call.status === 'queued') : [];
-  return { duplicate: false, actions };
+  const actions = isTelnyx ? telnyxNextActions(ev, routed, call.status === 'queued', servedFromQueue) : [];
+  return { duplicate: false, actions, promoted };
 }
 
 /** Process a verified webhook. Provider commands run after the database work has committed. */
+/**
+ * Tell callers whose turn has come, after the promotion has committed. A Twilio caller on the hold message is sent to the
+ * voice URL at once, which hands them to the workflow; should that request fail, the hold message's own next turn does it
+ * a few seconds later. A Telnyx caller is served when the hold message they are hearing ends.
+ */
+export async function serveNow(d: CallDeps, promoted: Promoted[]) {
+  for (const p of promoted) {
+    if (!p.providerCallId || !d.baseUrl) continue;
+    try {
+      const provider = await asInternal(d, (c) => loadProvider(c, p.providerId));
+      if (provider?.adapter_key !== 'twilio') continue;
+      await twilioRedirect(credentials<TwilioCreds>(provider, d.key), d.http, p.providerCallId, `${d.baseUrl}/webhooks/twilio/${p.providerId}/voice`);
+    } catch (err) {
+      await asInternal(d, async (c) => {
+        const t = (await c.query('SELECT tenant_id FROM calls WHERE id = $1', [p.callId])).rows[0];
+        if (t) await recordEvent(c, { tenantId: t.tenant_id, callId: p.callId, type: 'call.command_failed', payload: { action: 'redirect', reason: redactNumbers((err as Error).message) } });
+      }).catch(() => undefined);
+    }
+  }
+}
+
+/** Give any free channel to a waiting caller, for every client with callers waiting (the queue sweep, an entitlement change). */
+export async function promoteWaiting(d: CallDeps, tenantIds?: string[]) {
+  const promoted = await asInternal(d, async (c) => {
+    const out: Promoted[] = [];
+    for (const t of tenantIds ?? await tenantsWaiting(c)) out.push(...await promoteQueued(c, t));
+    return out;
+  });
+  await serveNow(d, promoted);
+  return promoted.length;
+}
+
 export async function processWebhook(d: CallDeps, provider: ProviderRow, ev: NormalizedEvent, hint?: string) {
   const out = await asInternal(d, (c) => applyEvent(c, provider, ev, hint, contactKeyFrom(d.key)));
+  if (out.promoted?.length) await serveNow(d, out.promoted);
   if (out.actions.length && provider.adapter_key === 'telnyx') {
     const creds = credentials<TelnyxCreds>(provider, d.key);
     for (const a of out.actions) {
@@ -475,6 +517,11 @@ export const relayTarget = (d: CallDeps, providerId: string, providerCallId: str
   asInternal(d, async (c) =>
     ((await c.query(`SELECT id FROM calls WHERE provider_id = $1 AND provider_call_id = $2 AND workflow_id IS NOT NULL AND status IN ('ringing', 'in_progress', 'dialing')`,
       [providerId, providerCallId])).rows[0]?.id as string | undefined) ?? null);
+
+/** Whether a call was timed out of the queue: its line may still be open until the hangup lands. */
+export const callTimedOut = (d: CallDeps, providerId: string, providerCallId: string) =>
+  asInternal(d, async (c) =>
+    (await c.query(`SELECT 1 FROM calls WHERE provider_id = $1 AND provider_call_id = $2 AND end_reason = 'queue_timeout'`, [providerId, providerCallId])).rowCount === 1);
 
 export const callKnown = (d: CallDeps, providerId: string, providerCallId: string) =>
   asInternal(d, async (c) =>

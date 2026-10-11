@@ -661,12 +661,19 @@ describe('a live call through the speech relay', () => {
     expect(second.body).not.toContain('ConversationRelay');
     // Still waiting at the next turn of the hold message.
     expect((await voice('CA_queue_2', 'in-progress')).body).not.toContain('ConversationRelay');
-    // The first caller hangs up; the waiting one is served from now on.
+    // The first caller hangs up; the waiting one is served from now on, and their hold is cut short at once: Twilio is
+    // asked to send the call back to the voice URL (the same call-update request as a hangup, with a new Url).
+    env.provider.calls.length = 0;
+    env.provider.state.respond = () => new Response('{}', { status: 200 });
     const done = await twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: 'CA_queue_1', CallStatus: 'completed', Direction: 'inbound', CallDuration: '30' });
     expect(done.statusCode).toBe(204);
     const row = (await env.pool.query(`SELECT id, status, credit_from IS NOT NULL AS billed_from_now FROM calls WHERE provider_call_id = 'CA_queue_2'`)).rows[0];
     expect(row).toMatchObject({ status: 'in_progress', billed_from_now: true });
-    // At the next turn of the hold message, the caller is handed to the relay for this call, and the workflow begins.
+    expect((await env.pool.query(`SELECT count(*)::int AS n FROM call_events WHERE call_id = $1 AND type = 'call.dequeued'`, [row.id])).rows[0].n).toBe(1);
+    const redirects = env.provider.calls.filter((c) => c.url.endsWith('/Calls/CA_queue_2.json'));
+    expect(redirects).toHaveLength(1);
+    expect(Object.fromEntries(new URLSearchParams(redirects[0]!.body))).toEqual({ Url: `${BASE}/webhooks/twilio/${twilioId}/voice`, Method: 'POST' });
+    // Twilio then asks the voice URL what to do: the caller is handed to the relay for this call, and the workflow begins.
     const turn = await voice('CA_queue_2', 'in-progress');
     expect(turn.body).toContain(`<ConversationRelay url="wss://voicelab.test/relay/twilio/${twilioId}"`);
     expect(turn.body).toContain(`<Parameter name="callId" value="${row.id}"/>`);
@@ -675,6 +682,40 @@ describe('a live call through the speech relay', () => {
     // the greeting (spoken: this client has no recording of it), then the first question
     expect(await line.until(2)).toEqual([{ type: 'text', token: 'Hello from Voice Lab.', last: true }, { type: 'text', token: 'Can you pay this week?', last: true }]);
     line.ws.close(); await line.closed; await settle();
+  });
+
+  it('still serves a waiting caller at the next turn of the hold message when the request to cut it short fails, and records the failure', async () => {
+    const t = (await must(post('/internal/tenants', { name: 'Queue Fail Co' }))).json().id;
+    const Q = '+60300000779';
+    const n = (await must(post('/internal/numbers', { providerId: twilioId, e164: Q, tenantId: t, country: 'MY' }))).json().id;
+    const wf = await liveWorkflow(t, 'queue_fail_flow', flow, { replies: ['no'], outcome: 'promised' });
+    await must(put(`/internal/numbers/${n}/workflow`, { workflowId: wf }));
+    await must(put(`/internal/tenants/${t}/entitlement`, { inboundChannels: 1 }));
+    const voice = (sid: string, status: string) => twilioPost(`/webhooks/twilio/${twilioId}/voice`, { CallSid: sid, CallStatus: status, Direction: 'inbound', From: CUSTOMER, To: Q });
+    await voice('CA_qf_1', 'ringing'); await voice('CA_qf_2', 'ringing');
+    env.provider.state.respond = () => new Response('{"message":"down"}', { status: 503 });
+    await twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: 'CA_qf_1', CallStatus: 'completed', Direction: 'inbound', CallDuration: '30' });
+    env.provider.state.respond = () => new Response('{}', { status: 200 });
+    const id = (await env.pool.query(`SELECT id FROM calls WHERE provider_call_id = 'CA_qf_2'`)).rows[0].id;
+    expect((await env.pool.query(`SELECT payload FROM call_events WHERE call_id = $1 AND type = 'call.command_failed'`, [id])).rows.map((r) => r.payload.action)).toEqual(['redirect']);
+    expect((await voice('CA_qf_2', 'in-progress')).body).toContain('<ConversationRelay');
+  });
+
+  it('tells a caller timed out of the queue, whose line is still open, that a callback is booked, and ends the call', async () => {
+    const t = (await must(post('/internal/tenants', { name: 'Queue Timeout Co' }))).json().id;
+    const Q = '+60300000780';
+    const n = (await must(post('/internal/numbers', { providerId: twilioId, e164: Q, tenantId: t, country: 'MY' }))).json().id;
+    const wf = await liveWorkflow(t, 'queue_timeout_flow', flow, { replies: ['no'], outcome: 'promised' });
+    await must(put(`/internal/numbers/${n}/workflow`, { workflowId: wf }));
+    await must(put(`/internal/tenants/${t}/entitlement`, { inboundChannels: 1 }));
+    const voice = (sid: string, status: string) => twilioPost(`/webhooks/twilio/${twilioId}/voice`, { CallSid: sid, CallStatus: status, Direction: 'inbound', From: CUSTOMER, To: Q });
+    await voice('CA_qt_1', 'ringing'); await voice('CA_qt_2', 'ringing');
+    await env.pool.query(`UPDATE calls SET queued_at = now() - interval '10 minutes' WHERE provider_call_id = 'CA_qt_2'`);
+    env.provider.state.respond = () => new Response('{"message":"down"}', { status: 503 });   // the hangup does not land
+    await must(post('/internal/queue/expire', { maxWaitSeconds: 300 }));
+    env.provider.state.respond = () => new Response('{}', { status: 200 });
+    const turn = await voice('CA_qt_2', 'in-progress');                                          // the hold message's next turn
+    expect(turn.body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Thank you for waiting. All of our lines are still busy, so we will call you back as soon as we can. Goodbye.</Say><Hangup/></Response>');
   });
 
   it('accepts the signature on the https form of the address too, as the scheme Twilio signs is not yet confirmed', async () => {

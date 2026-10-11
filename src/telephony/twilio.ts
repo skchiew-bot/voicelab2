@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { ProviderRefused, redactNumbers, HOLD_MESSAGE, TEST_CALL_MESSAGE, type Fetch, type NormalizedEvent } from './types.js';
+import { ProviderRefused, redactNumbers, HOLD_MESSAGE, QUEUE_TIMED_OUT_MESSAGE, TEST_CALL_MESSAGE, type Fetch, type NormalizedEvent } from './types.js';
 
 const basic = (user: string, pass: string) => 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
 
@@ -42,6 +42,23 @@ export async function twilioHangup(c: TwilioCreds, http: Fetch, callSid: string)
   });
   if (!res.ok) throw new Error(`Twilio hangup failed (HTTP ${res.status})`);
 }
+
+/**
+ * Send a call to new instructions now, cutting short whatever it is doing (a caller waiting on the hold message whose
+ * turn has come). Written from Twilio's published call-update request, the same one the hangup uses, and not yet
+ * checked against the live service (L-016).
+ */
+export async function twilioRedirect(c: TwilioCreds, http: Fetch, callSid: string, url: string): Promise<void> {
+  const res = await http(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(c.accountSid)}/Calls/${encodeURIComponent(callSid)}.json`, {
+    method: 'POST', headers: { authorization: twilioAuth(c), 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ Url: url, Method: 'POST' }).toString(), signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`Twilio redirect failed (HTTP ${res.status})`);
+}
+
+/** What a caller whose wait ran out hears if their line is still open: a callback is booked, then the call ends. */
+export const twimlQueueTimedOut = () =>
+  `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${xml(QUEUE_TIMED_OUT_MESSAGE)}</Say><Hangup/></Response>`;
 
 /**
  * Twilio signs the full URL plus every POST parameter (sorted by name, name then value

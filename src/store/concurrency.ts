@@ -63,20 +63,33 @@ export async function inboundAdmission(c: pg.PoolClient, tenantId: string): Prom
 }
 
 /** A channel has freed: the call that has waited longest moves up. Returns its id, or null if nobody is waiting or no room. */
-export async function promoteQueued(c: pg.PoolClient, tenantId: string): Promise<string | null> {
-  const adm = await inboundAdmission(c, tenantId);
-  if (adm.admit === 'queue') return null;
-  const next = (await c.query(
-    `SELECT id, project_id FROM calls WHERE tenant_id = $1 AND direction = 'inbound' AND status = 'queued' ORDER BY queued_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`, [tenantId])).rows[0];
-  if (!next) return null;
-  // Served from now on: the hold is not billed to the client. Beyond the client's channels, the agreed premium applies.
-  await c.query(
-    `UPDATE calls SET status = 'in_progress', answered_at = coalesce(answered_at, now()), credit_from = now(),
-            credit_multiplier = CASE WHEN $2::numeric IS NOT NULL THEN $2::numeric ELSE credit_multiplier END WHERE id = $1`,
-    [next.id, adm.admit === 'premium' ? adm.creditMultiplier : null]);
-  await recordEvent(c, { tenantId, projectId: next.project_id ?? undefined, callId: next.id, type: 'call.dequeued', payload: {} });
-  return next.id as string;
+export interface Promoted { callId: string; providerId: string; providerCallId: string | null }
+
+/**
+ * Serve the callers who have waited longest, as many as there are free channels. Each is served, and billed, from now:
+ * the hold answered the line when they started waiting, so their time on hold is never billed to the client. Beyond the
+ * client's channels, the agreed premium applies. The caller is told their turn has come by `serveNow` (calls.ts).
+ */
+export async function promoteQueued(c: pg.PoolClient, tenantId: string): Promise<Promoted[]> {
+  const out: Promoted[] = [];
+  for (;;) {
+    const adm = await inboundAdmission(c, tenantId);
+    if (adm.admit === 'queue') return out;
+    const next = (await c.query(
+      `SELECT id, project_id, provider_id, provider_call_id FROM calls WHERE tenant_id = $1 AND direction = 'inbound' AND status = 'queued' ORDER BY queued_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`, [tenantId])).rows[0];
+    if (!next) return out;
+    await c.query(
+      `UPDATE calls SET status = 'in_progress', answered_at = coalesce(answered_at, queued_at, now()), credit_from = now(),
+              credit_multiplier = CASE WHEN $2::numeric IS NOT NULL THEN $2::numeric ELSE credit_multiplier END WHERE id = $1`,
+      [next.id, adm.admit === 'premium' ? adm.creditMultiplier : null]);
+    await recordEvent(c, { tenantId, projectId: next.project_id ?? undefined, callId: next.id, type: 'call.dequeued', payload: {} });
+    out.push({ callId: next.id, providerId: next.provider_id, providerCallId: next.provider_call_id });
+  }
 }
+
+/** Clients with callers waiting, for the queue sweep to give any free channel to. */
+export const tenantsWaiting = async (c: pg.PoolClient): Promise<string[]> =>
+  (await c.query(`SELECT DISTINCT tenant_id FROM calls WHERE direction = 'inbound' AND status = 'queued'`)).rows.map((r) => r.tenant_id as string);
 
 /**
  * Queued callers who have waited too long are not left hanging: the call ends, and a callback request is recorded so

@@ -357,6 +357,47 @@ describe('found in review: queued callers', () => {
     expect(-c).toBeGreaterThan(0.9); expect(-c).toBeLessThanOrEqual(1);                          // about one minute at 1 credit a minute, not 160 s
   });
 
+  it('bills a caller who waited only from when they were served, even when the provider never reports the hold answering the line', async () => {
+    // As on Twilio: the hold message answers the line, but no "answered" event comes; only the call's start and its end.
+    await clearActive();
+    await send(ev('initiated', 'v1')); await send(ev('answered', 'v1'));
+    await send(ev('initiated', 'v2', { occurredAt: new Date(Date.now() - 100_000) }));
+    await env.pool.query(`UPDATE calls SET queued_at = now() - interval '100 seconds' WHERE provider_call_id = 'v2'`);   // waiting for the last 100 s
+    await send(ev('ended', 'v1', { durationSeconds: 30, endReason: 'completed' }));               // a channel frees: v2 is served now
+    expect((await callRow('v2')).status).toBe('in_progress');
+    await send(ev('ended', 'v2', { durationSeconds: 160, endReason: 'completed' }));              // 160 s on the line, about 60 of them served
+    const c = await credits('v2');
+    expect(-c).toBeGreaterThan(0.9); expect(-c).toBeLessThanOrEqual(1);                           // about one minute at 1 credit a minute, not 160 s
+  });
+
+  it('serves a Telnyx caller whose turn comes when the hold message they are hearing ends, instead of hanging up on them', async () => {
+    await clearActive();
+    await send(ev('initiated', 't1')); await send(ev('answered', 't1'));
+    await send(ev('initiated', 't2')); await send(ev('answered', 't2'));                          // on hold
+    await send(ev('ended', 't1', { durationSeconds: 30, endReason: 'completed' }));               // their turn comes mid-message
+    expect((await callRow('t2')).status).toBe('in_progress');
+    const first = await send(ev('speak_ended', 't2'));                                            // the hold message they were hearing ends
+    expect(first.actions).toEqual([expect.objectContaining({ action: 'speak', body: expect.objectContaining({ payload: expect.not.stringContaining('busy') }) })]);
+    expect((await send(ev('speak_ended', 't2'))).actions).toEqual([expect.objectContaining({ action: 'hangup' })]);   // served; then the call ends
+    await clearActive();
+  });
+
+  it('gives every free channel to a waiting caller, and the queue sweep serves before it times anyone out', async () => {
+    await clearActive();
+    await send(ev('initiated', 'f1')); await send(ev('answered', 'f1'));
+    for (const id of ['f2', 'f3', 'f4']) await send(ev('initiated', id));
+    expect([(await callRow('f2')).status, (await callRow('f3')).status, (await callRow('f4')).status]).toEqual(['queued', 'queued', 'queued']);
+    await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 3 }));          // two more channels: both go at once
+    expect([(await callRow('f2')).status, (await callRow('f3')).status, (await callRow('f4')).status]).toEqual(['in_progress', 'in_progress', 'queued']);
+    // f4 has waited past the limit, but a channel is free by the time the sweep runs: it is served, not timed out.
+    await env.pool.query(`UPDATE calls SET queued_at = now() - interval '10 minutes' WHERE provider_call_id = 'f4'`);
+    await env.pool.query(`UPDATE calls SET status = 'completed', ended_at = now() WHERE provider_call_id = 'f1'`);   // ended without a report reaching us
+    expect((await post('/internal/queue/expire', { maxWaitSeconds: 300 })).json()).toEqual({ expired: 0, hungUp: 0 });
+    expect((await callRow('f4')).status).toBe('in_progress');
+    await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1 }));
+    await clearActive();
+  });
+
   it('counts a caller on hold against the provider\'s ceiling, so an outbound dial does not make it three legs on a ceiling of two', async () => {
     await clearActive();
     await send(ev('initiated', 'c1')); await send(ev('answered', 'c1'));
@@ -395,10 +436,10 @@ describe('found in review: queued callers', () => {
     await send(ev('initiated', 'p1')); await send(ev('answered', 'p1'));
     await send(ev('initiated', 'p2'));
     expect((await callRow('p2')).status).toBe('queued');
+    // Agreeing a premium frees a channel beyond the client's own: the waiting caller is served at once, at the premium.
     await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1, overburstMultiplier: '1.5' }));
-    const promoted = await withActor(env.pool, { kind: 'internal' }, (c) => promoteQueued(c, tenant));
-    expect(promoted).toBe((await callRow('p2')).id);
     expect(await callRow('p2')).toMatchObject({ status: 'in_progress', credit_multiplier: '1.500' });
+    expect(await withActor(env.pool, { kind: 'internal' }, (c) => promoteQueued(c, tenant))).toEqual([]);   // nobody else is waiting
     await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1 }));
     await clearActive();
   });

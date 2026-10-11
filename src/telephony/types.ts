@@ -31,6 +31,7 @@ export const TEST_CALL_MESSAGE = 'This is a Voice Lab test call. Goodbye.';
 
 /** Said to an inbound caller who is waiting for a free channel. */
 export const HOLD_MESSAGE = 'All of our lines are busy. Please stay on the line and we will be with you shortly.';
+export const QUEUE_TIMED_OUT_MESSAGE = 'Thank you for waiting. All of our lines are still busy, so we will call you back as soon as we can. Goodbye.';
 
 /** The provider answered and said no (an HTTP error status). Unlike a timeout, this means it did not place the call. */
 export class ProviderRefused extends Error {}

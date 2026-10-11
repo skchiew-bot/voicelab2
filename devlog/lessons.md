@@ -82,13 +82,15 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/learning.test.ts` › "does not stop the sweep when one script's audio fails, and names what it could not judge"
 
 ### L-007: Bill only for what was served
-- **Seen:** 2 times. A caller who hung up in the queue was charged credits, and a served caller was billed for their time on hold. A promoted caller lost their agreed premium ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). The new scheduler ran extra channel charges every day, billing a past month at today's entitlement, so a client added or upgraded mid-month would have paid for the whole month (Phase 0 scheduler independent review, 2026-10-10).
+- **Seen:** 3 times. A caller who hung up in the queue was charged credits, and a served caller was billed for their time on hold. A promoted caller lost their agreed premium ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). The new scheduler ran extra channel charges every day, billing a past month at today's entitlement, so a client added or upgraded mid-month would have paid for the whole month (Phase 0 scheduler independent review, 2026-10-10). On Twilio, where no event says the hold answered the line, a caller served from the queue was billed credits for their whole hold; a Telnyx caller served from the queue was hung up on when the hold message ended; and the hold went on for up to half a minute after a channel freed while credits ran (queued caller hand-over independent review, 2026-10-11).
 - **Rule:** Credits start when service starts. Provider time is still costed internally. Carry agreed terms through every state change.
 - **Guards:**
   - `tests/concurrency.test.ts` › "costs the provider time of a caller who gave up in the queue, and draws no credits for it"
   - `tests/concurrency.test.ts` › "bills a caller who waited and was then served only from the moment they were served"
   - `tests/concurrency.test.ts` › "keeps the agreed premium when a waiting caller is promoted beyond the channels"
   - `tests/scheduler.test.ts` › "does not schedule extra channel charges, which would bill a past month at today's entitlement"
+  - `tests/concurrency.test.ts` › "bills a caller who waited only from when they were served, even when the provider never reports the hold answering the line"
+  - `tests/concurrency.test.ts` › "serves a Telnyx caller whose turn comes when the hold message they are hearing ends, instead of hanging up on them"
 
 ### L-008: Key a rule on the real-world thing, not the database row
 - **Seen:** 2 times. The DID lock was keyed by row, so the same number registered at a second provider could be shown again to a contact it had failed for ([#9](https://github.com/skchiew-bot/voicelab2/pull/9)). Every overdue scheduled job shared one alert key, so a second job going wrong raised no new alert and no email (Phase 0 scheduler independent review, 2026-10-10).

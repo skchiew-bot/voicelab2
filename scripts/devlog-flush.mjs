@@ -137,10 +137,9 @@ export function clean(raw) {
   }
   if (raw.event === 'CiRun') {
     // A CI result the session declared with the task CLI: fixed fields only.
-    const pr = nat(raw.pr);
-    if (!taskId(raw.task) || !pr || typeof raw.sha !== 'string' || !/^[0-9a-f]{7,40}$/.test(raw.sha) || !['passed', 'failed'].includes(raw.result)) return null;
+    const pr = nat(raw.pr, 1_000_000);
+    if (!taskId(raw.task) || !pr || typeof raw.sha !== 'string' || !/^[0-9a-f]{40}$/.test(raw.sha) || !['passed', 'failed'].includes(raw.result)) return null;
     out.task = raw.task; out.pr = pr; out.sha = raw.sha; out.result = raw.result;
-    if (typeof raw.run === 'string' && /^\d{1,20}$/.test(raw.run)) out.run = raw.run;
   }
   if (raw.event === 'Task') {
     if (!taskId(raw.id) || !['start', 'update', 'done'].includes(raw.action)) return null;

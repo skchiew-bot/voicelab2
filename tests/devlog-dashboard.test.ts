@@ -1,14 +1,14 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { chromium, expect, type Browser, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, it } from 'vitest';
+import { chromiumOrSkip } from './browser.js';
 
 // Drives the dev Control Tower page in a real browser, from a fixed hand-written report.
-// Skipped where no Chromium is available (set CHROMIUM_PATH to point at one), like tests/admin-ui.test.ts.
-const CHROMIUM = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium';
-const run = existsSync(CHROMIUM);
+// Skipped where no Chromium is available (set CHROMIUM_PATH to point at one), like tests/admin-ui.test.ts; in CI a missing Chromium fails.
+const { path: CHROMIUM, run } = chromiumOrSkip();
 const root = path.resolve(__dirname, '..');
 const UNREC = 'Unavailable (not recorded)';
 
@@ -119,6 +119,20 @@ describe.skipIf(!run)('dev Control Tower page', () => {
     expect((await page.locator('#ladder tbody tr', { hasText: 'Fix' }).locator('td').allTextContents()).slice(3, 5)).toEqual(['1', 'None finished yet']);
     expect(errors).toEqual([]);
     await page.close();
+  });
+
+  it('shows the CI first-pass rate as declared by the session: Not recorded, never 0%, with none, and the rate and the count with some', async () => {
+    const kpiOf = async (quality: Record<string, unknown>, name: string) => {
+      const base = fixedReport();
+      const file = await buildPage({ ...base, areas: { ...base.areas, quality: { ...base.areas.quality, ...quality } } }, name);
+      const { page, errors } = await open(file, 1280, '#quality');
+      const got = await page.locator('#q-kpis .kpi', { hasText: 'CI first pass' }).locator('span').allTextContents();
+      expect(errors).toEqual([]);
+      await page.close();
+      return got;
+    };
+    expect(await kpiOf({ ciFirstPassRate: null, ciRuns: 0 }, 'ci-none.html')).toEqual(['CI first pass (declared)', 'Not recorded', '0 CI runs declared, first recorded run per PR']);
+    expect(await kpiOf({ ciFirstPassRate: 75, ciRuns: 7 }, 'ci-some.html')).toEqual(['CI first pass (declared)', '75%', '7 CI runs declared, first recorded run per PR']);
   });
 
   it('labels every declared figure as declared by the session, apart from what Claude Code recorded', async () => {

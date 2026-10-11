@@ -22,7 +22,11 @@ describe('CI workflow', () => {
     expect(ci).toMatch(/run: npm test\n/);
 
     // The database: the role the tests log in as, and a step that fails the job when it cannot (global-setup only warns).
-    expect(ci).toContain('image: postgres:16');
+    expect(ci).toContain('image: postgres:16@sha256:');
+    // Every service image is pinned by digest, as the actions are, never a tag that can be moved.
+    const images = [...ci.matchAll(/^\s*image:\s*(\S+)/gm)].map((m) => m[1]!);
+    expect(images.length).toBeGreaterThanOrEqual(1);
+    for (const i of images) expect(i, i).toMatch(/^[\w./-]+:[\w.-]+@sha256:[0-9a-f]{64}$/);
     expect(ci).toContain("CREATE ROLE voicelab LOGIN CREATEDB CREATEROLE PASSWORD 'voicelab'");
     expect(ci).toMatch(/psql -X -h localhost -U voicelab -d postgres -tAc 'SELECT 1' \| grep -qx 1/);
     expect(ci).not.toContain('TEST_ADMIN_DATABASE_URL');

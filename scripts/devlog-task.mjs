@@ -14,7 +14,7 @@
 //                                         [--agent <agentId>] [--shadow-of <agentId>] [--round N]
 //                                         (a verdict the session declares for a helper agent's work on a task, for the routing view;
 //                                          the task must already be on this branch's board; --shadow-of needs --process review and --agent)
-//   node scripts/devlog-task.mjs ci <task> --pr N --sha <7-40 lowercase hex> --result passed|failed [--run <GitHub run id>]
+//   node scripts/devlog-task.mjs ci <task> --pr N --sha <40 lowercase hex> --result passed|failed
 //                                         (a CI run on the task's pull request, declared by the session, for the routing view's
 //                                          ci_red trigger and CI first-pass rate; the task must already be on this branch's board)
 //   node scripts/devlog-task.mjs board     (prints the current board)
@@ -138,17 +138,16 @@ export function eventFor(argv, now = new Date(), env = process.env) {
     });
   }
   if (command === 'ci') {
-    known(['pr', 'sha', 'result', 'run']);
+    known(['pr', 'sha', 'result']);
     const task = pos[0];
     if (!task || !isTaskId(task)) throw new UsageError('Give a task id: letters, digits, "-", "_" or ".", starting with a letter, fewer than 7 digits (e.g. DCT-2).');
     if (!opts.pr) throw new UsageError('ci needs --pr.');
     if (!opts.sha) throw new UsageError('ci needs --sha.');
     if (!opts.result) throw new UsageError('ci needs --result.');
-    if (!/^[0-9a-f]{7,40}$/.test(opts.sha)) throw new UsageError('--sha must be 7 to 40 lowercase hex characters.');
-    if (opts.run !== undefined && !/^\d{1,20}$/.test(opts.run)) throw new UsageError('--run must be a GitHub run id: digits only, up to 20.');
+    if (!/^[0-9a-f]{40}$/.test(opts.sha)) throw new UsageError('--sha must be the full 40-character commit id in lowercase hex.');
     return strip({
       ...base, event: 'CiRun', task, pr: int('pr', opts.pr, 1, 1_000_000), sha: opts.sha,
-      result: oneOf('result', opts.result, ['passed', 'failed']), run: opts.run,
+      result: oneOf('result', opts.result, ['passed', 'failed']),
     });
   }
   throw new UsageError('Commands: start, update, done, incident, decision, outcome, ci, board.');

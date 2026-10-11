@@ -1,358 +1,549 @@
 <title>Voice Lab Dev Control Tower</title>
+<meta name="description" content="How Claude Code builds Voice Lab: the work, what it costs, what went wrong, and a playback of every recorded step.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Source+Sans+3:wght@400;600;700&display=swap">
 <style>
-/* Layout: an air-traffic strip board. A status rail on top, then lessons as flight strips, then the build timeline. */
+/* Daythree design (skchiew-bot/d3ngineering design-system/daythree): tokens copied from tokens.css. Purple leads, red
+   accents, grey does the work. Sentence case throughout; every state is an icon and a word, never colour alone. */
 :root {
-  --bg: #eef1f4;
-  --panel: #ffffff;
-  --ink: #17202b;
-  --muted: #5a6776;
-  --line: #d3dae2;
-  --accent: #1f5f99;
-  --strip: #f6f8fa;
-  --ok: #2e7d4f;
-  --warn: #b26a00;
-  --crit: #b3261e;
-  --info: #1f5f99;
-  --ok-soft: #e3f2e8;
-  --warn-soft: #fbefdc;
-  --crit-soft: #fbe4e2;
-  --info-soft: #e2edf7;
-  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
-  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --f-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: light;
+  --d3-purple: #5D3FD3; --d3-red: #C8102E; --d3-grey: #58595B;
+  --paper: #F2F2F4; --surface: #FFFFFF; --surface-2: #F7F7F9;
+  --ink: #232428; --ink-2: #58595B; --ink-3: #8A8B8F; --ink-muted: #6B6C70;
+  --rule: #DDDEE2; --rule-2: #C3C4C9;
+  --accent-soft: rgba(93, 63, 211, 0.10); --accent-ink: #FFFFFF;
+  --tone-good: #16613A; --tone-warn: #B8730A; --tone-crit: #C8102E; --tone-neutral: #8A8B8F; --tone-active: #5D3FD3;
+  --tone-good-soft: rgba(22, 97, 58, 0.12); --tone-warn-soft: rgba(184, 115, 10, 0.14); --tone-crit-soft: rgba(200, 16, 46, 0.11);
+  --tone-neutral-soft: rgba(88, 89, 91, 0.10); --tone-active-soft: rgba(93, 63, 211, 0.12);
+  --track: #E6E7EB;
+  --font-sans: "Source Sans 3", "Source Sans Pro", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --shadow-1: 0 1px 2px rgba(35, 36, 40, 0.06), 0 1px 1px rgba(35, 36, 40, 0.04);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #11161c; --panel: #18202a; --ink: #e4e9ef; --muted: #93a1b0; --line: #2a3542; --accent: #7fb3e6; --strip: #1d2632;
-    --ok: #6cc28e; --warn: #e8a64a; --crit: #f08a82; --info: #7fb3e6;
-    --ok-soft: #1b3326; --warn-soft: #3a2c14; --crit-soft: #3d1d1b; --info-soft: #1a2c40;
     color-scheme: dark;
+    --d3-purple: #8B72E8; --d3-red: #EE5A6B; --d3-grey: #93949A;
+    --paper: #16161A; --surface: #1E1F24; --surface-2: #26272D;
+    --ink: #ECECEF; --ink-2: #B0B1B6; --ink-3: #85868C; --ink-muted: #8F9095;
+    --rule: #2E2F36; --rule-2: #3E3F47;
+    --accent-soft: rgba(139, 114, 232, 0.16); --accent-ink: #16161A;
+    --tone-good: #4FA974; --tone-warn: #DFA24E; --tone-crit: #EE5A6B; --tone-neutral: #93949A; --tone-active: #8B72E8;
+    --tone-good-soft: rgba(79, 169, 116, 0.16); --tone-warn-soft: rgba(223, 162, 78, 0.16); --tone-crit-soft: rgba(238, 90, 107, 0.16);
+    --tone-neutral-soft: rgba(147, 148, 154, 0.14); --tone-active-soft: rgba(139, 114, 232, 0.18);
+    --track: #33343B; --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
   }
+  :root:not([data-theme="light"]) .d3logo.light-only { display: none; }
+  :root:not([data-theme="light"]) .d3logo.dark-only { display: block; }
 }
 :root[data-theme="dark"] {
-  --bg: #11161c; --panel: #18202a; --ink: #e4e9ef; --muted: #93a1b0; --line: #2a3542; --accent: #7fb3e6; --strip: #1d2632;
-  --ok: #6cc28e; --warn: #e8a64a; --crit: #f08a82; --info: #7fb3e6;
-  --ok-soft: #1b3326; --warn-soft: #3a2c14; --crit-soft: #3d1d1b; --info-soft: #1a2c40;
   color-scheme: dark;
+  --d3-purple: #8B72E8; --d3-red: #EE5A6B; --d3-grey: #93949A;
+  --paper: #16161A; --surface: #1E1F24; --surface-2: #26272D;
+  --ink: #ECECEF; --ink-2: #B0B1B6; --ink-3: #85868C; --ink-muted: #8F9095;
+  --rule: #2E2F36; --rule-2: #3E3F47;
+  --accent-soft: rgba(139, 114, 232, 0.16); --accent-ink: #16161A;
+  --tone-good: #4FA974; --tone-warn: #DFA24E; --tone-crit: #EE5A6B; --tone-neutral: #93949A; --tone-active: #8B72E8;
+  --tone-good-soft: rgba(79, 169, 116, 0.16); --tone-warn-soft: rgba(223, 162, 78, 0.16); --tone-crit-soft: rgba(238, 90, 107, 0.16);
+  --tone-neutral-soft: rgba(147, 148, 154, 0.14); --tone-active-soft: rgba(139, 114, 232, 0.18);
+  --track: #33343B; --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
+:root[data-theme="dark"] .d3logo.light-only { display: none; }
+:root[data-theme="dark"] .d3logo.dark-only { display: block; }
+.d3logo { height: 30px; width: auto; display: block; }
+.d3logo.dark-only { display: none; }
 * { box-sizing: border-box; }
-body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--f-body); }
-.wrap { max-width: 1120px; margin: 0 auto; padding-inline: 16px; padding-block: 24px 48px; display: grid; gap: 28px; }
-a { color: var(--accent); }
-a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-h1, h2 { font-family: var(--f-display); text-wrap: balance; margin: 0; }
-h1 { font-size: clamp(1.6rem, 4vw, 2.2rem); font-weight: 700; letter-spacing: 0.01em; }
-h2 { font-size: 1.15rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
-.mono, .num { font-family: var(--f-data); font-variant-numeric: tabular-nums; }
-.muted { color: var(--muted); }
-header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: end; justify-content: space-between; }
-header .meta { font-family: var(--f-data); font-size: 0.8rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 16px; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.45 var(--font-sans); }
+a { color: var(--ink); text-underline-offset: 3px; }
+a:hover { text-decoration-thickness: 2px; }
+a:focus-visible, button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--d3-purple); outline-offset: 2px; }
+.wrap { max-width: 1280px; margin: 0 auto; padding: 20px 16px 64px; display: grid; gap: 22px; }
+.top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px 22px; border-bottom: 3px solid var(--d3-red); padding-bottom: 14px; }
+.brand { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+h1 { font-size: 26px; line-height: 1.2; margin: 0; font-weight: 700; }
+h2 { font-size: 19px; margin: 0; font-weight: 700; }
+h3 { font-size: 16px; margin: 0; font-weight: 600; }
+p { margin: 0; }
+.sub, .note { color: var(--ink-muted); font-size: 14px; }
+.mono { font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums; }
+.nav { display: flex; flex-wrap: wrap; gap: 4px; }
+.nav a { display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px; border-radius: 6px; text-decoration: none; color: var(--ink-2); border: 1px solid transparent; }
+.nav a[aria-current="page"] { color: var(--ink); border-color: var(--rule-2); background: var(--surface); font-weight: 600; }
+.view { display: grid; gap: 22px; min-width: 0; }
+.view[hidden] { display: none; }
 section { display: grid; gap: 12px; min-width: 0; }
-
-/* Status rail */
-.rail { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
-.rail div { padding: 14px 16px; border-right: 1px solid var(--line); display: grid; gap: 2px; }
-.rail div:last-child { border-right: 0; }
-.rail .v { font-family: var(--f-data); font-size: 1.5rem; font-weight: 500; font-variant-numeric: tabular-nums; }
-.rail .k { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
-.rail .s { font-size: 0.8rem; color: var(--muted); }
-
-/* Attention */
-.alerts { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.alerts li { padding: 8px 12px; border-left: 4px solid var(--info); background: var(--info-soft); border-radius: 0 4px 4px 0; }
-.alerts li.critical { border-color: var(--crit); background: var(--crit-soft); }
-.alerts li.warning { border-color: var(--warn); background: var(--warn-soft); }
-.alerts li.clear { border-color: var(--ok); background: var(--ok-soft); }
-
-/* Lessons as flight strips */
-.strips { display: grid; gap: 8px; }
-.strip { display: grid; grid-template-columns: 76px minmax(0, 1fr) auto; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
-.strip .id { background: var(--strip); border-right: 1px dashed var(--line); padding: 12px 10px; font-family: var(--f-data); font-weight: 500; display: grid; align-content: start; gap: 6px; }
-.strip .body { padding: 12px 14px; min-width: 0; display: grid; gap: 4px; }
-.strip .title { font-weight: 600; }
-.strip .rule { color: var(--muted); font-size: 0.9rem; }
-.strip .side { padding: 12px 14px; display: grid; gap: 6px; align-content: start; justify-items: end; border-left: 1px dashed var(--line); }
-.strip details { font-size: 0.85rem; }
-.strip summary { cursor: pointer; color: var(--accent); }
-.strip details ul { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 2px; }
-.strip details li code { font-family: var(--f-data); font-size: 0.8rem; }
-.pill { display: inline-block; font-family: var(--f-data); font-size: 0.75rem; padding: 1px 8px; border-radius: 999px; white-space: nowrap; background: var(--info-soft); color: var(--info); }
-.pill.ok { background: var(--ok-soft); color: var(--ok); }
-.pill.warn { background: var(--warn-soft); color: var(--warn); }
-.pill.crit { background: var(--crit-soft); color: var(--crit); }
-.strip.repeat .id { box-shadow: inset 4px 0 0 var(--warn); }
-.strip.broken .id { box-shadow: inset 4px 0 0 var(--crit); }
-
-/* PR timeline */
-.prs { display: grid; gap: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
-.pr { display: grid; grid-template-columns: 64px minmax(0, 1fr) minmax(140px, 220px); gap: 4px 16px; padding: 12px 16px; border-top: 1px solid var(--line); align-items: center; }
-.pr:first-child { border-top: 0; }
-.pr .n { font-family: var(--f-data); color: var(--muted); }
-.pr .t { min-width: 0; }
-.pr .t small { display: block; color: var(--muted); font-size: 0.8rem; }
-.bar { display: flex; height: 10px; border-radius: 2px; overflow: hidden; background: var(--strip); }
-.bar span { display: block; height: 100%; }
-.bar .h { background: var(--crit); } .bar .m { background: var(--warn); } .bar .l { background: var(--info); }
-.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); }
-.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
-
-/* Tables */
-.tablebox { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
-th, td { text-align: left; padding: 8px 12px; border-top: 1px solid var(--line); vertical-align: top; }
-thead th { border-top: 0; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 500; }
-td.num, th.num { text-align: right; }
-td.mono { white-space: nowrap; }
-.rule code, .strip .title code { font-family: var(--f-data); font-size: 0.85em; background: var(--strip); padding: 0 3px; border-radius: 2px; }
-.empty { padding: 16px; color: var(--muted); }
-.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 28px; }
-footer { font-size: 0.8rem; color: var(--muted); }
-/* Board, areas and registers */
-.pill.st-in_progress, .pill.st-testing, .pill.st-review { background: var(--info-soft); color: var(--info); }
-.pill.st-done { background: var(--ok-soft); color: var(--ok); }
-.pill.st-blocked, .pill.st-abandoned { background: var(--crit-soft); color: var(--crit); }
-.pill.st-planned { background: var(--strip); color: var(--muted); }
-.prog { display: grid; gap: 3px; min-width: 90px; }
-.prog .track { height: 6px; border-radius: 3px; background: var(--strip); overflow: hidden; }
-.prog .fill { height: 100%; background: var(--accent); }
-.areas { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); gap: 12px; }
-.area { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; display: grid; gap: 8px; align-content: start; min-width: 0; }
-.area h3 { margin: 0; font-family: var(--f-display); font-size: 1rem; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
-.area h3 small { font-family: var(--f-data); font-weight: 400; font-size: 0.72rem; color: var(--muted); }
-.kv { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; margin: 0; font-size: 0.88rem; }
-.kv dt { color: var(--muted); }
-.kv dd { margin: 0; font-family: var(--f-data); font-variant-numeric: tabular-nums; text-align: right; }
-.agents { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 12px; }
-.agent { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: 4px; padding: 12px 14px; display: grid; gap: 6px; min-width: 0; }
-.agent .row { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.85rem; color: var(--muted); }
-.agent .row b { color: var(--ink); font-weight: 500; font-family: var(--f-data); }
-.note { font-size: 0.82rem; color: var(--muted); margin: 0; }
-td .sub { display: block; color: var(--muted); font-size: 0.8rem; }
-#board table { min-width: 860px; }
-#board td:first-child { min-width: 230px; }
-#board td:last-child { min-width: 200px; }
-@media (max-width: 640px) {
-  .strip { grid-template-columns: 64px minmax(0, 1fr); }
-  .strip .side { grid-column: 1 / -1; justify-items: start; border-left: 0; border-top: 1px dashed var(--line); grid-auto-flow: column; justify-content: start; }
-  .pr { grid-template-columns: 48px minmax(0, 1fr); }
-  .pr .bars { grid-column: 2; }
-}
-@media (prefers-reduced-motion: no-preference) { .strip, .pr { transition: background-color .15s; } }
+.head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 14px; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; box-shadow: var(--shadow-1); padding: 18px 20px; display: grid; gap: 12px; min-width: 0; align-content: start; }
+.g4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.g3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.g2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 980px) { .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .g3, .g2 { grid-template-columns: minmax(0, 1fr); } }
+.kpi { gap: 4px; }
+.kpi .k { font-size: 14px; color: var(--ink-muted); }
+.kpi .v { font-family: var(--font-mono); font-size: 26px; font-weight: 500; line-height: 1.2; overflow-wrap: anywhere; }
+.kpi .s { font-size: 13px; color: var(--ink-muted); }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.t-good { background: var(--tone-good-soft); color: var(--tone-good); }
+.t-warn { background: var(--tone-warn-soft); color: var(--tone-warn); }
+.t-crit { background: var(--tone-crit-soft); color: var(--tone-crit); }
+.t-neutral { background: var(--tone-neutral-soft); color: var(--ink-2); }
+.t-active { background: var(--tone-active-soft); color: var(--ink); }
+.redcount { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 28px; padding: 0 8px; border-radius: 999px; background: var(--d3-red); color: #FFFFFF; font-weight: 700; font-size: 15px; }
+.tbox { overflow-x: auto; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; box-shadow: var(--shadow-1); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { text-align: left; font-weight: 600; color: var(--ink-muted); font-size: 13px; padding: 9px 12px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+td { padding: 9px 12px; border-top: 1px solid var(--rule); vertical-align: top; }
+tbody tr:first-child td { border-top: 0; }
+td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+td .sub { display: block; }
+.empty { padding: 16px; color: var(--ink-muted); }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 0 16px; border-radius: 6px; border: 1px solid var(--rule-2); background: var(--surface); color: var(--ink); font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--ink-2); }
+.btn.primary { background: var(--d3-purple); border-color: var(--d3-purple); color: var(--accent-ink); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--rule-2); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.seg button { min-height: 44px; padding: 0 14px; border: 0; border-right: 1px solid var(--rule); background: transparent; color: var(--ink-2); font: inherit; font-size: 15px; cursor: pointer; }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); font-weight: 600; box-shadow: inset 0 -3px 0 var(--d3-purple); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { min-height: 44px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--rule-2); background: var(--surface); color: var(--ink-2); font: inherit; font-size: 14px; cursor: pointer; }
+.chip[aria-pressed="true"] { color: var(--ink); font-weight: 600; background: var(--accent-soft); border-color: var(--d3-purple); }
+.field { display: grid; gap: 4px; font-size: 14px; color: var(--ink-muted); }
+select, input[type="search"] { min-height: 44px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--rule-2); background: var(--surface-2); color: var(--ink); font: inherit; font-size: 15px; max-width: 100%; }
+input[type="search"]::placeholder { color: var(--ink-muted); }
+input[type="range"] { width: 100%; accent-color: var(--d3-purple); min-height: 44px; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.meter { height: 10px; background: var(--track); border-radius: 5px; position: relative; min-width: 80px; }
+.meter > span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 5px; background: var(--d3-purple); }
+.units { display: flex; flex-wrap: wrap; gap: 3px; }
+.unit { width: 16px; height: 16px; border-radius: 3px; }
+.u-good { background: var(--tone-good); } .u-warn { background: var(--tone-warn); } .u-none { background: var(--track); border: 1.5px solid var(--ink-muted); }
+.phase { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 4px 14px; align-items: center; padding: 8px 0; border-top: 1px solid var(--rule); }
+.phase:first-child { border-top: 0; }
+.alerts { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.alerts li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px 14px; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); font-size: 15px; }
+.check { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; align-items: center; padding: 9px 0; border-top: 1px solid var(--rule); }
+.check:first-child { border-top: 0; }
+.hbar { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 6px 14px; align-items: center; }
+.hbar .bar { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.hbar .bar span.b { height: 20px; border-radius: 3px; min-width: 3px; background: var(--d3-purple); }
+.split { display: flex; gap: 2px; height: 14px; }
+.split .fx { background: var(--tone-good); border-radius: 3px 0 0 3px; }
+.split .lf { background: var(--tone-warn); border-radius: 0 3px 3px 0; }
+.estimate { border: 1px solid var(--rule-2); border-radius: 8px; padding: 14px 16px; background: var(--surface-2); display: grid; gap: 8px; }
+.big { font-family: var(--font-mono); font-size: 28px; font-weight: 500; }
+.player { display: grid; gap: 12px; }
+.now { border: 1px solid var(--rule-2); border-radius: 8px; padding: 14px 16px; background: var(--surface-2); display: grid; gap: 6px; }
+.steps { max-height: 520px; overflow: auto; border-top: 1px solid var(--rule); }
+.steps button { display: grid; grid-template-columns: 150px 110px minmax(0, 1fr) auto; gap: 10px; width: 100%; text-align: left; padding: 7px 10px; border: 0; border-bottom: 1px solid var(--rule); background: transparent; color: var(--ink); font: inherit; font-size: 14px; cursor: pointer; min-height: 36px; }
+.steps button[aria-current="step"] { background: var(--accent-soft); box-shadow: inset 4px 0 0 var(--d3-purple); }
+.steps button .d { overflow-wrap: anywhere; }
+@media (max-width: 720px) { .steps button { grid-template-columns: minmax(0, 1fr) auto; } .steps button .t, .steps button .k { display: none; } }
+.decide { border: 1px solid var(--rule-2); border-radius: 8px; padding: 14px 16px; background: var(--surface-2); display: grid; gap: 6px; }
+details > summary { cursor: pointer; min-height: 32px; }
+footer { font-size: 13px; color: var(--ink-muted); }
 </style>
 
 <div class="wrap" id="app">
-  <header>
-    <div>
-      <h1>Voice Lab Dev Control Tower</h1>
-      <div class="muted">How Claude Code is building Voice Lab: the work in flight, what it costs, what went wrong, and what stops it happening again.</div>
+  <header class="top">
+    <div class="brand">
+      <img class="d3logo light-only" alt="Daythree" src="data:image/png;base64,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">
+      <img class="d3logo dark-only" alt="Daythree" src="data:image/png;base64,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">
+      <div>
+        <h1>Voice Lab Dev Control Tower</h1>
+        <p class="sub" id="meta"></p>
+      </div>
     </div>
-    <div class="meta" id="meta"></div>
+    <div class="seg" role="group" aria-label="Theme" id="theme"></div>
   </header>
-  <div class="rail" id="rail" aria-label="Summary"></div>
-  <section aria-labelledby="att-h"><h2 id="att-h">Needs attention</h2><ul class="alerts" id="attention"></ul></section>
-  <section aria-labelledby="board-h">
-    <h2 id="board-h">Development control board</h2>
-    <p class="note">Each task, its phase, attempt, progress, tests, blockers and next step, with the models, tokens and cost of the sessions that worked on it. Sessions update it with <code>node scripts/devlog-task.mjs</code>.</p>
-    <div class="tablebox" id="board"></div>
-  </section>
-  <section aria-labelledby="ops-h">
-    <h2 id="ops-h">Agent operations</h2>
-    <div class="agents" id="agents"></div>
-  </section>
-  <section aria-labelledby="areas-h">
-    <h2 id="areas-h">Workload, quality, economics and governance</h2>
-    <div class="areas" id="areas"></div>
-  </section>
-  <section aria-labelledby="reg-h">
-    <h2 id="reg-h">Model performance registry</h2>
-    <div class="tablebox" id="registry"></div>
-    <p class="note" id="pricing-note"></p>
-  </section>
-  <section aria-labelledby="br-h">
-    <h2 id="br-h">Branches and forks</h2>
-    <p class="note" id="br-note"></p>
-    <div class="tablebox" id="branches"></div>
-    <div id="forks"></div>
-  </section>
-  <section aria-labelledby="inc-h">
-    <h2 id="inc-h">Incident register and learning loop</h2>
-    <p class="note">Every build failure becomes an incident, a lesson and a guard. A lesson counts as learned only while its guard test is still in place.</p>
-    <div class="tablebox" id="incidents"></div>
-  </section>
-  <section aria-labelledby="sl-h">
-    <h2 id="sl-h">Stop-loss and wasted effort</h2>
-    <p class="note" id="budgets"></p>
-    <div class="tablebox" id="alerts"></div>
-  </section>
-  <section aria-labelledby="perf-h">
-    <h2 id="perf-h">Session performance</h2>
-    <p class="note">Outcomes per session, not lines of code or tokens alone.</p>
-    <div class="tablebox" id="performance"></div>
-  </section>
-  <section aria-labelledby="les-h">
-    <h2 id="les-h">Lessons and their guards</h2>
-    <p class="muted" style="margin:0">Every past mistake, the rule that replaces it, and the tests that fail if it comes back. Amber marks a mistake that has happened more than once.</p>
-    <div class="strips" id="lessons"></div>
-  </section>
-  <section aria-labelledby="pr-h">
-    <h2 id="pr-h">Pull requests and review findings</h2>
-    <div class="legend"><span><i style="background:var(--crit)"></i>High</span><span><i style="background:var(--warn)"></i>Medium</span><span><i style="background:var(--info)"></i>Low or unrated</span></div>
-    <div class="prs" id="prs"></div>
-  </section>
-  <div class="cols">
-    <section aria-labelledby="ses-h"><h2 id="ses-h">Sessions</h2><div class="tablebox" id="sessions"></div></section>
-    <section aria-labelledby="fail-h"><h2 id="fail-h">Recent failed actions</h2><div class="tablebox" id="failures"></div></section>
+  <nav class="nav" aria-label="Sections" id="nav"></nav>
+
+  <div class="view" id="v-overview">
+    <section aria-labelledby="ag-h"><div class="head"><h2 id="ag-h">Agents at work</h2><span class="note" id="ag-note"></span></div><div class="g3" id="agents"></div></section>
+    <section aria-labelledby="st-h"><div class="head"><h2 id="st-h">Where things stand</h2><span class="note" id="st-note"></span></div><div class="g4" id="kpis"></div><div class="card" id="phases"></div></section>
+    <section aria-labelledby="ac-h"><div class="head"><h2 id="ac-h">Needs your action <span class="redcount" id="ac-count"></span></h2><span class="note">From the records, newest concerns first</span></div><ul class="alerts" id="actions"></ul><details id="more"><summary>Also noted</summary><ul class="alerts" id="notes" style="margin-top: 10px"></ul></details></section>
+    <section class="card" aria-labelledby="he-h"><div class="head"><h2 id="he-h">Health</h2><span id="he-overall"></span></div><p class="sub">The worst check sets the overall state. An input that cannot be read is unavailable, and never counts as green. A check for something not built yet is shown as not in use.</p><div id="checks"></div></section>
   </div>
-  <section aria-labelledby="com-h"><h2 id="com-h">Commits</h2><div class="tablebox" id="commits"></div></section>
+
+  <div class="view" id="v-playback" hidden>
+    <section aria-labelledby="pb-h">
+      <div class="head"><h2 id="pb-h">Playback</h2><span class="note">Every recorded step, in order: what was done and how it ended. No content, prompts or command text is ever recorded.</span></div>
+      <div class="card player">
+        <div class="row" style="align-items: end">
+          <label class="field">Play back<select id="pb-scope"><option value="session">A session</option><option value="task">A task</option><option value="day">A day</option></select></label>
+          <label class="field" style="flex: 1 1 320px">Which<select id="pb-pick"></select></label>
+        </div>
+        <div class="chips" role="group" aria-label="Kinds of step" id="pb-kinds"></div>
+        <div class="row">
+          <button class="btn" type="button" id="pb-first">First</button>
+          <button class="btn" type="button" id="pb-back">Back</button>
+          <button class="btn primary" type="button" id="pb-play">Play</button>
+          <button class="btn" type="button" id="pb-next">Next</button>
+          <button class="btn" type="button" id="pb-last">Last</button>
+          <label class="field" style="flex-direction: row; align-items: center; gap: 8px">Speed<select id="pb-speed"><option value="1">1 step a second</option><option value="4" selected>4 steps a second</option><option value="16">16 steps a second</option></select></label>
+        </div>
+        <input type="range" id="pb-pos" min="0" max="0" value="0" aria-label="Position in the playback">
+        <div class="now" id="pb-now" aria-live="polite"></div>
+        <div class="g4" id="pb-tally"></div>
+        <div class="steps" id="pb-steps" role="list"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="view" id="v-board" hidden>
+    <section aria-labelledby="bd-h">
+      <div class="head"><h2 id="bd-h">Development control board</h2><span class="note">Kept with node scripts/devlog-task.mjs; models, tokens and cost come from the sessions</span></div>
+      <div class="row"><label class="field">Find<input type="search" id="bd-q" placeholder="Task, title or branch"></label><div class="chips" role="group" aria-label="Status" id="bd-chips"></div></div>
+      <div class="tbox" id="board"></div>
+    </section>
+  </div>
+
+  <div class="view" id="v-cost" hidden>
+    <div class="g4" id="cost-kpis"></div>
+    <div class="g2">
+      <section class="card" aria-labelledby="cm-h"><div class="head"><h2 id="cm-h">By model</h2></div><div id="by-model" style="display: grid; gap: 14px"></div><p class="note" id="pricing-note"></p></section>
+      <section class="card" aria-labelledby="sv-h"><div class="head"><h2 id="sv-h">Saving from model routing</h2></div><div id="saving"></div><h3>Routing policy and which model led each session</h3><div class="tbox" style="box-shadow: none" id="routing"></div></section>
+    </div>
+    <section aria-labelledby="rg-h"><div class="head"><h2 id="rg-h">Model performance registry</h2></div><div class="tbox" id="registry"></div></section>
+    <div class="g2">
+      <section class="card" aria-labelledby="pr-h"><div class="head"><h2 id="pr-h">By process and model</h2></div><p>Unavailable (not recorded). The activity log records sessions, not processes such as building, reviewing or fixing; nothing is backfilled or guessed. Recording starts once each helper agent is started with its process and item.</p></section>
+      <section class="card" aria-labelledby="ta-h"><div class="head"><h2 id="ta-h">Tier audit</h2><span class="pill t-warn">Not started</span></div><p>Whether building can move from Sonnet to Haiku while quality holds: every fourth eligible build on the cheaper tier, compared over at least 20 items. It needs your criteria first, and routing changes only on your decision.</p></section>
+    </div>
+  </div>
+
+  <div class="view" id="v-quality" hidden>
+    <div class="g4" id="q-kpis"></div>
+    <div class="g2">
+      <section class="card" aria-labelledby="ls-h"><div class="head"><h2 id="ls-h">Lessons seen most often</h2></div><div id="top-lessons" style="display: grid; gap: 10px"></div></section>
+      <section class="card" aria-labelledby="rf-h"><div class="head"><h2 id="rf-h">Review findings, latest merged PRs</h2><span class="note">Green: fixed. Amber: left or noted.</span></div><div id="findings" style="display: grid; gap: 12px"></div></section>
+    </div>
+    <section aria-labelledby="ir-h"><div class="head"><h2 id="ir-h">Incident register</h2><span class="note" id="ir-note"></span></div><div class="row"><label class="field">Find<input type="search" id="ir-q" placeholder="Title or lesson"></label><div class="chips" role="group" aria-label="Severity" id="ir-chips"></div></div><div class="tbox" id="incidents"></div></section>
+    <section aria-labelledby="lr-h"><div class="head"><h2 id="lr-h">Lessons register</h2><span class="note">A lesson counts as learned only while every guard test is still in place</span></div><div class="tbox" id="lessons"></div></section>
+  </div>
+
+  <div class="view" id="v-governance" hidden>
+    <div class="g4" id="g-kpis"></div>
+    <section aria-labelledby="dc-h"><div class="head"><h2 id="dc-h">Decisions register</h2><span class="note">Append-only, kept with node scripts/devlog-task.mjs decision</span></div><div class="tbox" id="decisions"></div></section>
+    <section class="card" aria-labelledby="in-h"><div class="head"><h2 id="in-h">Activity log integrity</h2><span id="in-state"></span></div><p class="sub">Each file in devlog/activity must still hold exactly what was first committed. An earlier change counts as accepted only when a recorded decision accepts that exact content.</p><div id="integrity"></div></section>
+    <section aria-labelledby="br-h"><div class="head"><h2 id="br-h">Branches</h2><span class="note" id="br-note"></span></div><div class="tbox" id="branches"></div></section>
+    <section aria-labelledby="al-h"><div class="head"><h2 id="al-h">Stop-loss and wasted effort</h2><span class="note" id="budgets"></span></div><div class="tbox" id="alerts"></div></section>
+    <section aria-labelledby="se-h"><div class="head"><h2 id="se-h">Sessions</h2></div><div class="tbox" id="sessions"></div></section>
+    <section aria-labelledby="co-h"><div class="head"><h2 id="co-h">Commits</h2><span class="note">The latest 60</span></div><div class="tbox" id="commits"></div></section>
+  </div>
+
+  <div class="view" id="v-runner" hidden>
+    <section class="card" aria-labelledby="rn-h">
+      <div class="head"><h2 id="rn-h">Runner and pacing</h2><span class="pill t-neutral">Not built</span></div>
+      <p>The D3ngineering blueprint adds a scheduled runner that wakes every 15 minutes, takes the next ready item within budget gates (5-hour window, 40% of the weekly limit a day, an even weekly pace, an 80% weekly ceiling), and a mode switch (normal, accelerate, auto, paused), Run next and Assign an agent on this page. None of it is built here yet: it waits on three decisions.</p>
+      <div class="decide"><h3>Should the runner merge its own PRs?</h3><p class="sub">The blueprint merges a reviewed commit when CI is green and the tip has not moved. Voice Lab's rule today is that the owner merges every PR.</p></div>
+      <div class="decide"><h3>Where should it run?</h3><p class="sub">The blueprint's runner is a Claude app task on a PC. Here it would be a Routine starting a cloud session. Whether a cloud session can read the usage windows the gates depend on is unverified; a probe run comes first.</p></div>
+      <div class="decide"><h3>Its ceiling mode and permissions</h3><p class="sub">The highest mode allowed from the repository, and a signed list of what an unattended run may do.</p></div>
+    </section>
+  </div>
+
   <footer id="foot"></footer>
 </div>
 
 <script>
 const REPORT = /*REPORT*/null;
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const day = (iso) => iso ? iso.slice(0, 10) : '—';
-const when = (iso) => iso ? iso.slice(0, 16).replace('T', ' ') + ' UTC' : '—';
-// Only links to GitHub and claude.ai are made clickable.
-const safeUrl = (u) => (/^https:\/\/(github\.com|claude\.ai)\//.test(String(u ?? '')) ? esc(u) : '#');
-const md = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+// Every value is placed with textContent or a DOM attribute, never parsed as markup (Daythree rule; lesson L-018).
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props ?? {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k === 'text') el.textContent = String(v);
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? '' : String(v));
+  }
+  for (const c of kids.flat(Infinity)) if (c !== null && c !== undefined && c !== false) el.append(c instanceof Node ? c : String(c));
+  return el;
+}
+const fill = (id, ...kids) => { const el = typeof id === 'string' ? $(id) : id; el.replaceChildren(...kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false)); return el; };
+// Only links to GitHub and claude.ai are made clickable; anything else is plain text.
+const link = (url, text) => (/^https:\/\/(github\.com|claude\.ai)\//.test(String(url ?? '')) ? h('a', { href: url, target: '_blank', rel: 'noopener' }, text) : h('span', null, text));
+const when = (iso) => (iso ? `${iso.slice(0, 16).replace('T', ' ')} UTC` : '—');
+const day = (iso) => (iso ? iso.slice(0, 10) : '—');
+const short = (id) => String(id ?? '').slice(-8);
 // Money is formatted from its decimal text, never through a float (lesson L-004).
 const fmtMoney = (v) => {
   const m = /^(-?)(\d+)(?:\.(\d+))?$/.exec(String(v ?? ''));
   if (!m) return String(v ?? '');
   const frac = (m[3] ?? '').padEnd(3, '0');
-  let cents = BigInt(m[2]) * 100n + BigInt(frac.slice(0, 2)) + (Number(frac[2]) >= 5 ? 1n : 0n); // round half up, in integers
-  const whole = (cents / 100n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  return `${m[1]}${whole}.${(cents % 100n).toString().padStart(2, '0')}`;
+  const cents = BigInt(m[2]) * 100n + BigInt(frac.slice(0, 2)) + (Number(frac[2]) >= 5 ? 1n : 0n);
+  return `${m[1]}$${(cents / 100n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')}.${(cents % 100n).toString().padStart(2, '0')}`;
 };
-const tier = (sev) => /^high/i.test(sev) ? 'h' : /^med/i.test(sev) ? 'm' : 'l';
+const num = (n) => (n === null || n === undefined ? '—' : Number(n).toLocaleString('en'));
+const pctText = (n) => (n === null || n === undefined ? 'Unavailable' : `${n}%`);
+const SVG = 'http://www.w3.org/2000/svg';
+function icon(kind) {
+  const s = document.createElementNS(SVG, 'svg');
+  s.setAttribute('width', '14'); s.setAttribute('height', '14'); s.setAttribute('viewBox', '0 0 16 16'); s.setAttribute('aria-hidden', 'true');
+  const add = (tag, attrs) => { const e = document.createElementNS(SVG, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); s.append(e); };
+  if (kind === 'good') { add('circle', { cx: 8, cy: 8, r: 7, fill: 'currentColor' }); add('path', { d: 'M4.6 8.2l2.2 2.2 4.6-4.8', fill: 'none', stroke: 'var(--surface)', 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }); }
+  else if (kind === 'warn') add('path', { d: 'M8 1.5L14.5 8 8 14.5 1.5 8z', fill: 'currentColor' });
+  else if (kind === 'crit') add('path', { d: 'M8 1.5l7 12.5H1z', fill: 'currentColor' });
+  else if (kind === 'active') { add('circle', { cx: 8, cy: 8, r: 6.2, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.6 }); add('path', { d: 'M8 1.8a6.2 6.2 0 0 1 0 12.4z', fill: 'currentColor' }); }
+  else add('circle', { cx: 8, cy: 8, r: 6, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.8 });
+  return s;
+}
+const pill = (tone, word) => h('span', { class: `pill t-${tone === 'none' ? 'neutral' : tone}` }, icon(tone), word);
+const HEALTH = { green: ['good', 'Green'], amber: ['warn', 'Amber'], red: ['crit', 'Red'], unavailable: ['none', 'Unavailable'], off: ['none', 'Not in use'] };
+const healthPill = (state) => pill(...(HEALTH[state] ?? HEALTH.unavailable));
+const STATUS = { done: ['good', 'Done'], in_progress: ['active', 'In progress'], testing: ['active', 'Testing'], review: ['warn', 'In review'], blocked: ['crit', 'Blocked'], abandoned: ['none', 'Abandoned'], planned: ['none', 'Planned'] };
+const statusPill = (s) => pill(...(STATUS[s] ?? ['none', String(s ?? 'Planned')]));
+const table = (heads, rows, empty = 'Nothing recorded yet.') => (rows.length
+  ? h('table', null, h('thead', null, h('tr', null, heads.map((x) => (typeof x === 'string' ? h('th', { scope: 'col' }, x) : h('th', { scope: 'col', class: x.cls }, x.t))))), h('tbody', null, rows))
+  : h('p', { class: 'empty' }, empty));
+const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch { /* not kept */ } } };
+
+const VIEWS = [['overview', 'Overview'], ['playback', 'Playback'], ['board', 'Board'], ['cost', 'Cost'], ['quality', 'Quality and learning'], ['governance', 'Governance and audit'], ['runner', 'Runner and pacing']];
+function route() {
+  const want = (location.hash || '#overview').slice(1);
+  const id = VIEWS.some(([v]) => v === want) ? want : 'overview';
+  for (const [v] of VIEWS) $(`v-${v}`).hidden = v !== id;
+  for (const a of $('nav').children) {
+    if (a.dataset.view === id) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  }
+}
+function theme(mode) {
+  if (mode === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', mode);
+  store.set('ct-theme', mode);
+  for (const b of $('theme').children) b.setAttribute('aria-pressed', String(b.dataset.mode === mode));
+}
 
 function render(r) {
-  const t = r.totals;
-  $('meta').innerHTML = `<span>${esc(r.repo)}</span><span>${esc(r.branch)} @ ${esc(r.head)}</span><span>Generated ${esc(when(r.generatedAt))}</span>`;
-  const rail = [
-    ['Lessons', t.lessons, `${t.repeats} happened more than once`],
-    ['Guards in place', `${t.guardsOk}/${t.guards}`, t.guardsOk === t.guards ? 'all tests still there' : 'some guards are gone'],
-    ['Review findings', t.findings, `${t.findingsFixed} fixed · ${t.highFindings} high`],
-    ['PRs merged', t.prsMerged, `${t.commits} commits`],
-    ['Open tasks', t.openTasks, `${r.board.filter((x) => x.blocker).length} blocked`],
-    ['Incidents', t.incidents, `${r.incidents.filter((i) => i.lesson).length} tied to a lesson`],
-    ['AI spend', `$${fmtMoney(r.economics.spend.usd)}`, r.economics.unmetered ? `${r.economics.unmetered} session(s) not metered` : r.economics.partial ? 'some sessions not checkpointed' : 'all logged sessions metered'],
-    ['Sessions', t.sessions, `${t.toolCalls} logged actions · ${t.failures} failed`],
-  ];
-  $('rail').innerHTML = rail.map(([k, v, s]) => `<div><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span><span class="s">${esc(s)}</span></div>`).join('');
+  const t = r.totals; const e = r.economics; const g = r.areas.governance; const q = r.areas.quality;
+  fill('meta', `A snapshot built ${when(r.generatedAt)} from ${r.branch} at ${r.head}. Rebuilt with /control-tower.`);
+  fill('theme', ['auto', 'light', 'dark'].map((m) => h('button', { type: 'button', 'data-mode': m, onclick: () => theme(m) }, m[0].toUpperCase() + m.slice(1))));
+  theme(store.get('ct-theme') ?? 'auto');
+  fill('nav', VIEWS.map(([v, label]) => h('a', { href: `#${v}`, 'data-view': v }, label)));
+  addEventListener('hashchange', route); route();
 
-  $('attention').innerHTML = r.attention.length
-    ? r.attention.map((a) => `<li class="${esc(a.level)}">${esc(a.text)}</li>`).join('')
-    : '<li class="clear">Nothing needs attention. Every guard is in place and no lesson has repeated.</li>';
+  // ---------------------------------------------------------------- overview
+  const agents = r.areas.agents;
+  fill('ag-note', `Sessions active in the last 30 minutes, as of ${when(r.generatedAt)}`);
+  fill('agents', agents.length ? agents.map((a) => h('article', { class: 'card' },
+    h('div', { class: 'row', style: 'justify-content: space-between' }, h('h3', null, link(a.url, `Session ${short(a.session)}`)), pill('active', a.task ? `${a.task}` : 'Working')),
+    h('p', null, a.title ?? 'No board task recorded'),
+    h('p', { class: 'sub' }, `${a.models.map((m) => m.replace('claude-', '')).join(', ') || 'model not recorded'} · ${fmtMoney(a.cost.usd)} · ${a.errors} failed actions · ${a.subagents} helper agents`),
+  )) : [h('p', { class: 'card sub' }, 'No session has been active in the last 30 minutes.')]);
+  fill('st-note', `As of ${when(r.generatedAt)}`);
+  const kpi = (k, v, s) => h('div', { class: 'card kpi' }, h('span', { class: 'k' }, k), h('span', { class: 'v' }, v), h('span', { class: 's' }, s));
+  fill('kpis',
+    kpi('Pull requests merged', num(t.prsMerged), `${r.areas.workload.openPrs} open`),
+    kpi('Review findings fixed', `${num(t.findingsFixed)} of ${num(t.findings)}`, `${num(t.highFindings)} rated high`),
+    kpi('Lessons and guards', `${t.lessons} · ${t.guardsOk}/${t.guards}`, `${t.repeats} lessons seen more than once`),
+    kpi('Claude Code spend', fmtMoney(e.spend.usd), e.perDoneTask ? `${fmtMoney(e.perDoneTask.usd)} per finished task` : 'No finished task yet'));
+  const units = (p) => [...Array(p.met).fill('u-good'), ...Array(p.partly).fill('u-warn'), ...Array(p.notMet).fill('u-none')];
+  fill('phases',
+    h('div', { class: 'head' }, h('h3', null, 'Phases and exit criteria'), h('div', { class: 'row sub' }, h('span', { class: 'row', style: 'gap: 6px' }, h('span', { class: 'unit u-good' }), 'Met'), h('span', { class: 'row', style: 'gap: 6px' }, h('span', { class: 'unit u-warn' }), 'Partly met'), h('span', { class: 'row', style: 'gap: 6px' }, h('span', { class: 'unit u-none' }), 'Not met'))),
+    r.plan.length ? h('div', null, r.plan.map((p) => h('div', { class: 'phase' },
+      h('span', { class: 'mono', style: 'font-weight: 600' }, p.id),
+      h('div', null, h('div', { style: 'font-weight: 600' }, p.name), h('div', { class: 'sub' }, [
+        [p.met, 'met'], [p.partly, 'partly met'], [p.notMet, 'not met']].filter(([n]) => n).map(([n, w]) => `${n} ${w}`).join(', ') || 'No exit criteria recorded',
+        p.fakes ? ` · ${p.fakes} proven only against fakes` : '', p.open ? ` · ${p.open} open items` : '')),
+      h('div', { class: 'units', role: 'img', 'aria-label': `${p.met} met, ${p.partly} partly met, ${p.notMet} not met` }, units(p).map((u) => h('span', { class: `unit ${u}` })))))) : h('p', { class: 'sub' }, 'src/progress.ts could not be read.'));
+  const pressing = r.attention.filter((a) => a.level !== 'info' && !/ has happened \d+ times/.test(a.text));
+  const rest = r.attention.filter((a) => !pressing.includes(a));
+  const alertItem = (a) => h('li', null, pill(a.level === 'critical' ? 'crit' : a.level === 'warning' ? 'warn' : 'none', a.level === 'critical' ? 'Critical' : a.level === 'warning' ? 'Warning' : 'Note'), h('span', null, a.text));
+  fill('ac-count', String(pressing.length));
+  fill('actions', pressing.length ? pressing.map(alertItem) : [h('li', null, pill('good', 'Clear'), h('span', null, 'Nothing needs your action.'))]);
+  fill('notes', rest.map(alertItem));
+  $('more').hidden = !rest.length;
+  fill('he-overall', healthPill(r.health.overall), ' ');
+  $('he-overall').append(h('span', { class: 'sub' }, ` Overall`));
+  fill('checks', r.health.checks.map((c) => h('div', { class: 'check' }, h('div', null, h('div', { style: 'font-weight: 600' }, c.name), h('div', { class: 'sub' }, c.detail)), healthPill(c.state))));
 
-  $('lessons').innerHTML = r.lessons.map((l) => {
-    const bad = l.guards.filter((g) => !g.ok).length;
-    const cls = bad ? 'broken' : l.times >= 2 ? 'repeat' : '';
-    return `<article class="strip ${cls}">
-      <div class="id">${esc(l.id)}${l.times >= 2 ? `<span class="pill warn">×${l.times}</span>` : ''}</div>
-      <div class="body"><div class="title">${esc(l.title)}</div><div class="rule">${md(l.rule)}</div>
-        <details><summary>Where it happened and what guards it</summary>
-          <p class="muted" style="margin:6px 0 0">${md(l.seen)}</p>
-          <ul>${l.guards.map((g) => `<li>${g.ok ? '' : '<strong>Missing:</strong> '}<code>${esc(g.file)}</code> · ${esc(g.text)}</li>`).join('')}</ul>
-        </details></div>
-      <div class="side"><span class="pill ${bad ? 'crit' : 'ok'}">${bad ? `${bad} guard${bad > 1 ? 's' : ''} missing` : `${l.guards.length} guard${l.guards.length > 1 ? 's' : ''}`}</span>
-        ${l.prs.length ? `<span class="muted mono" style="font-size:.8rem">${l.prs.map((n) => `#${n}`).join(' ')}</span>` : ''}</div>
-    </article>`;
-  }).join('');
+  // ---------------------------------------------------------------- playback
+  playback(r);
 
-  const usd = (m) => (m ? `$${fmtMoney(m.usd)}${m.myr ? ` · RM ${fmtMoney(m.myr)}` : ''}` : '—');
-  const pctv = (v) => (v === null || v === undefined ? '—' : `${v}%`);
-  const num = (n) => (n === null || n === undefined ? '—' : Number(n).toLocaleString('en-US'));
-  const mins = (m) => (m === null || m === undefined ? '—' : m >= 120 ? `${Math.round(m / 6) / 10} h` : `${m} min`);
-  const sessionLink = (id, url) => (url ? `<a class="mono" href="${safeUrl(url)}">${esc(String(id).slice(-8))}</a>` : `<span class="mono">${esc(String(id).slice(-8))}</span>`);
+  // ------------------------------------------------------------------- board
+  let bdStatus = 'open';
+  const bdRows = () => {
+    const qq = $('bd-q').value.toLowerCase();
+    return r.board.filter((x) => (bdStatus === 'all' || (bdStatus === 'open' ? !['done', 'abandoned'].includes(x.status) : x.status === 'done'))
+      && (!qq || `${x.id} ${x.title ?? ''} ${x.branch ?? ''}`.toLowerCase().includes(qq))).map((x) => h('tr', null,
+      h('td', null, h('span', { class: 'mono', style: 'font-weight: 600' }, x.id), h('span', { class: 'sub' }, x.title ?? '')),
+      h('td', null, statusPill(x.status), x.blocker ? h('span', { class: 'sub' }, `Blocked: ${x.blocker}`) : null),
+      h('td', null, h('div', { class: 'meter', role: 'img', 'aria-label': `${x.progress ?? 0}%` }, h('span', { style: `width: ${Math.max(0, Math.min(100, Number(x.progress ?? 0)))}%` })), h('span', { class: 'sub' }, `${x.progress ?? 0}%${x.tests ? ` · tests ${x.tests}` : ''}`)),
+      h('td', { class: 'num' }, String(x.attempt ?? 1)),
+      h('td', { class: 'num' }, fmtMoney(x.cost?.usd ?? '0')),
+      h('td', null, x.next ?? '', h('span', { class: 'sub' }, [x.branch, x.pr ? `PR #${x.pr}` : null].filter(Boolean).join(' · '))),
+    ));
+  };
+  const drawBoard = () => fill('board', table(['Task', 'Status', 'Progress', { t: 'Attempt', cls: 'num' }, { t: 'Cost', cls: 'num' }, 'Next'], bdRows(), 'No task matches.'));
+  fill('bd-chips', [['open', 'Open'], ['done', 'Done'], ['all', 'All']].map(([k, label]) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(k === bdStatus), onclick: (ev) => { bdStatus = k; for (const b of $('bd-chips').children) b.setAttribute('aria-pressed', String(b === ev.currentTarget)); drawBoard(); } }, label)));
+  $('bd-q').addEventListener('input', drawBoard);
+  drawBoard();
 
-  $('board').innerHTML = r.board.length ? `<table><thead><tr><th>Task</th><th>Status</th><th>Progress</th><th class="num">Attempt</th><th class="num">Cost</th><th>Blocker · next</th></tr></thead><tbody>${
-    r.board.map((t) => `<tr>
-      <td><b class="mono">${esc(t.id)}</b> ${esc(t.title)}<span class="sub">${esc([t.epic, t.workstream, t.phase].filter(Boolean).join(' · '))}${t.pr ? ` · <a href="https://github.com/${esc(r.repo)}/pull/${Number(t.pr)}">#${Number(t.pr)}</a>` : ''}</span></td>
-      <td><span class="pill st-${esc(t.status)}">${esc(t.status.replace('_', ' '))}</span></td>
-      <td><div class="prog"><div class="track"><div class="fill" style="width:${Math.max(0, Math.min(100, Number(t.progress) || 0))}%"></div></div><small class="mono">${Number(t.progress) || 0}%</small></div></td>
-      <td class="num">${Number(t.attempt) || 1}<span class="sub">tests ${esc(t.tests ?? '—')}</span></td>
-      <td class="num">${usd(t.cost)}<span class="sub">${num(t.tokens)} tokens · ${mins(t.elapsedMinutes)}</span><span class="sub mono">${esc(t.models.map((m) => m.replace(/^claude-/, '')).join(', ') || '—')}</span></td>
-      <td>${t.blocker ? `<strong>Blocked:</strong> ${esc(t.blocker)}<br>` : ''}${esc(t.next ?? '')}</td></tr>`).join('')}</tbody></table>`
-    : '<div class="empty">No tasks yet. Sessions add them with node scripts/devlog-task.mjs start.</div>';
+  // -------------------------------------------------------------------- cost
+  fill('cost-kpis',
+    kpi('Spend so far', fmtMoney(e.spend.usd), `${e.meteredSessions} sessions priced from tokens`),
+    kpi('Per finished task', e.perDoneTask ? fmtMoney(e.perDoneTask.usd) : 'Unavailable', 'Sessions shared evenly between their tasks'),
+    kpi('Saved by prompt caching', fmtMoney(e.cacheSaved.usd), `${pctText(e.cacheReadShare)} of input read from cache`),
+    kpi('Billed cost', 'Unavailable', 'These figures are priced from tokens, not invoices'));
+  const maxCost = r.registry.reduce((m, x) => (Number(x.cost.usd) > m ? Number(x.cost.usd) : m), 0) || 1; // bar widths only
+  fill('by-model', r.registry.map((m) => h('div', { class: 'hbar' },
+    h('div', null, h('div', { style: 'font-weight: 600' }, m.model.replace('claude-', '')), h('div', { class: 'sub' }, `${m.sessions} sessions · ${num(m.output)} output tokens`)),
+    h('div', { class: 'bar' }, h('span', { class: 'b', style: `width: ${Math.max(0.5, (Number(m.cost.usd) / maxCost) * 80)}%` }), h('span', { class: 'mono' }, fmtMoney(m.cost.usd))))),
+    h('div', { class: 'hbar' }, h('div', null, h('div', { style: 'font-weight: 600' }, 'Not attributed'), h('div', { class: 'sub' }, "Session cost no model's tokens account for")), h('div', { class: 'bar' }, h('span', { class: 'mono' }, fmtMoney(e.unattributed?.usd ?? '0')))));
+  fill('pricing-note', `Prices: ${e.pricing.source ?? 'not configured'}${e.pricing.asOf ? `, checked ${e.pricing.asOf}` : ''}. Spend is Claude Code's own figure at its last checkpoint plus priced tokens since.`);
+  const s = e.routingSaving;
+  fill('saving', s ? h('div', { class: 'estimate' },
+    h('span', { class: 'sub' }, `Estimated saving versus all ${s.baseline.replace('claude-', '')}`),
+    h('span', { class: 'big' }, fmtMoney(s.saving.usd), h('span', { class: 'sub', style: 'font-size: 16px' }, ` (${s.share}% of the ${fmtMoney(s.allBaseline.usd)} it would have cost)`)),
+    h('p', { class: 'sub' }, `Estimate only: every model's tokens priced again at ${s.baseline.replace('claude-', '')} prices, assuming it would use the same tokens. Cost not attributed to a model is left out. Not billed cost.`))
+    : h('p', { class: 'sub' }, 'Unavailable: a model has no price, or no baseline model is set in devlog/control-tower.json.'));
+  const led = Object.entries(e.ledBy ?? {}).sort((a, b) => b[1] - a[1]);
+  fill('routing', table(['Work', 'Policy (CLAUDE.md)'], [['Building and fixing', 'Sonnet'], ['Independent reviews and hard judgement', 'Opus'], ['Routine checks and logs', 'Haiku']].map(([w, p]) => h('tr', null, h('td', null, w), h('td', null, p)))),
+    h('p', { class: 'sub', style: 'padding: 10px 12px' }, led.length ? `Sessions led by each model: ${led.map(([m, n]) => `${m.replace('claude-', '')} ${n}`).join(', ')}.` : 'No session has been priced yet.'));
+  fill('registry', table(['Model', 'Tier', { t: 'Sessions', cls: 'num' }, { t: 'Output tokens', cls: 'num' }, { t: 'Cache read', cls: 'num' }, { t: 'Cost', cls: 'num' }, { t: 'Per session', cls: 'num' }, { t: 'Tool failures', cls: 'num' }, { t: 'Tests passing', cls: 'num' }],
+    r.registry.map((m) => h('tr', null, h('td', null, m.model), h('td', null, m.tier), h('td', { class: 'num' }, num(m.sessions)), h('td', { class: 'num' }, num(m.output)), h('td', { class: 'num' }, num(m.cacheRead)), h('td', { class: 'num' }, fmtMoney(m.cost.usd)), h('td', { class: 'num' }, fmtMoney(m.costPerSession.usd)), h('td', { class: 'num' }, pctText(m.toolFailureRate)), h('td', { class: 'num' }, pctText(m.testPassRate))))));
 
-  const ag = r.areas.agents;
-  $('agents').innerHTML = ag.length ? ag.map((a) => `<article class="agent">
-      <div>${sessionLink(a.session, a.url)} ${a.task ? `<b class="mono">${esc(a.task)}</b> ${esc(a.title)}` : '<span class="muted">No task recorded</span>'}</div>
-      <div class="row"><span>Phase <b>${esc(a.phase ?? '—')}</b></span><span>Progress <b>${a.progress ?? '—'}%</b></span><span>Subagents <b>${a.subagents}</b></span><span>Errors <b>${a.errors}</b></span></div>
-      <div class="row"><span>Models <b>${esc(a.models.join(', ') || '—')}</b></span><span>Tokens <b>${num(a.tokens)}</b></span><span>Cost <b>${usd(a.cost)}</b></span><span>Last <b>${esc(when(a.last))}</b></span></div>
-    </article>`).join('') : '<div class="empty">No session has been active in the last few minutes.</div>';
+  // ----------------------------------------------------------------- quality
+  fill('q-kpis',
+    kpi('Test runs passing', pctText(q.testPassRate), `${num(q.testRuns)} runs logged`),
+    kpi('Review findings per PR', q.findingsPerPr ?? '—', `${num(t.findings)} findings across ${num(t.prsMerged)} merged PRs`),
+    kpi('Lessons seen more than once', String(q.repeatedLessons), `Of ${t.lessons} lessons`),
+    kpi('Stop-loss alerts', String(e.stopLossAlerts), `${e.wasteAlerts} wasted-effort warnings`));
+  const top = [...r.lessons].sort((a, b) => b.times - a.times).slice(0, 8);
+  const maxTimes = top[0]?.times || 1;
+  fill('top-lessons', top.map((l) => h('div', { class: 'hbar', style: 'grid-template-columns: 64px minmax(0, 1fr)' },
+    h('span', { class: 'mono', style: 'font-weight: 600' }, l.id),
+    h('div', null, h('div', { class: 'bar' }, h('span', { class: 'b', style: `width: ${(l.times / maxTimes) * 80}%` }), h('span', { class: 'mono' }, `${l.times} times`)), h('div', { class: 'sub' }, l.title)))));
+  const recent = r.prs.filter((p) => p.state === 'merged' && p.findings.length).sort((a, b) => b.number - a.number).slice(0, 8);
+  const maxF = recent.reduce((m, p) => Math.max(m, p.findings.length), 1);
+  fill('findings', recent.length ? recent.map((p) => {
+    const fx = p.findings.filter((f) => f.fixed).length;
+    return h('div', { style: 'display: grid; gap: 4px' }, h('div', { class: 'row', style: 'justify-content: space-between' }, h('span', null, link(p.url, `#${p.number}`), ` ${p.title}`), h('span', { class: 'mono sub' }, `${fx} of ${p.findings.length} fixed`)),
+      h('div', { class: 'split', role: 'img', 'aria-label': `${fx} of ${p.findings.length} findings fixed` }, h('span', { class: 'fx', style: `width: ${(fx / maxF) * 100}%` }), h('span', { class: 'lf', style: `width: ${((p.findings.length - fx) / maxF) * 100}%` })));
+  }) : [h('p', { class: 'sub' }, 'No PR data. Refresh devlog/prs.json with /control-tower.')]);
+  let irSev = 'all';
+  const drawIncidents = () => {
+    const qq = $('ir-q').value.toLowerCase();
+    const rows = r.incidents.filter((i) => (irSev === 'all' || i.severity !== 'low') && (!qq || `${i.title ?? ''} ${i.lesson ?? ''} ${i.id}`.toLowerCase().includes(qq)));
+    fill('incidents', table(['When', 'Severity', 'Kind', 'What happened', 'Lesson', 'Guarded'], rows.slice(0, 300).map((i) => h('tr', null,
+      h('td', { class: 'mono' }, day(i.ts)), h('td', null, pill(i.severity === 'high' ? 'crit' : i.severity === 'medium' ? 'warn' : 'none', i.severity[0].toUpperCase() + i.severity.slice(1))),
+      h('td', null, (i.type ?? 'other').replace(/_/g, ' ')), h('td', null, i.title ?? '', i.action ? h('span', { class: 'sub' }, i.action) : null),
+      h('td', { class: 'mono' }, i.lesson ?? '—'), h('td', null, i.guarded === null ? '—' : i.guarded ? pill('good', 'Yes') : pill('crit', 'No')))), 'No incident matches.'));
+    fill('ir-note', `${r.incidents.length} recorded${rows.length < r.incidents.length ? `, ${rows.length} shown` : ''}`);
+  };
+  fill('ir-chips', [['all', 'All'], ['med', 'Medium and above']].map(([k, label]) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(k === irSev), onclick: (ev) => { irSev = k; for (const b of $('ir-chips').children) b.setAttribute('aria-pressed', String(b === ev.currentTarget)); drawIncidents(); } }, label)));
+  $('ir-q').addEventListener('input', drawIncidents);
+  drawIncidents();
+  fill('lessons', table(['Lesson', { t: 'Seen', cls: 'num' }, 'Guards', 'Rule'], r.lessons.map((l) => h('tr', null,
+    h('td', null, h('span', { class: 'mono', style: 'font-weight: 600' }, l.id), h('span', { class: 'sub' }, l.title)),
+    h('td', { class: 'num' }, String(l.times)),
+    h('td', null, l.guards.every((x) => x.ok) ? pill('good', `${l.guards.length} in place`) : pill('crit', `${l.guards.filter((x) => !x.ok).length} missing`)),
+    h('td', null, h('details', null, h('summary', null, l.rule.slice(0, 120) + (l.rule.length > 120 ? '…' : '')), h('p', { class: 'sub' }, l.seen), h('ul', { class: 'sub' }, l.guards.map((x) => h('li', null, `${x.file} › "${x.text}"`)))))))));
 
-  const w = r.areas.workload, q = r.areas.quality, g = r.areas.governance, e = r.economics;
-  const area = (title, sub, rows) => `<div class="area"><h3>${esc(title)}<small>${esc(sub)}</small></h3><dl class="kv">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl></div>`;
-  const share = (v) => (v === null ? '—' : v > 0 && v < 0.1 ? '<0.1%' : `${v}%`);
-  const tierRows = Object.entries(e.byTier).map(([k, v]) => [`${k[0].toUpperCase()}${k.slice(1)} tier, priced tokens`, `${usd(v)} (${share(v.share)})`]);
-  $('areas').innerHTML = [
-    area('Workload', '34.1', [['Open tasks', num(w.openTasks)], ['Blocked tasks', num(w.blockedTasks)], ['Open PRs', num(w.openPrs)], ['Incidents, last 7 days', num(w.incidents7d)], ['Security incidents', num(w.securityIncidents)], ['Failed test runs, last 7 days', num(w.failedTestRuns7d)]]),
-    area('Engineering quality', '34.3', [['First-pass task rate', pctv(q.firstPassRate)], ['Test runs passing', `${pctv(q.testPassRate)} of ${num(q.testRuns)}`], ['Lessons repeated', num(q.repeatedLessons)], ['Regressions (incidents)', num(q.regressions)], ['Rollback rate', pctv(q.rollbackRate)], ['PRs rejected', pctv(q.rejectionRate)], ['Review findings per reviewed PR', q.findingsPerPr ?? '—'], ['Over-engineering', 'not measured yet']]),
-    area('AI economics', '34.5', [['Spend', usd(e.spend)], ...tierRows, ['Sessions using the high tier', `${num(e.premiumSessions)} of ${num(e.meteredSessions)}`], ['Cache reads, share of input', pctv(e.cacheReadShare)], ['Saved by caching', usd(e.cacheSaved)], ['Cost per finished task', usd(e.perDoneTask)], ['Spend not on any task', usd(e.unassignedSpend)], ['Failed test runs', num(e.failedTestRuns)], ['Stop-loss / waste alerts', `${num(e.stopLossAlerts)} / ${num(e.wasteAlerts)}`]]),
-    area('Governance', '34.6', [['Merged with owner approval', num(g.approvals)], ['Merged without independent review', g.unreviewedMerged.length ? esc(g.unreviewedMerged.map((n) => `#${n}`).join(' ')) : '0'], ['Stop-loss triggers', num(g.stopLossTriggers)], ['Incidents that changed policy', num(g.policyUpdates)], ['Lesson guards missing', num(g.policyViolations)], ['High-risk sessions', num(g.highRiskSessions.length)], ['Audit completeness', pctv(g.auditCompleteness)], ['Logging gaps', num(g.loggingGaps.length)], ['AI-assisted commits', pctv(r.areas.aiShare)], ['Branches off the plan', r.branches ? num(r.branches.branches.filter((b) => b.cls === 'fork').length) : '—'], ['Branches justified only by a task', r.branches ? num(r.branches.branches.filter((b) => b.cls === 'task').length) : '—'], ['Default branch is the trunk', r.branches ? (r.branches.defaultBranch === r.branches.trunk ? 'yes' : 'no') : '—']]),
-  ].join('');
-
-  $('registry').innerHTML = r.registry.length ? `<table><thead><tr><th>Model</th><th>Tier</th><th class="num">Sessions</th><th class="num">Messages</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache read</th><th class="num">Cache write</th><th class="num">Cost</th><th class="num">Per session</th><th class="num">Tool failures*</th><th class="num">Tests passing*</th></tr></thead><tbody>${
-    r.registry.map((m) => `<tr><td class="mono">${esc(m.model)}</td><td>${esc(m.tier)}</td><td class="num">${num(m.sessions)}</td><td class="num">${num(m.messages)}</td><td class="num">${num(m.input)}</td><td class="num">${num(m.output)}</td><td class="num">${num(m.cacheRead)}</td><td class="num">${num(m.cacheWrite5m + m.cacheWrite1h)}</td><td class="num">${m.priced ? usd(m.cost) : 'no price'}</td><td class="num">${m.priced ? usd(m.costPerSession) : '—'}</td><td class="num">${pctv(m.toolFailureRate)}</td><td class="num">${pctv(m.testPassRate)}</td></tr>`).join('')}</tbody></table>`
-    : '<div class="empty">No token usage recorded yet. It is recorded when a session ends a turn.</div>';
-  $('pricing-note').innerHTML = `Prices: ${esc(e.pricing.source ?? 'not configured')}${e.pricing.asOf ? `, checked ${esc(e.pricing.asOf)}` : ''}. * In sessions this model led. Spend is Claude Code's own figure at its last checkpoint plus priced tokens since${e.partial ? '; some sessions have no checkpoint yet, so background calls (such as the permission classifier) are missing from them' : ''}.${e.currency ? ` RM at ${esc(e.currency.myrPerUsd)} per USD (${esc(e.currency.asOf ?? '')}).` : ' Set a rate in devlog/control-tower.json to show RM.'}`;
-
+  // -------------------------------------------------------------- governance
+  fill('g-kpis',
+    kpi('Merged with a review recorded', `${num(g.approvals - g.unreviewedMerged.length)} of ${num(g.approvals)}`, g.unreviewedMerged.length ? `Not recorded: #${g.unreviewedMerged.join(', #')}` : 'Every merge'),
+    kpi('Audit completeness', pctText(g.auditCompleteness), 'Committing sessions that were logged throughout'),
+    kpi('Owner decisions recorded', String(r.decisions.length), 'In the decisions register'),
+    kpi('Guards missing', String(g.policyViolations), 'Lesson guards no longer in their file'));
+  fill('decisions', table(['Decided', 'Decision', 'By', 'Reference', 'Recorded'], r.decisions.map((d) => h('tr', null,
+    h('td', { class: 'mono' }, d.on), h('td', null, d.title, h('span', { class: 'sub mono' }, d.id)), h('td', null, d.by ?? 'owner'), h('td', null, d.ref ?? '—'), h('td', { class: 'mono' }, when(d.ts)))), 'No decision recorded yet.'));
+  const it = r.health.integrity;
+  fill('in-state', healthPill(it.state));
+  const fileList = (title, list, tone) => (list.length ? h('details', null, h('summary', null, pill(tone, `${list.length}`), ` ${title}`), h('ul', { class: 'mono' }, list.map((f) => h('li', null, typeof f === 'string' ? f : `${f.file}${f.deleted ? ' (deleted)' : ''}, accepted by ${f.decision}`)))) : null);
+  fill('integrity', h('p', null, it.state === 'unavailable' ? 'Git history could not be read, so integrity is unknown.' : `${num(it.checked)} committed files checked${it.pending ? `, ${it.pending} not committed yet` : ''}.`),
+    fileList('changed after being committed, not accepted', it.changed, 'crit'), fileList('deleted after being committed, not accepted', it.deleted, 'crit'), fileList('earlier changes accepted by a recorded decision', it.accepted, 'warn'));
   const br = r.branches;
-  if (br) {
-    const forkCount = br.branches.filter((b) => b.cls === 'fork').length;
-    $('br-note').innerHTML = br.error ? `<span class="pill crit">not run</span> ${esc(br.error)}` : `Every branch should be part of the plan: named for a plan phase or carrying a PR titled with one. A branch justified only by a board task is marked <span class="pill warn">task</span> for you to confirm; anything else is a <span class="pill crit">fork</span>. ${esc(br.branches.length)} branches, ${esc(forkCount)} off the plan. Trunk <code>${esc(br.trunk)}</code>; GitHub's default branch <code>${esc(br.defaultBranch ?? 'unknown')}</code>${br.defaultBranch && br.defaultBranch !== br.trunk ? ' <span class="pill crit">should be the trunk</span>' : ''}. GitHub forks of the repository: ${num(br.forksCount)}${br.checkedAt ? ` (checked ${esc(when(br.checkedAt))})` : ''}. Branches as of the last fetch: ${esc(when(br.fetchedAt))}.`;
-    $('branches').innerHTML = `<table><thead><tr><th>Branch</th><th>In the plan</th><th class="num">Ahead</th><th class="num">Behind</th><th>Last commit</th><th>Flags</th></tr></thead><tbody>${
-      br.branches.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td><span class="pill ${b.cls === 'fork' ? 'crit' : b.cls === 'task' ? 'warn' : b.cls === 'trunk' ? '' : 'ok'}">${esc(b.cls)}</span>${b.plan ? `<span class="sub">${esc(b.plan)}</span>` : b.cls === 'fork' ? `<span class="sub">${esc(b.reasons.join('; '))}</span>` : ''}</td><td class="num">${b.ahead === null ? '?' : num(b.ahead)}</td><td class="num">${b.behind === null ? '?' : num(b.behind)}</td><td class="mono">${esc(when(b.last))}</td><td>${b.flags.map((f) => `<span class="pill ${/default|no commit|no open PR/.test(f) ? 'warn' : ''}">${esc(f)}</span>`).join(' ')}</td></tr>`).join('')}</tbody></table>`;
-    $('forks').innerHTML = br.forks.length ? br.forks.map((f) => `<div class="tablebox" style="margin-top:12px"><table><thead><tr><th colspan="3">Fork <a href="${safeUrl(f.url)}">${esc(f.fullName)}</a></th></tr></thead><tbody>${
-      f.branches.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td class="mono">${esc(b.sha)}</td><td>${b.inSync ? 'on a branch of this repository' : '<span class="pill warn">has commits on no branch of this repository</span>'}</td></tr>`).join('')}</tbody></table></div>`).join('')
-      : `<p class="note" style="margin-top:8px">${br.uninspectedForks ? `${esc(br.uninspectedForks)} fork(s) exist but have not been inspected.` : 'No GitHub forks to inspect.'}</p>`;
-  }
+  fill('br-note', br.error ? br.error : `Default branch ${br.defaultBranch ?? 'unknown'} · ${br.forksCount ?? 0} forks · fetched ${when(br.fetchedAt)}`);
+  const CLS = { trunk: ['good', 'Trunk'], plan: ['good', 'Plan'], task: ['warn', 'Task only'], fork: ['crit', 'Not in the plan'] };
+  fill('branches', table(['Branch', 'Class', { t: 'Ahead', cls: 'num' }, { t: 'Behind', cls: 'num' }, 'Last commit', 'Flags'], br.branches.map((b) => h('tr', null,
+    h('td', null, h('span', { class: 'mono' }, b.name), b.plan ? h('span', { class: 'sub' }, b.plan) : null), h('td', null, pill(...(CLS[b.cls] ?? CLS.fork))),
+    h('td', { class: 'num' }, b.ahead ?? '—'), h('td', { class: 'num' }, b.behind ?? '—'), h('td', { class: 'mono' }, day(b.last)), h('td', null, b.flags.join('; ') || '—')))));
+  const bud = r.budgets;
+  fill('budgets', `Budgets: ${bud.maxFailedTestRunsInARow ?? '—'} failed test runs in a row, the same command failing ${bud.maxSameCommandFailures ?? '—'} times, ${bud.maxEditsToOneFile ?? '—'} edits to one file without a passing check, ${bud.maxTaskAttempts ?? '—'} attempts at a task, ${bud.maxSessionCostUSD ? fmtMoney(bud.maxSessionCostUSD) : '—'} a session.`);
+  fill('alerts', table(['When', 'Kind', 'Rule', 'Session'], r.alerts.map((a) => h('tr', null, h('td', { class: 'mono' }, when(a.ts)), h('td', null, a.kind === 'stop-loss' ? pill('crit', 'Stop-loss') : pill('warn', 'Wasted effort')), h('td', null, a.rule ?? ''), h('td', { class: 'mono' }, short(a.session)))), 'No alert recorded.'));
+  fill('sessions', table(['Session', 'Active', { t: 'Commits', cls: 'num' }, { t: 'Actions', cls: 'num' }, { t: 'Failed', cls: 'num' }, { t: 'Tests', cls: 'num' }, 'Models', { t: 'Cost', cls: 'num' }], r.sessions.map((x) => h('tr', null,
+    h('td', null, link(x.url, short(x.id))), h('td', { class: 'mono' }, `${when(x.first)} to ${when(x.last)}`), h('td', { class: 'num' }, num(x.commits)), h('td', { class: 'num' }, num(x.tools)), h('td', { class: 'num' }, num(x.failures)),
+    h('td', { class: 'num' }, `${x.tests - x.testsFailed}/${x.tests}`), h('td', null, Object.keys(x.models).map((m) => m.replace('claude-', '')).join(', ') || '—'), h('td', { class: 'num' }, x.metered ? fmtMoney(x.cost.usd) : 'Not metered')))));
+  fill('commits', table(['When', 'Commit', 'Subject', 'Session'], r.commits.map((c) => h('tr', null, h('td', { class: 'mono' }, when(c.date)), h('td', { class: 'mono' }, c.sha), h('td', null, c.subject), h('td', { class: 'mono' }, c.session ? short(c.session) : '—')))));
 
-  $('incidents').innerHTML = r.incidents.length ? `<table><thead><tr><th>Incident</th><th>Type</th><th>What happened</th><th>Detected by</th><th>Action</th><th>Lesson</th><th>Guard</th></tr></thead><tbody>${
-    r.incidents.map((i) => `<tr><td class="mono">${esc(i.id)}<span class="sub">${esc(day(i.ts))}${i.task ? ` · ${esc(i.task)}` : ''}</span></td><td><span class="pill ${i.severity === 'high' ? 'crit' : i.severity === 'medium' ? 'warn' : ''}">${esc(i.type.replace('_', ' '))}</span></td><td>${esc(i.title)}${i.impact ? `<span class="sub">${esc(i.impact)}</span>` : ''}</td><td>${esc(i.detectedBy ?? '—')}</td><td>${esc(i.action ?? '—')}</td><td>${i.lesson ? `<b class="mono">${esc(i.lesson)}</b><span class="sub">${esc(i.lessonTitle ?? '')}</span>` : '—'}</td><td>${i.guarded === null ? '—' : i.guarded ? '<span class="pill ok">in place</span>' : '<span class="pill crit">missing</span>'}</td></tr>`).join('')}</tbody></table>`
-    : '<div class="empty">No incidents recorded.</div>';
+  fill('foot', `Built from git, devlog/ and the activity spool, with no model call. Repository ${r.repo}. Every figure on this page comes from those records; nothing is typed in.`);
+}
 
-  const b = r.budgets;
-  $('budgets').innerHTML = `Budgets: ${esc(b.maxFailedTestRunsInARow ?? '—')} failed test runs in a row, ${esc(b.maxSameCommandFailures ?? '—')} failures of one command, ${esc(b.maxEditsToOneFile ?? '—')} edits to one file, ${esc(b.maxTaskAttempts ?? '—')} attempts per task, $${esc(b.maxSessionCostUSD ?? '—')} per session. When one is reached the session is told to stop, summarise and escalate.`;
-  $('alerts').innerHTML = r.alerts.length ? `<table><thead><tr><th>When</th><th>Session</th><th>Kind</th><th>Rule</th><th>On</th></tr></thead><tbody>${
-    r.alerts.map((a) => `<tr><td class="mono">${esc(when(a.ts))}</td><td>${sessionLink(a.session, null)}</td><td><span class="pill ${a.kind === 'stop-loss' ? 'crit' : 'warn'}">${esc(a.kind)}</span></td><td>${esc(a.rule)}</td><td>${esc(a.key)}</td></tr>`).join('')}</tbody></table>`
-    : '<div class="empty">No budget has been reached.</div>';
-
-  $('performance').innerHTML = r.areas.performance.length ? `<table><thead><tr><th>Session</th><th>Last active</th><th class="num">Commits</th><th class="num">Tasks done</th><th class="num">Time</th><th class="num">Files reworked</th><th class="num">Test runs (failed)</th><th class="num">Failed actions</th><th class="num">Cost</th></tr></thead><tbody>${
-    r.areas.performance.map((p) => `<tr><td>${sessionLink(p.session, p.url)}</td><td class="mono">${esc(when(p.last))}</td><td class="num">${num(p.outcomes)}</td><td class="num">${num(p.tasksDone)}</td><td class="num">${mins(p.touchMinutes)}</td><td class="num">${num(p.rework)}</td><td class="num">${num(p.tests)} (${num(p.testsFailed)})</td><td class="num">${num(p.failures)}</td><td class="num">${usd(p.cost)}</td></tr>`).join('')}</tbody></table>`
-    : '<div class="empty">No sessions recorded yet.</div>';
-
-  const maxF = Math.max(1, ...r.prs.map((p) => p.findings.length));
-  $('prs').innerHTML = r.prs.length ? r.prs.slice().reverse().map((p) => {
-    const c = { h: 0, m: 0, l: 0 }; p.findings.forEach((f) => c[tier(f.severity)]++);
-    const w = (n) => `${(n / maxF) * 100}%`;
-    const fixed = p.findings.filter((f) => f.fixed).length;
-    return `<div class="pr"><span class="n">#${p.number}</span>
-      <div class="t"><a href="${safeUrl(p.url)}">${esc(p.title)}</a><small>${p.merged ? `Merged ${esc(day(p.merged))}` : esc(p.state)}${p.lessons.length ? ` · ${esc(p.lessons.join(', '))}` : ''}</small></div>
-      <div class="bars">${p.findings.length ? `<div class="bar" role="img" aria-label="${c.h} high, ${c.m} medium, ${c.l} low findings"><span class="h" style="width:${w(c.h)}"></span><span class="m" style="width:${w(c.m)}"></span><span class="l" style="width:${w(c.l)}"></span></div>
-        <small class="muted mono">${p.findings.length} findings · ${fixed} fixed</small>` : '<small class="muted">No review table</small>'}</div></div>`;
-  }).join('') : '<div class="empty">No pull request data in this report. Run /control-tower to include it.</div>';
-
-  $('sessions').innerHTML = r.sessions.length ? `<table><thead><tr><th>Session</th><th>Last active</th><th class="num">Commits</th><th class="num">Actions</th><th class="num">Failed</th><th class="num">Files edited</th></tr></thead><tbody>${
-    r.sessions.map((s) => `<tr><td>${s.url ? `<a class="mono" href="${safeUrl(s.url)}">${esc(s.id.slice(-8))}</a>` : `<span class="mono">${esc(s.id.slice(-8))}</span>`}</td><td class="mono">${esc(when(s.last))}</td><td class="num">${s.commits}</td><td class="num">${s.tools}</td><td class="num">${s.failures}</td><td class="num">${s.filesEdited}</td></tr>`).join('')}</tbody></table>`
-    : '<div class="empty">No sessions recorded yet.</div>';
-
-  $('failures').innerHTML = r.failures.length ? `<table><thead><tr><th>When</th><th>Action</th><th>Failure</th></tr></thead><tbody>${
-    r.failures.map((f) => `<tr><td class="mono">${esc(when(f.ts))}</td><td>${esc(f.tool)}: ${esc(f.target)}</td><td>${esc(f.failure ?? f.error)}</td></tr>`).join('')}</tbody></table>`
-    : '<div class="empty">No failed actions logged. Logging started on 2026-10-09; earlier sessions are covered by their commits and PRs only.</div>';
-
-  $('commits').innerHTML = `<table><thead><tr><th>Date</th><th>Commit</th><th>What changed</th></tr></thead><tbody>${
-    r.commits.map((c) => `<tr><td class="mono">${esc(day(c.date))}</td><td class="mono"><a href="https://github.com/${esc(r.repo)}/commit/${esc(c.sha)}">${esc(c.sha)}</a></td><td>${esc(c.subject)}</td></tr>`).join('')}</tbody></table>`;
-
-  $('foot').textContent = 'A snapshot, regenerated each time /control-tower runs. Modelled on the Control Tower in skchiew-bot/d3ngineering. Sources: git history, devlog/activity, devlog/lessons.md, devlog/control-tower.json and the repository\'s pull requests.';
+// ------------------------------------------------------------------ playback
+const KINDS = { prompt: 'Owner message', tool: 'Action', test: 'Test run', typecheck: 'Typecheck', build: 'Build', commit: 'Commit', push: 'Push', integrate: 'Merge or rebase', install: 'Install', merge: 'PR merged', task: 'Board', incident: 'Incident', decision: 'Decision', alert: 'Alert', agent: 'Helper agent', usage: 'Cost', start: 'Session start', end: 'Session end' };
+const GROUPS = [['all', 'All', null], ['owner', 'Owner messages', ['prompt']], ['work', 'Actions', ['tool', 'install', 'agent']], ['checks', 'Tests and checks', ['test', 'typecheck', 'build']], ['git', 'Commits and merges', ['commit', 'push', 'integrate', 'merge']], ['records', 'Board, incidents and decisions', ['task', 'incident', 'decision', 'alert']]];
+function playback(r) {
+  const tl = r.timeline; const ss = r.timelineSessions;
+  const state = { scope: 'session', pick: null, group: 'all', list: [], pos: 0, timer: null };
+  const options = () => {
+    if (state.scope === 'session') {
+      return ss.filter((s) => s.first).sort((a, b) => b.last.localeCompare(a.last)).map((s) => [s.id, `${short(s.id)} · ${when(s.first)} to ${when(s.last)}`]);
+    }
+    if (state.scope === 'task') return r.board.map((x) => [x.id, `${x.id} · ${x.title ?? ''}`]);
+    return [...new Set(tl.map((x) => x.ts.slice(0, 10)))].sort().reverse().map((d) => [d, d]);
+  };
+  const select = () => {
+    const sidx = new Map(ss.map((s, i) => [s.id, i]));
+    let list;
+    if (state.scope === 'session') { const i = sidx.get(state.pick); list = tl.filter((x) => x.s === i); }
+    else if (state.scope === 'day') list = tl.filter((x) => x.ts.startsWith(state.pick));
+    else {
+      const task = r.board.find((x) => x.id === state.pick);
+      const sessions = new Set((task?.sessions ?? []).map((id) => sidx.get(id)));
+      const from = task?.started ?? ''; const to = task?.finished ?? '9999';
+      list = tl.filter((x) => x.t === state.pick || (sessions.has(x.s) && x.ts >= from && x.ts <= to));
+    }
+    const g = GROUPS.find(([k]) => k === state.group)?.[2];
+    state.list = g ? list.filter((x) => g.includes(x.k)) : list;
+    state.pos = 0;
+    stop(); draw();
+  };
+  const tone = (x) => (x.ok === false ? 'crit' : x.k === 'incident' || x.k === 'alert' ? 'warn' : x.k === 'decision' || x.k === 'merge' ? 'good' : 'active');
+  const draw = () => {
+    const n = state.list.length; const x = state.list[state.pos];
+    $('pb-pos').max = String(Math.max(0, n - 1)); $('pb-pos').value = String(state.pos);
+    for (const id of ['pb-first', 'pb-back']) $(id).disabled = state.pos <= 0;
+    for (const id of ['pb-next', 'pb-last', 'pb-play']) $(id).disabled = state.pos >= n - 1 && !state.timer;
+    const sess = x && x.s >= 0 ? ss[x.s] : null;
+    fill('pb-now', x ? [
+      h('div', { class: 'row', style: 'justify-content: space-between' }, h('span', { class: 'row' }, pill(tone(x), KINDS[x.k] ?? x.k), x.ok === false ? pill('crit', `Failed${x.f ? `: ${x.f}` : ''}`) : null), h('span', { class: 'mono' }, `Step ${state.pos + 1} of ${n} · ${x.ts.slice(0, 19).replace('T', ' ')} UTC`)),
+      h('div', { style: 'font-size: 17px; overflow-wrap: anywhere' }, x.d),
+      h('div', { class: 'sub' }, sess ? ['Session ', link(sess.url, short(sess.id))] : 'Repository event'),
+    ] : h('p', { class: 'sub' }, 'Nothing recorded for this choice.'));
+    const upto = state.list.slice(0, state.pos + 1);
+    const count = (f) => upto.filter(f).length;
+    const tally = (k, v) => h('div', { class: 'card kpi' }, h('span', { class: 'k' }, k), h('span', { class: 'v' }, v));
+    fill('pb-tally', tally('Actions so far', num(count((y) => ['tool', 'test', 'typecheck', 'build', 'commit', 'push', 'integrate', 'install'].includes(y.k) && y.ok !== undefined))),
+      tally('Failed', num(count((y) => y.ok === false))), tally('Test runs passed', `${num(count((y) => y.k === 'test' && y.ok))} of ${num(count((y) => y.k === 'test'))}`),
+      tally('Commits', num(count((y) => y.k === 'commit'))));
+    // Show the steps around the current one, so a long session stays quick to draw.
+    const from = Math.max(0, state.pos - 150); const to = Math.min(n, state.pos + 150);
+    fill('pb-steps', state.list.slice(from, to).map((y, j) => h('button', { type: 'button', role: 'listitem', 'aria-current': from + j === state.pos ? 'step' : null, onclick: () => { stop(); state.pos = from + j; draw(); } },
+      h('span', { class: 'mono t' }, y.ts.slice(5, 19).replace('T', ' ')), h('span', { class: 'k' }, KINDS[y.k] ?? y.k), h('span', { class: 'd' }, y.d), y.ok === false ? pill('crit', 'Failed') : h('span'))));
+    $('pb-steps').querySelector('[aria-current="step"]')?.scrollIntoView({ block: 'nearest' });
+  };
+  const stop = () => { if (state.timer) clearInterval(state.timer); state.timer = null; $('pb-play').textContent = 'Play'; };
+  const play = () => {
+    if (state.timer) { stop(); draw(); return; }
+    if (state.pos >= state.list.length - 1) state.pos = 0;
+    $('pb-play').textContent = 'Pause';
+    state.timer = setInterval(() => { if (state.pos >= state.list.length - 1) { stop(); draw(); return; } state.pos++; draw(); }, 1000 / Number($('pb-speed').value));
+  };
+  const repick = () => { fill('pb-pick', options().map(([v, label]) => h('option', { value: v }, label))); state.pick = $('pb-pick').value; select(); };
+  $('pb-scope').addEventListener('change', () => { state.scope = $('pb-scope').value; repick(); });
+  $('pb-pick').addEventListener('change', () => { state.pick = $('pb-pick').value; select(); });
+  $('pb-speed').addEventListener('change', () => { if (state.timer) { stop(); play(); } });
+  $('pb-pos').addEventListener('input', () => { stop(); state.pos = Number($('pb-pos').value); draw(); });
+  $('pb-first').addEventListener('click', () => { stop(); state.pos = 0; draw(); });
+  $('pb-back').addEventListener('click', () => { stop(); state.pos = Math.max(0, state.pos - 1); draw(); });
+  $('pb-next').addEventListener('click', () => { stop(); state.pos = Math.min(state.list.length - 1, state.pos + 1); draw(); });
+  $('pb-last').addEventListener('click', () => { stop(); state.pos = Math.max(0, state.list.length - 1); draw(); });
+  $('pb-play').addEventListener('click', play);
+  fill('pb-kinds', GROUPS.map(([k, label]) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(k === state.group), onclick: (ev) => { state.group = k; for (const b of $('pb-kinds').children) b.setAttribute('aria-pressed', String(b === ev.currentTarget)); select(); } }, label)));
+  repick();
 }
 
 if (REPORT) render(REPORT);
-else $('app').insertAdjacentHTML('beforeend', '<p class="muted">This is the template. Generate the dashboard with: node scripts/devlog-report.mjs --html out.html</p>');
+else document.getElementById('app').append(h('p', { class: 'card' }, 'No report embedded. Build this page with node scripts/devlog-report.mjs --html <file>.'));
 </script>

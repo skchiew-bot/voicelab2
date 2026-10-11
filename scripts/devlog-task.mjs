@@ -8,6 +8,8 @@
 //   node scripts/devlog-task.mjs done   <id> [--pr N]
 //   node scripts/devlog-task.mjs incident --type … --title "…" [--severity high|medium|low] [--impact "…"]
 //                                         [--detected-by "…"] [--action "…"] [--lesson L-NNN] [--policy-updated yes|no] [--task <id>]
+//   node scripts/devlog-task.mjs decision --title "…" [--on YYYY-MM-DD] [--by owner] [--ref "#46"] [--task <id>]
+//                                         (an owner decision, kept in an append-only register beside the incidents)
 //   node scripts/devlog-task.mjs board     (prints the current board)
 //
 // Each command appends an event to this session's spool, like the activity hook, so the board
@@ -98,7 +100,21 @@ export function eventFor(argv, now = new Date(), env = process.env) {
       task: opts.task,
     });
   }
-  throw new UsageError('Commands: start, update, done, incident, board.');
+  if (command === 'decision') {
+    known(['title', 'on', 'by', 'ref', 'task']);
+    if (!opts.title) throw new UsageError('decision needs --title.');
+    if (opts.task !== undefined && !ID.test(opts.task)) throw new UsageError('--task is not a valid task id.');
+    // The day the decision was made, which can be earlier than the day it is recorded; never in the future.
+    const on = opts.on ?? base.ts.slice(0, 10);
+    if (!/^\d{4}-\d\d-\d\d$/.test(on) || Number.isNaN(new Date(`${on}T00:00:00Z`).getTime()) || new Date(`${on}T00:00:00Z`).toISOString().slice(0, 10) !== on) throw new UsageError('--on must be a real date, like 2026-10-11.');
+    if (on > base.ts.slice(0, 10)) throw new UsageError('--on cannot be after today.');
+    const day = base.ts.slice(0, 10).replace(/-/g, '');
+    return strip({
+      ...base, event: 'Decision', id: `DEC-${day}-${randomBytes(2).toString('hex')}`,
+      title: text(opts.title, 200), on, by: text(opts.by ?? 'owner', 60), ref: text(opts.ref, 80), task: opts.task,
+    });
+  }
+  throw new UsageError('Commands: start, update, done, incident, decision, board.');
 }
 
 function append(event) {
@@ -126,7 +142,7 @@ if (invoked && invoked === pathToFileURL(realpathSync(fileURLToPath(import.meta.
         if (had?.title && !sameWork(had.title, event.title)) throw new UsageError(`${event.id} is already "${had.title}". Choose a new id.`);
       }
       append(event);
-      console.log(event.event === 'Incident' ? `Recorded ${event.id}.` : `Task ${event.id}: ${event.action} recorded.`);
+      console.log(event.event === 'Task' ? `Task ${event.id}: ${event.action} recorded.` : `Recorded ${event.id}.`);
       const max = readConfig().stopLoss?.maxTaskAttempts;
       if (event.event === 'Task' && max && event.attempt > max) {
         // One alert per task and attempt, however often the attempt is updated.

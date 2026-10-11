@@ -483,3 +483,9 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** Treat any number or id chosen on a branch (lesson, migration, board task) as provisional: before choosing, look at the open branches (`git ls-tree origin/<branch>`) and take one none of them uses; on merging, renumber whatever the trunk took first and record a correction. A board task id belongs to one piece of work for good: the task CLI refuses an id this branch already has for other work (it cannot see other unmerged branches), and the dev Control Tower flags any id that branches have started for two pieces of work once they meet, even after it is done.
 - **Guards:**
   - `tests/devlog.test.ts` › "flags a task id started for two pieces of work, and refuses to start a known id for something else"
+
+### L-054: Check an append-only record against what was first committed
+- **Seen:** Eight files in `devlog/activity/`, an append-only log, no longer held what was first committed: one was edited on purpose to point an incident at another lesson (`6150d67`), and seven were rewritten while merge conflicts were resolved on 10 Oct. Nothing checked it, so the record could change with no one told (found by the new integrity check, DCT-11, 2026-10-11).
+- **Rule:** An append-only record is checked, not trusted: compare each file with the content of the commit that first added it, so an edit made directly, in a merge or not yet committed is caught, and show any difference as a failure. A correction is a new file. An earlier change counts as accepted only when a recorded decision accepts that exact content, and stays listed as accepted.
+- **Guards:**
+  - `tests/devlog.test.ts` › "flags an activity file changed or deleted after it was committed, accepts a change only at the exact content a recorded decision accepted, and is unavailable without git"

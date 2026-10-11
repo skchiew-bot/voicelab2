@@ -86,5 +86,9 @@
     "trunk": "main",
     "phasePattern": "^claude/phase-([0-9a-z]+)-",
     "staleDays": 7
+  },
+  "costEstimate": {
+    "_about": "The saving from model routing is estimated as what the same tokens would have cost on this model (ADR-0013 section 4.4). An estimate, not billed cost.",
+    "baselineModel": "claude-opus-5-5"
   }
 }

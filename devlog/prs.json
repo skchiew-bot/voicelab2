@@ -1828,10 +1828,10 @@
   {
     "number": 44,
     "title": "Phase 4: draw provider funding down as calls are costed",
-    "state": "open",
+    "state": "closed",
     "html_url": "https://github.com/skchiew-bot/voicelab2/pull/44",
     "created_at": "2026-10-11T00:14:54Z",
-    "merged_at": null,
+    "merged_at": "2026-10-11T02:24:26Z",
     "findings": [
       {
         "severity": "Med",
@@ -1939,7 +1939,7 @@
   {
     "number": 47,
     "title": "Phase 3: a workflow captures the callback time a caller asks for",
-    "state": "open",
+    "state": "closed",
     "html_url": "https://github.com/skchiew-bot/voicelab2/pull/47",
     "created_at": "2026-10-11T00:33:25Z",
     "merged_at": null,
@@ -1986,7 +1986,7 @@
       }
     ],
     "head": "claude/phase-3-callback-time",
-    "head_sha": "b802f37b98d2c365a53b29c3eb9a2a5ef25575f2"
+    "head_sha": "933dd7a7981de11c7e707070d55f93656642af82"
   },
   {
     "number": 48,
@@ -2066,11 +2066,11 @@
   },
   {
     "number": 50,
-    "title": "Phase 1: complete call cost records with speech relay and model usage",
-    "state": "open",
+    "title": "Phases 1 and 4: complete call cost records (speech relay, model tokens), with funding drawn down as calls are costed (#44)",
+    "state": "closed",
     "html_url": "https://github.com/skchiew-bot/voicelab2/pull/50",
     "created_at": "2026-10-11T00:43:55Z",
-    "merged_at": null,
+    "merged_at": "2026-10-11T02:24:25Z",
     "findings": [
       {
         "severity": "High",
@@ -2103,10 +2103,50 @@
       {
         "severity": "Low",
         "fixed": true
+      },
+      {
+        "severity": "High",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": false
+      },
+      {
+        "severity": "Medium",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": true
       }
     ],
     "head": "claude/phase-1-voice-model-costs",
-    "head_sha": "449b0172c953de464d75ab094bd42931df210d64"
+    "head_sha": "19f614cdfb43c576576dee862e416e5d52e9338b"
   },
   {
     "number": 51,
@@ -2199,5 +2239,293 @@
     ],
     "head": "claude/phase-4-queue-to-workflow",
     "head_sha": "add1075281f47d3b03e1ea6e9fa713f2f7d0f182"
+  },
+  {
+    "number": 53,
+    "title": "DCT-6: Keep the branch audit tests clear of the machine's git config and load",
+    "state": "open",
+    "html_url": "https://github.com/skchiew-bot/voicelab2/pull/53",
+    "created_at": "2026-10-11T01:11:39Z",
+    "merged_at": null,
+    "findings": [
+      {
+        "severity": "Unrated",
+        "fixed": false
+      },
+      {
+        "severity": "Unrated",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": false
+      },
+      {
+        "severity": "Unrated",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": false
+      }
+    ],
+    "head": "claude/dct-6-branch-audit-timeout",
+    "head_sha": "4d07b4128743e16c52091c18e46059c232bedb97"
+  },
+  {
+    "number": 54,
+    "title": "Phase 7: a workflow records a promise to pay from the call",
+    "state": "open",
+    "html_url": "https://github.com/skchiew-bot/voicelab2/pull/54",
+    "created_at": "2026-10-11T01:21:02Z",
+    "merged_at": null,
+    "findings": [
+      {
+        "severity": "High",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Unrated",
+        "fixed": false
+      },
+      {
+        "severity": "Unrated",
+        "fixed": false
+      },
+      {
+        "severity": "Unrated",
+        "fixed": false
+      },
+      {
+        "severity": "Medium",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": false
+      },
+      {
+        "severity": "Low",
+        "fixed": false
+      }
+    ],
+    "head": "claude/phase-7-workflow-promises",
+    "head_sha": "b26129a0facd3c37aab6564c260e302caa5186aa"
+  },
+  {
+    "number": 55,
+    "title": "Phase 1: price a live call's voice usage (speech characters, model tokens) in its cost record",
+    "state": "open",
+    "html_url": "https://github.com/skchiew-bot/voicelab2/pull/55",
+    "created_at": "2026-10-11T01:30:03Z",
+    "merged_at": null,
+    "findings": [
+      {
+        "severity": "High",
+        "fixed": true
+      },
+      {
+        "severity": "Medium",
+        "fixed": true
+      },
+      {
+        "severity": "Medium",
+        "fixed": true
+      },
+      {
+        "severity": "Medium",
+        "fixed": true
+      },
+      {
+        "severity": "Low–medium",
+        "fixed": true
+      },
+      {
+        "severity": "Low–medium",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": false
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Cosmetic",
+        "fixed": true
+      }
+    ],
+    "head": "claude/phase-1-voice-usage-cost",
+    "head_sha": "595ca76d149b03dcef39625cdf6ed14b4743040c"
+  },
+  {
+    "number": 56,
+    "title": "Phase 5: production only through an approved change, except for the owner's named deployers",
+    "state": "open",
+    "html_url": "https://github.com/skchiew-bot/voicelab2/pull/56",
+    "created_at": "2026-10-11T01:55:38Z",
+    "merged_at": null,
+    "findings": [
+      {
+        "severity": "High",
+        "fixed": true
+      },
+      {
+        "severity": "Medium",
+        "fixed": false
+      },
+      {
+        "severity": "Medium",
+        "fixed": false
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Info",
+        "fixed": false
+      },
+      {
+        "severity": "Info",
+        "fixed": true
+      }
+    ],
+    "head": "claude/phase-5-production-approval",
+    "head_sha": "0dd2750e1bbc7f1ccb6510e4b871a736e2b51f7a"
+  },
+  {
+    "number": 57,
+    "title": "Control Tower: ask a reason for every settings change made on other screens",
+    "state": "open",
+    "html_url": "https://github.com/skchiew-bot/voicelab2/pull/57",
+    "created_at": "2026-10-11T02:01:38Z",
+    "merged_at": null,
+    "findings": [
+      {
+        "severity": "High",
+        "fixed": true
+      },
+      {
+        "severity": "Medium",
+        "fixed": true
+      },
+      {
+        "severity": "Medium",
+        "fixed": true
+      },
+      {
+        "severity": "Low to medium",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": false
+      },
+      {
+        "severity": "Low",
+        "fixed": false
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": false
+      }
+    ],
+    "head": "claude/phase-ct-settings-reasons",
+    "head_sha": "7af4297e162be052b8b216b7509b8f9fc9a48b9b"
+  },
+  {
+    "number": 58,
+    "title": "Control Tower: clusters close to the promotion threshold on the learning panel",
+    "state": "open",
+    "html_url": "https://github.com/skchiew-bot/voicelab2/pull/58",
+    "created_at": "2026-10-11T02:28:24Z",
+    "merged_at": null,
+    "findings": [
+      {
+        "severity": "Medium",
+        "fixed": true
+      },
+      {
+        "severity": "Medium",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      },
+      {
+        "severity": "Low",
+        "fixed": true
+      }
+    ],
+    "head": "claude/phase-ct-learning-near",
+    "head_sha": "27ef0d89b1f9cd8ccf430d464052f010b3e68ad9"
   }
 ]

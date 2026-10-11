@@ -150,6 +150,17 @@ describe('a call\'s cost record holds everything the call used', () => {
     const manual = await post(`/internal/calls/${call.id}/cost`, { tenantId: (await env.pool.query('SELECT tenant_id FROM calls WHERE id = $1', [call.id])).rows[0].tenant_id, direction: 'inbound', occurredAt: call.started.toISOString(), usage: [{ providerId: twilioId, usage: { seconds: 180 } }] });
     expect(manual.statusCode).toBe(409);
     expect(manual.json().error).toContain('re-price');
+    // the same for a relay call whose workflow never got as far as a run (its start died), before it is costed, and for a
+    // call still under way: nothing is recorded, so its own records still price it
+    const died = await finishedCall(60, twilioId, 0);
+    await event(died.id, 'relay.connected', died.started);
+    const tenant = (await env.pool.query('SELECT tenant_id FROM calls WHERE id = $1', [died.id])).rows[0].tenant_id;
+    const byHand = (id: string) => post(`/internal/calls/${id}/cost`, { tenantId: tenant, direction: 'inbound', occurredAt: died.started.toISOString(), usage: [{ providerId: twilioId, usage: { seconds: 60 } }] });
+    expect((await byHand(died.id)).statusCode).toBe(409);
+    await env.pool.query('UPDATE calls SET ended_at = NULL WHERE id = $1', [died.id]);
+    const open = await byHand(died.id);
+    expect(open.statusCode).toBe(409); expect(open.json().error).toContain('not ended');
+    expect((await env.pool.query('SELECT count(*)::int AS n FROM call_costs WHERE call_id = $1', [died.id])).rows[0].n).toBe(0);
     expect(await credits(call.id)).toEqual([{ credits: '-3.0000' }]);           // 3 inbound minutes: the relay draws none
   });
 

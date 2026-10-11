@@ -767,6 +767,12 @@ describe('a live call through the speech relay', () => {
     const said = (await env.pool.query(`SELECT payload FROM call_events WHERE call_id = $1 AND type = 'relay.holding_message'`, [callId])).rows;
     expect(said).toEqual([{ payload: { synthChars: String(got[0]!.token).length } }]);
     line.ws.close(); await line.closed;
+    // a line that has already gone hears no holding message, so none is recorded as speech; the callback request still is
+    const gone = await ring();
+    const tenant = (await env.pool.query('SELECT tenant_id FROM calls WHERE id = $1', [gone.callId])).rows[0].tenant_id;
+    await failed(relayDeps(), { providerId: twilioId, callId: gone.callId, tenantId: tenant, projectId: null, runId: null, version: 0, ended: false, owner: 'x', closed: true });
+    expect(await callbacks(gone.callId)).toBe(1);
+    expect((await env.pool.query(`SELECT type FROM call_events WHERE call_id = $1 AND type IN ('relay.fallback', 'relay.holding_message')`, [gone.callId])).rows).toEqual([{ type: 'relay.fallback' }]);
   });
 
   it('accepts the signature on the https form of the address too, as the scheme Twilio signs is not yet confirmed', async () => {

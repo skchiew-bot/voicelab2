@@ -451,7 +451,8 @@ describe('what the independent review found', () => {
     await must(callbackAt(a.id, T)); await must(callbackAt(b.id, T));
     const before = dials().length;
     const batch = await dispatchDue(deps, mins(T, 1));
-    expect(dials().length - before).toBe(1);                                                                      // two cases, one person: one call
+    // Counted for this person only: another test's case may be due in the same batch, depending on the time of day (L-037).
+    expect(dials().slice(before).filter((d) => String(d.body).includes(phone2)).length).toBe(1);                // two cases, one person: one call
     expect(batch.deferred).toHaveLength(1);
     await setPolicy({});
   });

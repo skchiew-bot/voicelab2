@@ -14,7 +14,7 @@ import { chooseDid, didLockedFor } from './dids.js';
 import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.js';
 import { recordCallEnd } from './call-end.js';
 import { caseCallEnded, recogniseInbound, safely } from './cases.js';
-import { settleTransferOnEnd } from './transfer.js';
+import { cancelCallbacksIfServed, settleTransferOnEnd } from './transfer.js';
 import { recordEvent } from './events.js';
 import { healthMap, logFailover, recordSample } from './resilience.js';
 import { dialPace, drainedSet, routingHealth } from './control-actions.js';
@@ -437,6 +437,7 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
       await log('call.ended', { status, reason: ev.endReason ?? 'completed', durationSeconds: seconds });
       await recordCallEnd(c, call, { endReason: ev.endReason, occurredAt: ev.occurredAt, answered });
       await settleTransferOnEnd(c, call.id);
+      await cancelCallbacksIfServed(c, call.id);
       const ended = call;
       await safely(c, 'case_call_ended', () => caseCallEnded(c, { id: ended.id, started_at: ended.started_at, answered_at: ended.answered_at, duration_seconds: seconds }, ev.endReason));
       await costCall(c, null, call.id);

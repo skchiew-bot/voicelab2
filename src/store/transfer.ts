@@ -20,7 +20,7 @@ import { isFull, providerLoad } from './concurrency.js';
 import { normalizeE164 } from './dnc.js';
 import { recordEvent } from './events.js';
 import { addCallbackRequest, getFallbackPlan } from './resilience.js';
-import { scheduleTransferCallback } from './cases.js';
+import { cancelTransferCallbacks, scheduleTransferCallback } from './cases.js';
 
 export interface TransferDeps { pool: pg.Pool; baseUrl: string }
 export interface TransferSettings { agentNumber: string; ringSeconds: number; whisper: boolean }
@@ -331,6 +331,25 @@ async function costIfEnded(c: pg.PoolClient, callId: string) {
   await c.query('SAVEPOINT transfer_cost');
   try { await costCall(c, null, callId); await c.query('RELEASE SAVEPOINT transfer_cost'); }
   catch { await c.query('ROLLBACK TO SAVEPOINT transfer_cost'); await audit(c, null, 'transfer.cost_failed', 'call', callId, {}); }
+}
+
+/**
+ * A call on a case has ended with the caller served: answered, never fallen back, its conversation finished (or put
+ * through to a person), and not itself left waiting for a person. Any callback still waiting from an earlier hang-up is
+ * then cancelled. Runs at the call's end, under the call's lock; a failure here never takes the call's end down.
+ */
+export async function cancelCallbacksIfServed(c: pg.PoolClient, callId: string) {
+  const served = (await c.query(
+    `SELECT ca.case_id FROM calls ca
+      WHERE ca.id = $1 AND ca.case_id IS NOT NULL AND (ca.answered_at IS NOT NULL OR coalesce(ca.duration_seconds, 0) > 0)
+        AND NOT ca.relay_failed AND (ca.transfer_status IS NULL OR ca.transfer_status = 'answered')
+        AND NOT EXISTS (SELECT 1 FROM workflow_runs r WHERE r.call_id = ca.id AND r.kind = 'live'
+                         AND NOT (r.status = 'ended' AND r.error IS NULL AND (coalesce(r.outcome, '') NOT IN ('', 'abandoned', 'error', 'handoff_human') OR coalesce(ca.transfer_status, '') = 'answered')))`,
+    [callId])).rows[0] as { case_id: string } | undefined;
+  if (!served) return;
+  await c.query('SAVEPOINT transfer_served');
+  try { await cancelTransferCallbacks(c, served.case_id, callId); await c.query('RELEASE SAVEPOINT transfer_served'); }
+  catch { await c.query('ROLLBACK TO SAVEPOINT transfer_served'); await audit(c, null, 'transfer.case_callback_cancel_failed', 'call', callId, {}); }
 }
 
 /**

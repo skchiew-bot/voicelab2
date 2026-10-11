@@ -858,4 +858,49 @@ describe('a live caller passed to a person', () => {
       await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
     }
   });
+
+  it('cancels a hang-up callback still waiting once the caller is served on a later call of the case, and only then', async () => {
+    const KL = 'Asia/Kuala_Lumpur';
+    const ref = `S-${++n}`;
+    const caseId = (await must(post(`/internal/tenants/${tenantId}/cases`, { caseRef: ref, contactRef: `client-${ref}`, phone: CUSTOMER, country: 'MY', currency: 'MYR', openingBalance: '100.00', timeZone: KL }))).json().id as string;
+    const pending = async () => (await env.pool.query(`SELECT status FROM case_actions WHERE case_id = $1 AND dedupe_key LIKE 'transfer-callback:%'`, [caseId])).rows.map((r) => r.status as string);
+    const caseEvents = async () => (await env.pool.query(`SELECT kind FROM case_events WHERE case_id = $1 AND kind = 'callback.cancelled'`, [caseId])).rows;
+    const end = (callSid: string, to: string) => twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: callSid, CallStatus: 'completed', CallDuration: '60', Direction: 'inbound', From: CUSTOMER, To: to });
+    // they hang up waiting for a person: a callback is waiting
+    const first = await handedOver();
+    await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [first.callId, caseId]);
+    await relayEnded(first.callSid, first.callId, { CallStatus: 'completed' });
+    expect(await pending()).toEqual(['pending']);
+
+    // a later call that was not served (its conversation was cut off) changes nothing
+    const cut = await ring(ASK);
+    await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [cut.callId, caseId]);
+    const l1 = await converse(cut.callSid, cut.callId, 1); await l1.close();       // the run is abandoned
+    await end(cut.callSid, ASK);
+    expect(await pending()).toEqual(['pending']);
+
+    // they ring back and the conversation reaches its end: the waiting callback is cancelled, and the case says why
+    const back = await ring(ASK);
+    await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [back.callId, caseId]);
+    const l2 = await converse(back.callSid, back.callId, 1);
+    await env.pool.query(`UPDATE workflow_runs SET status = 'ended', outcome = 'promised' WHERE call_id = $1`, [back.callId]);
+    await end(back.callSid, ASK);
+    await l2.close();
+    expect(await pending()).toEqual(['cancelled']);
+    expect(await caseEvents()).toHaveLength(1);
+
+    // a callback the dispatcher has already claimed is left alone: its dial may be under way
+    const again = await handedOver();
+    await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [again.callId, caseId]);
+    await relayEnded(again.callSid, again.callId, { CallStatus: 'completed' });
+    await env.pool.query(`UPDATE case_actions SET status = 'leased' WHERE case_id = $1 AND status = 'pending'`, [caseId]);
+    const served = await ring(ASK);
+    await env.pool.query('UPDATE calls SET case_id = $2 WHERE id = $1', [served.callId, caseId]);
+    const l3 = await converse(served.callSid, served.callId, 1);
+    await env.pool.query(`UPDATE workflow_runs SET status = 'ended', outcome = 'promised' WHERE call_id = $1`, [served.callId]);
+    await end(served.callSid, ASK);
+    await l3.close();
+    expect((await pending()).sort()).toEqual(['cancelled', 'leased']);
+    expect(await caseEvents()).toHaveLength(1);
+  });
 });

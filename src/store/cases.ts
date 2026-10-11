@@ -218,6 +218,21 @@ export async function scheduleTransferCallback(c: pg.PoolClient, caseId: string,
   return scheduleNext(c, cs, at, { kind: 'callback', channel: 'voice', dedupeKey: `transfer-callback:${callId}`, note: 'The caller asked for a person and hung up before reaching one.' });
 }
 
+/**
+ * The caller was served on a later call of the case (owner's decision, 2026-10-11): a callback still waiting because they
+ * hung up waiting for a person on an earlier call is no longer needed, so it is cancelled and the case says why. One the
+ * dispatcher has already claimed is left alone: its dial may be under way (lesson L-002).
+ */
+export async function cancelTransferCallbacks(c: pg.PoolClient, caseId: string, servedCallId: string) {
+  await lockCase(c, caseId);
+  const gone = (await c.query(
+    `UPDATE case_actions SET status = 'cancelled', note = 'The caller was served on a later call.', updated_at = now()
+      WHERE case_id = $1 AND status = 'pending' AND dedupe_key LIKE 'transfer-callback:%' AND dedupe_key <> $2 RETURNING id`,
+    [caseId, `transfer-callback:${servedCallId}`])).rows;
+  for (const g of gone) await event(c, caseId, 'callback.cancelled', { action: g.id, reason: 'served_on_later_call', call: servedCallId });
+  return gone.length;
+}
+
 const cancelActions = (c: pg.PoolClient, caseId: string, why: string, keepThanks = false) =>
   c.query(`UPDATE case_actions SET status = 'cancelled', note = $2, updated_at = now() WHERE case_id = $1 AND status IN ('pending', 'leased') AND ($3::boolean IS FALSE OR kind <> 'thanks')`, [caseId, why, keepThanks]);
 

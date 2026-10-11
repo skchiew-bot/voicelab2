@@ -4,7 +4,11 @@
 CREATE TABLE IF NOT EXISTS provider_cost_reports (
   id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   provider_id   uuid NOT NULL REFERENCES providers(id),
-  call_id       uuid NOT NULL,
+  -- The call leg Telnyx priced (its call_control_id). A report is matched to a call by this, so one that arrives before
+  -- the call is recorded is still found when the call is checked, and another leg's report is never taken for the call's.
+  provider_call_id text NOT NULL,
+  -- The call it was matched to on arrival, when it already existed.
+  call_id       uuid REFERENCES calls(id),
   -- 'ready': the provider priced the call; 'error': it says it could not.
   status        text NOT NULL CHECK (status IN ('ready', 'error')),
   -- The provider's billed seconds (the longest billed part), when it gave them.
@@ -14,7 +18,8 @@ CREATE TABLE IF NOT EXISTS provider_cost_reports (
   occurred_at   timestamptz,
   received_at   timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS provider_cost_reports_call ON provider_cost_reports (call_id, id);
+CREATE INDEX IF NOT EXISTS provider_cost_reports_leg ON provider_cost_reports (provider_id, provider_call_id);
+CREATE INDEX IF NOT EXISTS provider_cost_reports_call ON provider_cost_reports (call_id) WHERE call_id IS NOT NULL;
 
 DROP TRIGGER IF EXISTS provider_cost_reports_immutable ON provider_cost_reports;
 CREATE TRIGGER provider_cost_reports_immutable BEFORE UPDATE OR DELETE ON provider_cost_reports

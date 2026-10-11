@@ -79,7 +79,7 @@ const post = (body: unknown, o: { sig?: string } = {}) => {
 };
 const callRow = async (id: string) => (await env.call(env.staffToken, 'GET', `/internal/calls/${id}`)).json();
 const checks = async (id: string) => (await env.call(env.staffToken, 'GET', `/internal/calls/${id}/reconciliations`)).json() as { outcome: string; source: string; our_seconds: string; reported_seconds: string | null; reported_cost_usd: string | null }[];
-const reports = async (id: string) => (await env.pool.query('SELECT status, billed_seconds, amounts FROM provider_cost_reports WHERE call_id = $1 ORDER BY id', [id])).rows;
+const reports = async (id: string) => (await env.pool.query('SELECT r.status, r.billed_seconds, r.amounts FROM provider_cost_reports r JOIN calls ca ON ca.id = $1 WHERE r.call_id = ca.id OR (r.provider_id = ca.provider_id AND r.provider_call_id = ca.provider_call_id) ORDER BY r.id', [id])).rows;
 const credits = async () => (await env.call(env.staffToken, 'GET', `/internal/tenants/${tenantId}/credits`)).json().balance as string;
 const recon = (id: string) => env.call(env.staffToken, 'POST', `/internal/calls/${id}/reconcile`, { source: 'provider_api' });
 
@@ -170,6 +170,9 @@ describe('a Telnyx call cost report', () => {
     expect(await reports(failed.id)).toEqual([{ status: 'error', billed_seconds: null, amounts: [] }]);
     expect((await recon(failed.id)).json()).toMatchObject({ outcome: 'pending' });
     expect(await checks(failed.id)).toHaveLength(0);
+    // Nor on one Telnyx said it could not price: that would use up the call's tries with nothing to check.
+    await env.call(env.staffToken, 'POST', '/internal/reconcile/run', { olderThanMinutes: 0, limit: 100 });
+    expect((await env.pool.query('SELECT reconcile_attempts FROM calls WHERE id = $1', [failed.id])).rows[0].reconcile_attempts).toBe(0);
 
     // Priced, then (out of order) "could not price it": the price stands.
     const priced = await mkCall({ costed: false });
@@ -186,10 +189,65 @@ describe('a Telnyx call cost report', () => {
     expect(await reports(call.id)).toHaveLength(0);
     expect((await callRow(call.id)).cost_status).toBe('recorded');
 
+    // The refusal leaves a trace in our own words, so a report Telnyx stops retrying is not lost unseen.
+    const trace = (await env.pool.query(`SELECT detail FROM audit_log WHERE action = 'webhook.unreadable' AND entity_id = $1`, [telnyxId])).rows;
+    expect(trace).toEqual([{ detail: { kind: 'cost', reason: 'Telnyx sent a call cost whose parts do not add up to its total.' } }]);
+
+    // A leg Voice Lab does not know is kept unattached and audited; nothing is put on any call.
     const stranger = { id: randomUUID(), ccid: 'v3:not_ours' };
     expect((await post(report(stranger))).statusCode).toBe(200);
-    expect((await env.pool.query('SELECT count(*)::int AS n FROM provider_cost_reports WHERE call_id = $1', [stranger.id])).rows[0].n).toBe(0);
+    expect((await env.pool.query(`SELECT call_id FROM provider_cost_reports WHERE provider_call_id = 'v3:not_ours'`)).rows).toEqual([{ call_id: null }]);
     expect((await env.pool.query(`SELECT count(*)::int AS n FROM audit_log WHERE action = 'webhook.unknown_call' AND detail->>'kind' = 'cost'`)).rows[0].n).toBeGreaterThanOrEqual(1);
+  });
+
+  it('is found for a call recorded after it arrived, so a report that comes first is not lost', async () => {
+    const id = randomUUID(); const ccid = `v3:cc_late_${id.slice(0, 6)}`;
+    // An inbound call whose own first event is delivered late: the cost report reaches us before the call exists.
+    expect((await post(report({ id: randomUUID(), ccid }, { client_state: undefined }))).statusCode).toBe(200);
+    await env.pool.query(
+      `INSERT INTO calls (id, tenant_id, project_id, provider_id, provider_call_id, direction, status, country, started_at, answered_at, ended_at, duration_seconds, end_reason, cost_status)
+       VALUES ($1,$2,$3,$4,$5,'outbound','completed','MY', now() - interval '2 hours', now() - interval '2 hours', now() - interval '1 hour', 61, 'completed', 'pending')`,
+      [id, tenantId, projectId, telnyxId, ccid]);
+    await costIt(id, 61);
+    await env.call(env.staffToken, 'POST', '/internal/reconcile/run', { olderThanMinutes: 0, limit: 100 });
+    expect((await callRow(id)).cost_status).toBe('reconciled');
+  });
+
+  it('never puts another leg on the call because it carries our call id, and checks a corrected report again', async () => {
+    const call = await mkCall();
+    // A leg Telnyx created from ours (a bridge, a transfer) carries our client_state but is not the call's own leg.
+    await post(report({ id: call.id, ccid: 'v3:other_leg' }, { total_cost: '0.0500', cost_parts: [{ call_part: 'call-control', cost: '0.0500', currency: 'USD', billed_duration_secs: 120 }] }));
+    expect((await callRow(call.id)).cost_status).toBe('recorded');
+    expect(await checks(call.id)).toHaveLength(0);
+
+    // A first report that does not match, then a corrected one: the call is checked again, against the newer report.
+    const wrong = report(call, { total_cost: '0.0200', cost_parts: [{ call_part: 'call-control', cost: '0.0200', currency: 'USD', billed_duration_secs: 120 }] });
+    wrong.data.occurred_at = new Date(Date.now() - 60_000).toISOString();
+    await post(wrong);
+    expect((await callRow(call.id)).cost_status).toBe('variance');
+    await post(report(call));
+    expect((await callRow(call.id)).cost_status).toBe('reconciled');
+    expect((await checks(call.id)).map((c) => c.outcome)).toEqual(['variance', 'matched']);
+  });
+
+  it('keeps a report priced in a currency with no exchange rate, and checks the call once the rate exists', async () => {
+    const call = await mkCall();
+    const gbp = report(call, { total_cost: '0.0112', cost_parts: [{ call_part: 'call-control', cost: '0.0112', currency: 'GBP', billed_duration_secs: 120 }] });
+    expect((await post(gbp)).statusCode).toBe(200);
+    expect(await reports(call.id)).toHaveLength(1);
+    expect((await callRow(call.id)).cost_status).toBe('recorded');
+    await must(env.call(env.staffToken, 'POST', '/internal/fx', { currency: 'GBP', perUsd: '0.8', effectiveFrom: '2026-01-01T00:00:00Z' }));
+    await env.call(env.staffToken, 'POST', '/internal/reconcile/run', { olderThanMinutes: 0, limit: 100 });
+    expect((await callRow(call.id)).cost_status).toBe('reconciled');
+  });
+
+  it('keeps one report and one check when the same report is delivered several times at once', async () => {
+    const call = await mkCall();
+    const body = report(call);
+    const res = await Promise.all([post(body), post(body), post(body)]);
+    expect(res.map((r) => r.statusCode)).toEqual([200, 200, 200]);
+    expect(await reports(call.id)).toHaveLength(1);
+    expect((await checks(call.id)).map((c) => c.outcome)).toEqual(['matched']);
   });
 
   it('is append-only and out of reach of clients', async () => {

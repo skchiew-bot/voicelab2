@@ -186,7 +186,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/learning.test.ts` › "does not stop the sweep when one script's audio fails, and names what it could not judge"
 
 ### L-021: A guardrail that fires on normal work is worse than none
-- **Seen:** 2 times. The first stop-loss rules told Claude to stop after three unrelated commands that shared a description, a `grep` that mentioned `vitest`, a large file read in chunks, and test runs broken on purpose to prove a test can fail (independent review, 2026-10-10). The Phase 5 turn reader treated a plain "no" and "no, thank you" as upset, so two declined questions handed a call to a person; the drop watchdog treated a reply still being worked on as dropped (Phase 5 independent review, 2026-10-10).
+- **Seen:** 3 times. The first stop-loss rules told Claude to stop after three unrelated commands that shared a description, a `grep` that mentioned `vitest`, a large file read in chunks, and test runs broken on purpose to prove a test can fail (independent review, 2026-10-10). The Phase 5 turn reader treated a plain "no" and "no, thank you" as upset, so two declined questions handed a call to a person; the drop watchdog treated a reply still being worked on as dropped (Phase 5 independent review, 2026-10-10). The first reused-task-id warning fired when a renamed task was started again under its new title, and refused a restart that differed only in case (dev Control Tower independent review, 2026-10-11).
 - **Rule:** Before a guardrail can stop work, test it against normal work as well as the failure it targets: count consecutive failures of the same thing, reset on success, and give deliberate exceptions a way through (`DEVLOG_EXPECT_RED=1`).
 - **Guards:**
   - `tests/devlog.test.ts` › "does not count test runs expected to fail, or commands that only mention a test runner"
@@ -194,6 +194,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "but not about reading it in chunks"
   - `tests/devlog.test.ts` › "counts only successful edits since the last passing check"
   - `tests/tracker.test.ts` › "reads a plain "no" or "no, thank you" as neutral or kind, and two declined questions do not hand the call to a person"
+  - `tests/devlog.test.ts` › "flags a task id started for two pieces of work, and refuses to start a known id for something else"
 
 ### L-022: Compare times as times, not as text
 - **Seen:** 4 times. The report compared git commit dates written with a +08:00 offset against UTC log timestamps as strings, so logging gaps, audit completeness and session times were wrong for anyone outside UTC (independent review, 2026-10-10). A date column read on a server east of UTC came back as the day before, so a promise was judged broken a day early (Phase 7 independent review, 2026-10-10). A group booking counted an officer's busy-ness by the server's UTC day, so early-morning work in Kuala Lumpur counted towards the wrong day (Phase 7 appointments independent review, 2026-10-10). The alert sweep judged an email claim's age by its own clock against a time the database had stamped, so a second sweep took a send still under way for a crash and marked it "may not have arrived" (found by repeated full runs, 2026-10-10).

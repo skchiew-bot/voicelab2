@@ -589,6 +589,27 @@ describe('control tower report', () => {
     expect(r.attention.map((a: { text: string }) => a.text).join(' ')).toContain('while not being logged');
   });
 
+  it('flags a task id started for two pieces of work, and refuses to start a known id for something else', () => {
+    const { dir } = makeRepo();
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    // Two sessions on separate branches each took the next free id; merging brought both together.
+    writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), [
+      { ts: '2026-10-10T00:01:00Z', session: 'session_01A', event: 'Task', action: 'start', id: 'T-9', title: 'Client portal' },
+      { ts: '2026-10-10T00:02:00Z', session: 'session_01B', event: 'Task', action: 'start', id: 'T-9', title: 'Fresh container' },
+      { ts: '2026-10-10T00:03:00Z', session: 'session_01A', event: 'Task', action: 'start', id: 'T-8', title: 'Same work' },
+      { ts: '2026-10-10T00:04:00Z', session: 'session_01B', event: 'Task', action: 'start', id: 'T-8', title: 'Same work' },
+    ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+    const out = path.join(dir, 'r.json');
+    expect(run(dir, 'scripts/devlog-report.mjs', ['--json', out]).status).toBe(0);
+    const texts = JSON.parse(readFileSync(out, 'utf8')).attention.map((a: { text: string }) => a.text);
+    expect(texts.filter((t: string) => t.includes('different pieces of work'))).toEqual([
+      'T-9 was started for 2 different pieces of work (Client portal; Fresh container): its status mixes them. Give each its own id.',
+    ]);
+    const refused = run(dir, 'scripts/devlog-task.mjs', ['start', 'T-9', '--title', 'Something else']);
+    expect([refused.status, refused.stderr.trim()]).toEqual([1, 'T-9 is already "Fresh container". Choose a new id.']);
+    expect(run(dir, 'scripts/devlog-task.mjs', ['start', 'T-8', '--title', 'Same work']).status).toBe(0); // restarting the same work is fine
+  });
+
   it('shows RM only from a configured rate, computed exactly', () => {
     const { dir } = makeRepo((c) => { c.currency.myrPerUsd = '4.5'; c.currency.asOf = '2026-10-10'; });
     mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });

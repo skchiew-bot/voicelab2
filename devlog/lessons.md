@@ -383,3 +383,9 @@ Format, checked by `tests/devlog.test.ts`:
 - **Rule:** Test a boundary with the exact list of what may cross it (every table, view and owner-rights function a role can reach), compared in full, so anything added fails the test until someone decides it belongs. Code on the client side of the line runs as the client role, every time.
 - **Guards:**
   - `tests/portal.test.ts` › "lets the client role reach exactly what the portal needs, and nothing a later migration quietly adds"
+
+### L-048: A number taken on a branch is provisional until it merges
+- **Seen:** 4 times. Lesson numbers clashed between parallel branches and were renumbered after merges (L-034, L-039, L-044/L-045); migrations 015 and 018 were renumbered the same way; and two sessions each started board task `P0-C`, one for the client portal ([#38](https://github.com/skchiew-bot/voicelab2/pull/38)) and one for the fresh-container setup ([#42](https://github.com/skchiew-bot/voicelab2/pull/42)), so the board showed the portal under the other's title (dev Control Tower refresh, 2026-10-11). At that refresh three open PRs (#38, #39, #41) all held migration 021.
+- **Rule:** Treat any number or id chosen on a branch (lesson, migration, board task) as provisional: before choosing, look at the open branches (`git ls-tree origin/<branch>`) and take one none of them uses; on merging, renumber whatever the trunk took first and record a correction. The board refuses to start a known id for different work, and the dev Control Tower flags an id started for two pieces of work.
+- **Guards:**
+  - `tests/devlog.test.ts` › "flags a task id started for two pieces of work, and refuses to start a known id for something else"

@@ -391,10 +391,11 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/transfer.test.ts` › "runs the ladder when Twilio asks again after the agent number was removed"
 
 ### L-045: A failing check must stop the commit
-- **Seen:** A test run, the board update and the commit were joined with `;`, so a broken `src/progress.ts` (an unescaped apostrophe) was committed and pushed while the run reported a failure (human transfer, 2026-10-10).
-- **Rule:** Join the checks and the commit with `&&`, never `;`, and read the result before pushing. A failure you cannot explain is read from its kept output before anything else (L-038).
+- **Seen:** 2 times. A test run, the board update and the commit were joined with `;`, so a broken `src/progress.ts` (an unescaped apostrophe) was committed and pushed while the run reported a failure (human transfer, 2026-10-10). A review agent checked the branch out in the shared working folder and left it detached, so the review fixes for [#51](https://github.com/skchiew-bot/voicelab2/pull/51) were committed off the branch; the push of the unchanged branch did nothing, its output was filtered away, and the PR listed fixes GitHub did not have for an hour (2026-10-11).
+- **Rule:** Join the checks and the commit with `&&`, never `;`, and read the result before pushing. A failure you cannot explain is read from its kept output before anything else (L-038). After a push, check that the remote branch holds the commit you meant to push, and give any helper agent its own worktree so it never moves your checkout.
 - **Guards:**
   - `CLAUDE.md` › "so a failing check stops the commit"
+  - `CLAUDE.md` › "check that the remote branch holds the commit"
 
 ### L-046: An answer must not tell the asker about anything they cannot see
 - **Seen:** Emails were unique across the whole platform, so a client admin adding a user learned from "already exists" whether an email belonged to staff or to another client (client portal independent review, 2026-10-10).

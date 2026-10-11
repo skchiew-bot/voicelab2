@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { ProviderRefused, redactNumbers, HOLD_MESSAGE, QUEUE_TIMED_OUT_MESSAGE, TEST_CALL_MESSAGE, type Fetch, type NormalizedEvent } from './types.js';
+import { ProviderRefused, redactNumbers, HOLD_MESSAGE, QUEUE_TIMED_OUT_MESSAGE, TEST_CALL_MESSAGE, type Fetch, type NormalizedEvent, sipCode } from './types.js';
 
 const basic = (user: string, pass: string) => 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
 
@@ -97,7 +97,8 @@ export function parseTwilio(params: Record<string, string>, callIdHint?: string,
   const endReason = REASONS[status];
   if (!endReason) return null;
   const duration = Number(params.CallDuration);
-  return { ...base, key, kind: 'ended', endReason, durationSeconds: Number.isFinite(duration) ? duration : 0 };
+  // SipResponseCode is taken from Twilio's documented status callback parameters, not from a captured request (L-016).
+  return { ...base, key, kind: 'ended', endReason, durationSeconds: Number.isFinite(duration) ? duration : 0, sipCode: sipCode(params.SipResponseCode) };
 }
 
 const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

@@ -10,7 +10,7 @@ import { ProviderRefused, redactNumbers, type Action, type NormalizedEvent } fro
 import { audit } from './audit.js';
 import { recordCallCost } from './costs.js';
 import { getEntitlement, inboundAdmission, isFull, promoteQueued, providerLoad, tenantsWaiting, type Promoted } from './concurrency.js';
-import { chooseDid, didLockedFor } from './dids.js';
+import { carrierLockFor, chooseDid, didLockedFor, recordDidFailure } from './dids.js';
 import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.js';
 import { recordCallEnd } from './call-end.js';
 import { caseCallEnded, recogniseInbound, safely } from './cases.js';
@@ -293,7 +293,7 @@ const RANK: Record<string, number> = { queued: 0, dialing: 0, ringing: 1, in_pro
 interface CallRow {
   id: string; tenant_id: string; project_id: string | null; provider_id: string; direction: 'inbound' | 'outbound';
   status: string; started_at: Date; answered_at: Date | null; ended_at: Date | null; provider_call_id: string | null;
-  end_reason: string | null; cost_status: string; queued_at?: Date | null;
+  end_reason: string | null; cost_status: string; queued_at?: Date | null; from_number_id?: string | null; contact_hash?: string | null;
 }
 
 async function findCall(c: pg.PoolClient, providerId: string, ev: NormalizedEvent, hint?: string): Promise<CallRow | null> {
@@ -457,6 +457,18 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
       call.status = status;
       await log('call.ended', { status, reason: ev.endReason ?? 'completed', durationSeconds: seconds });
       await recordCallEnd(c, call, { endReason: ev.endReason, occurredAt: ev.occurredAt, answered });
+      // A carrier that answered our dial with a clear block on the number we showed: that DID is never shown to this
+      // contact again. Only an outbound dial from a pooled number to a known contact; a failure here never undoes the end.
+      const lock = call.direction === 'outbound' && call.from_number_id && call.contact_hash ? carrierLockFor(ev.sipCode) : null;
+      if (lock) {
+        const reason = lock; const id = call.id; const code = ev.sipCode!;
+        await c.query('SAVEPOINT did_lock');
+        try { await recordDidFailure(c, null, id, reason, { sipCode: code }); await c.query('RELEASE SAVEPOINT did_lock'); }
+        catch (err) {
+          await c.query('ROLLBACK TO SAVEPOINT did_lock');
+          await audit(c, null, 'did.lock_failed', 'call', id, { reason, sipCode: code, error: redactNumbers((err as Error).message).slice(0, 200) });
+        }
+      }
       await settleTransferOnEnd(c, call.id);
       await cancelCallbacksIfServed(c, call.id);
       const ended = call;

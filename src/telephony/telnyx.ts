@@ -1,6 +1,6 @@
 import { createPublicKey, verify } from 'node:crypto';
 import { fromScaled, toScaled } from '../money.js';
-import { ProviderRefused, redactNumbers, HOLD_MESSAGE, TEST_CALL_MESSAGE, type Action, type Fetch, type NormalizedEvent } from './types.js';
+import { ProviderRefused, redactNumbers, sipCode, HOLD_MESSAGE, TEST_CALL_MESSAGE, type Action, type Fetch, type NormalizedEvent } from './types.js';
 
 const API = 'https://api.telnyx.com/v2';
 
@@ -91,7 +91,8 @@ export function parseTelnyx(body: any): NormalizedEvent | null {
     case 'call.initiated': return { ...base, kind: 'initiated', direction: p.direction === 'incoming' ? 'inbound' : 'outbound' };
     case 'call.answered': return { ...base, kind: 'answered' };
     case 'call.speak.ended': return { ...base, kind: 'speak_ended' };
-    case 'call.hangup': return { ...base, kind: 'ended', endReason: HANGUP[String(p.hangup_cause)] ?? 'failed' };
+    // sip_hangup_cause is in Telnyx's published API description (CallHangup); "unspecified" when there was none.
+    case 'call.hangup': return { ...base, kind: 'ended', endReason: HANGUP[String(p.hangup_cause)] ?? 'failed', sipCode: sipCode(p.sip_hangup_cause) };
     default: return null;
   }
 }

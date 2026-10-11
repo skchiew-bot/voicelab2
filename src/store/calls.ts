@@ -5,16 +5,17 @@ import { withActor } from '../db.js';
 import { AppError } from '../errors.js';
 import { decryptSecrets } from '../secrets.js';
 import { telnyxCommand, telnyxNextActions, telnyxPlaceCall, type TelnyxCreds } from '../telephony/telnyx.js';
-import { twilioHangup, twilioPlaceCall, type TwilioCreds } from '../telephony/twilio.js';
+import { twilioHangup, twilioPlaceCall, twilioRedirect, type TwilioCreds } from '../telephony/twilio.js';
 import { ProviderRefused, redactNumbers, type Action, type NormalizedEvent } from '../telephony/types.js';
 import { audit } from './audit.js';
 import { recordCallCost } from './costs.js';
-import { getEntitlement, inboundAdmission, isFull, promoteQueued, providerLoad } from './concurrency.js';
+import { getEntitlement, inboundAdmission, isFull, promoteQueued, providerLoad, tenantsWaiting, type Promoted } from './concurrency.js';
 import { chooseDid, didLockedFor } from './dids.js';
 import { contactHash, contactKeyFrom, gateOutbound, normalizeE164 } from './dnc.js';
 import { recordCallEnd } from './call-end.js';
 import { caseCallEnded, recogniseInbound, safely } from './cases.js';
 import { cancelCallbacksIfServed, settleTransferOnEnd } from './transfer.js';
+import { speechAndModelUsage } from './usage.js';
 import { recordEvent } from './events.js';
 import { healthMap, logFailover, recordSample } from './resilience.js';
 import { dialPace, drainedSet, routingHealth } from './control-actions.js';
@@ -292,7 +293,7 @@ const RANK: Record<string, number> = { queued: 0, dialing: 0, ringing: 1, in_pro
 interface CallRow {
   id: string; tenant_id: string; project_id: string | null; provider_id: string; direction: 'inbound' | 'outbound';
   status: string; started_at: Date; answered_at: Date | null; ended_at: Date | null; provider_call_id: string | null;
-  end_reason: string | null; cost_status: string;
+  end_reason: string | null; cost_status: string; queued_at?: Date | null;
 }
 
 async function findCall(c: pg.PoolClient, providerId: string, ev: NormalizedEvent, hint?: string): Promise<CallRow | null> {
@@ -322,9 +323,11 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
   const burst = isFull(load);
   const call = (await c.query(
     `INSERT INTO calls (id, tenant_id, project_id, provider_id, provider_call_id, direction, status, country, started_at, queued_at, burst, credit_multiplier, workflow_id)
-     VALUES ($1,$2,$3,$4,$5,'inbound',$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+     VALUES ($1,$2,$3,$4,$5,'inbound',$6,$7,$8,CASE WHEN $9 THEN now() END,$10,$11,$12) RETURNING *`,
+    // The wait is stamped by the database's clock, the same clock that stamps when the caller is served, so the hold billed
+    // as not served is exactly the time between the two (L-022).
     [id, n.tenant_id, n.project_id, providerId, ev.providerCallId, adm.admit === 'queue' ? 'queued' : 'ringing', n.country, ev.occurredAt,
-      adm.admit === 'queue' ? ev.occurredAt : null, burst, adm.admit === 'premium' ? adm.creditMultiplier : null, n.inbound_workflow_id],
+      adm.admit === 'queue', burst, adm.admit === 'premium' ? adm.creditMultiplier : null, n.inbound_workflow_id],
   )).rows[0];
   await recordEvent(c, { tenantId: n.tenant_id, projectId: n.project_id ?? undefined, callId: id, type: 'call.initiated', payload: { direction: 'inbound', country: n.country }, occurredAt: ev.occurredAt });
   if (adm.admit === 'queue') await recordEvent(c, { tenantId: n.tenant_id, projectId: n.project_id ?? undefined, callId: id, type: 'call.queued', payload: { active: adm.active, channels: adm.channels }, occurredAt: ev.occurredAt });
@@ -333,7 +336,10 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
 }
 
 /** Price a finished call and store the result. Failing to price never loses the call or fails the webhook. */
-export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'unchecked' | 'not_applicable' | 'pending'> {
+/** How long after a call ends it is costed even if the relay never let go of it (a server stopped mid-call). */
+export const COST_WAIT_MS = 5 * 60_000;
+
+export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string, opts: { force?: boolean } = {}): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'unchecked' | 'not_applicable' | 'pending'> {
   const call = (await c.query('SELECT * FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
   if (!call) throw new AppError(404, 'Call not found.');
   if (!call.ended_at) throw new AppError(409, 'The call has not ended yet.');
@@ -350,6 +356,16 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
     return 'pending';
   }
   const agentSeconds = call.transfer_seconds === null ? 0 : Number(call.transfer_seconds);
+  // Forcing is for a call whose costing failed (a person retrying once a rate exists); a call still pending waits as usual.
+  if (call.cost_status !== 'failed') opts = { ...opts, force: false };
+  // The speech relay may still be writing what the call used (a reply landing, a line said again): costed once it lets go,
+  // by the 'calls-cost' job, so nothing it adds after is left out. A call is priced once, so it must not be priced early.
+  if (!opts.force && Date.now() - new Date(call.ended_at).getTime() < COST_WAIT_MS) {
+    const busy = (await c.query(
+      `SELECT $2::uuid IS NOT NULL OR EXISTS (SELECT 1 FROM workflow_runs WHERE call_id = $1 AND kind = 'live' AND status = 'processing') AS busy`,
+      [callId, call.relay_owner ?? null])).rows[0].busy;
+    if (busy) return 'pending';
+  }
   try {
     await recordCallCost(c, actorId, {
       callId, tenantId: call.tenant_id, projectId: call.project_id ?? undefined, direction: call.direction,
@@ -358,11 +374,14 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
       // waited and was then served pays credits only from the moment they were.
       drawCredits: !call.no_credit,
       creditSkipSeconds: call.credit_from && call.answered_at ? Math.max(0, (new Date(call.credit_from).getTime() - new Date(call.answered_at).getTime()) / 1000) : 0,
+      // The phone line first (credits follow it), the agent's leg of a transfer, then what else the call used: the speech
+      // relay and the models.
       usage: [
         { providerId: call.provider_id, usage: { seconds: Number(call.duration_seconds ?? 0), burst: call.burst } },
         // The agent's leg: an outbound call from the provider, inside its concurrency ceiling (a full provider runs the
         // ladder instead), so never at the burst premium.
         ...(agentSeconds > 0 ? [{ providerId: call.provider_id, usage: { seconds: agentSeconds }, leg: 'agent' as const, direction: 'outbound' as const }] : []),
+        ...await speechAndModelUsage(c, call),
       ],
     });
     await c.query(`UPDATE calls SET cost_status = 'recorded', cost_error = NULL WHERE id = $1`, [callId]);
@@ -376,7 +395,9 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
 }
 
 async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: NormalizedEvent, hint?: string, contactKey?: Buffer):
-  Promise<{ duplicate: boolean; actions: Action[] }> {
+  Promise<{ duplicate: boolean; actions: Action[]; promoted?: Promoted[] }> {
+  const promoted: Promoted[] = [];
+  let servedFromQueue = false;
   const fresh = await c.query('INSERT INTO webhook_events (provider_id, event_key) VALUES ($1,$2) ON CONFLICT DO NOTHING', [provider.id, ev.key]);
   if (!fresh.rowCount) return { duplicate: true, actions: [] };
 
@@ -441,20 +462,74 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
       const ended = call;
       await safely(c, 'case_call_ended', () => caseCallEnded(c, { id: ended.id, started_at: ended.started_at, answered_at: ended.answered_at, duration_seconds: seconds }, ev.endReason));
       await costCall(c, null, call.id);
-      // A channel has freed: whoever has waited longest moves up.
-      if (call.direction === 'inbound') await promoteQueued(c, call.tenant_id);
+      // A channel has freed: whoever has waited longest moves up, and is told their turn has come once this commits.
+      if (call.direction === 'inbound') promoted.push(...await promoteQueued(c, call.tenant_id));
       break;
     }
-    case 'speak_ended': await log('call.speak_ended'); break;
+    case 'speak_ended':
+      await log('call.speak_ended');
+      // A caller served from the queue is hearing the hold message when their turn comes; when it ends, they are served.
+      if (call.status === 'in_progress' && call.queued_at && !(await c.query(`SELECT 1 FROM call_events WHERE call_id = $1 AND type = 'call.service_started'`, [call.id])).rowCount) {
+        servedFromQueue = true;
+        await log('call.service_started');
+      }
+      break;
     case 'initiated': break; // inbound calls were logged when the row was created
   }
-  const actions = isTelnyx ? telnyxNextActions(ev, routed, call.status === 'queued') : [];
-  return { duplicate: false, actions };
+  const actions = isTelnyx ? telnyxNextActions(ev, routed, call.status === 'queued', servedFromQueue) : [];
+  return { duplicate: false, actions, promoted };
 }
 
 /** Process a verified webhook. Provider commands run after the database work has committed. */
+/**
+ * Tell callers whose turn has come, after the promotion has committed. A Twilio caller on the hold message is sent to the
+ * voice URL at once, which hands them to the workflow; should that request fail, the hold message's own next turn does it
+ * a few seconds later. A Telnyx caller is served when the hold message they are hearing ends.
+ */
+export async function serveNow(d: CallDeps, promoted: Promoted[]) {
+  for (const p of promoted) {
+    if (!p.providerCallId || !d.baseUrl) continue;
+    try {
+      const provider = await asInternal(d, (c) => loadProvider(c, p.providerId));
+      if (provider?.adapter_key !== 'twilio') continue;
+      // The hold's own next turn may already have handed the caller to the relay: redirecting now would cut that off.
+      const taken = await asInternal(d, async (c) => (await c.query(
+        `SELECT 1 FROM calls WHERE id = $1 AND (relay_owner IS NOT NULL OR EXISTS (SELECT 1 FROM workflow_runs WHERE call_id = $1 AND kind = 'live'))`, [p.callId])).rowCount === 1);
+      if (taken) continue;
+      await twilioRedirect(credentials<TwilioCreds>(provider, d.key), d.http, p.providerCallId, `${d.baseUrl}/webhooks/twilio/${p.providerId}/voice`);
+    } catch (err) {
+      await asInternal(d, async (c) => {
+        const t = (await c.query('SELECT tenant_id FROM calls WHERE id = $1', [p.callId])).rows[0];
+        if (t) await recordEvent(c, { tenantId: t.tenant_id, callId: p.callId, type: 'call.command_failed', payload: { action: 'redirect', reason: redactNumbers((err as Error).message) } });
+      }).catch(() => undefined);
+    }
+  }
+}
+
+/**
+ * Give any free channel to a waiting caller, for every client with callers waiting (the queue sweep, an entitlement
+ * change). Each client in its own short transaction, holding one client's lock at a time, so two sweeps cannot deadlock
+ * and one client's failure costs no other client its turn (L-006). It never throws: a failure is counted and recorded.
+ */
+export async function promoteWaiting(d: CallDeps, tenantIds?: string[]): Promise<{ served: number; failed: number }> {
+  let served = 0; let failed = 0;
+  const tenants = tenantIds ?? await asInternal(d, (c) => tenantsWaiting(c)).catch(() => [] as string[]);
+  for (const t of tenants) {
+    try {
+      const promoted = await asInternal(d, (c) => promoteQueued(c, t));
+      served += promoted.length;
+      await serveNow(d, promoted);
+    } catch {
+      failed++;
+      await asInternal(d, (c) => audit(c, null, 'queue.promotion_failed', 'tenant', t, {})).catch(() => undefined);
+    }
+  }
+  return { served, failed };
+}
+
 export async function processWebhook(d: CallDeps, provider: ProviderRow, ev: NormalizedEvent, hint?: string) {
   const out = await asInternal(d, (c) => applyEvent(c, provider, ev, hint, contactKeyFrom(d.key)));
+  if (out.promoted?.length) await serveNow(d, out.promoted);
   if (out.actions.length && provider.adapter_key === 'telnyx') {
     const creds = credentials<TelnyxCreds>(provider, d.key);
     for (const a of out.actions) {
@@ -492,6 +567,11 @@ export const relayTarget = (d: CallDeps, providerId: string, providerCallId: str
     ((await c.query(`SELECT id FROM calls WHERE provider_id = $1 AND provider_call_id = $2 AND workflow_id IS NOT NULL AND status IN ('ringing', 'in_progress', 'dialing')`,
       [providerId, providerCallId])).rows[0]?.id as string | undefined) ?? null);
 
+/** Whether a call was timed out of the queue: its line may still be open until the hangup lands. */
+export const callTimedOut = (d: CallDeps, providerId: string, providerCallId: string) =>
+  asInternal(d, async (c) =>
+    (await c.query(`SELECT 1 FROM calls WHERE provider_id = $1 AND provider_call_id = $2 AND end_reason = 'queue_timeout'`, [providerId, providerCallId])).rowCount === 1);
+
 export const callKnown = (d: CallDeps, providerId: string, providerCallId: string) =>
   asInternal(d, async (c) =>
     (await c.query('SELECT 1 FROM calls WHERE provider_id = $1 AND provider_call_id = $2', [providerId, providerCallId])).rowCount === 1);
@@ -519,4 +599,49 @@ export async function hangUpCalls(d: CallDeps, calls: { providerId: string; prov
     }
   }
   return hungUp;
+}
+
+/**
+ * Cost the calls that ended while the relay still held them, once it has let go (or once enough time has passed that it
+ * never will). Each call in its own transaction, so one that fails does not stop the rest.
+ */
+export async function costPendingCalls(d: CallDeps, limit = 500) {
+  // A caller timed out of the queue is costed when the provider reports how long they were held (the 'ended' event),
+  // never before: costing it now would record no provider time and the held time would never be costed.
+  const tally: Record<string, number> = {};
+  // Nor a call waiting to hear how long a transfer's agent leg lasted: the dial's report, or a person settling it, costs it.
+  await eachPage(d, `cost_status = 'pending' AND ended_at IS NOT NULL AND NOT (end_reason = 'queue_timeout' AND duration_seconds IS NULL)
+      AND NOT (transfer_started_at IS NOT NULL AND transfer_seconds IS NULL)`, limit,
+    async (id) => { const r = await asInternal(d, (c) => costCall(c, null, id)).catch(() => 'error' as const); tally[r] = (tally[r] ?? 0) + 1; });
+  return tally;
+}
+
+/** Cost again every call whose cost could not be recorded, e.g. once a missing rate has been entered. */
+export async function retryFailedCosts(d: CallDeps, actorId: string, limit = 5000) {
+  const tally: Record<string, number> = {};
+  let checked = 0;
+  await eachPage(d, `cost_status = 'failed'`, limit, async (id) => {
+    checked++;
+    const r = await asInternal(d, (c) => costCall(c, actorId, id, { force: true })).catch(() => 'error' as const);
+    tally[r] = (tally[r] ?? 0) + 1;
+  });
+  return { checked, ...tally };
+}
+
+/**
+ * Every call matching `where`, oldest end first, a page at a time by (end, id), up to `max`: a call that stays as it was
+ * (still failing) never keeps a newer one from being reached.
+ */
+async function eachPage(d: CallDeps, where: string, max: number, fn: (id: string) => Promise<void>) {
+  let after: { at: Date; id: string } | null = null; let done = 0;
+  while (done < max) {
+    const page: { id: string; ended_at: Date }[] = await asInternal(d, async (c) => (await c.query(
+      `SELECT id, ended_at FROM calls WHERE ${where}
+          AND ($1::timestamptz IS NULL OR (ended_at, id) > ($1::timestamptz, $2::uuid))
+        ORDER BY ended_at, id LIMIT $3`, [after?.at ?? null, after?.id ?? null, Math.min(100, max - done)])).rows);
+    if (page.length === 0) return;
+    for (const r of page) await fn(r.id);
+    done += page.length;
+    after = { at: page[page.length - 1]!.ended_at, id: page[page.length - 1]!.id };
+  }
 }

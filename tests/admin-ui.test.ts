@@ -499,7 +499,7 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(sim.getByRole('alert')).toContainText('0 of 1 passed');
     await expect(sim).toContainText('Expected the outcome "refused" but got "met"');
     await runSim([{ name: 'meets', variables: {}, replies: ['Wei'], expect: { outcome: 'met', says: ['Nice to meet you, Wei'] } }]);
-    await expect(sim.getByRole('status')).toContainText('1 of 1 passed. This version can now go to production');
+    await expect(sim.getByRole('status')).toContainText('1 of 1 passed. This version has passed the rehearsal production needs');
     await versions.getByRole('button', { name: 'Put 1.0 in production' }).click();
     await expect(versions.getByRole('status')).toContainText('live in production');
 
@@ -518,6 +518,19 @@ describe.skipIf(!run)('admin UI', () => {
     await versions.getByRole('button', { name: 'Roll production back to 1.0' }).click();
     await expect(versions.getByRole('status')).toContainText('Production is back on version 1.0');
     await expect(page.getByText('Live in production: 1.0')).toBeVisible();
+
+    // an admin the owner has not named sees no way to production but a change, and is told so
+    const { createUser } = await import('../src/store/tenants.js'); const { withActor } = await import('../src/db.js');
+    const notNamed = (await withActor(env.pool, { kind: 'internal' }, (c) => createUser(c, null, { tenantId: null, email: 'not-named@daythree.test', role: 'internal_admin' }))).token;
+    const other = await browser.newPage();
+    await signIn(other, notNamed);
+    await other.goto(`${base}#/workflows/${wfId}`);
+    const theirs = other.getByLabel('Versions');
+    await expect(theirs.getByRole('button', { name: 'Put 1.1 in staging' })).toBeVisible();
+    await expect(theirs.getByRole('button', { name: 'Put 1.1 in production' })).toHaveCount(0);
+    await expect(theirs.getByRole('button', { name: /Roll production back/ })).toHaveCount(0);
+    await expect(other.getByLabel('How to reach production')).toContainText('needs an approved change');
+    await other.close();
 
     // a dangling path is caught when checking, can be saved as work in progress, and cannot be published
     const broken = def('What is your name?'); (broken.nodes.ask.transitions as { to: string }[])[0]!.to = 'nowhere';

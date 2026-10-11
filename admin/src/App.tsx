@@ -27,7 +27,7 @@ import { Users } from './Users';
 import { Jobs } from './Jobs';
 import { ClientProvider, ClientSwitcher, useClient } from './client';
 
-interface Me { email: string; role: string; readOnly: boolean }
+interface Me { email: string; role: string; readOnly: boolean; production: 'direct' | 'replace-token' | 'change' }
 const STAFF = ['internal_admin', 'internal_viewer'];
 
 function useHash() {
@@ -125,6 +125,7 @@ function Shell({ me, hash, onSignOut }: { me: Me; hash: string; onSignOut: () =>
         <span className="spacer" />
         <ClientSwitcher />
         {me.readOnly && <span className="badge warn" title="You can open every screen but not change anything.">Read only</span>}
+        <NewToken />
         <button className="link" onClick={onSignOut}>Sign out</button>
       </nav>
       <main key={client}>
@@ -147,10 +148,27 @@ function Shell({ me, hash, onSignOut }: { me: Me; hash: string; onSignOut: () =>
           : section === 'replay' ? (replay ? <Replay kind={replay[1] as 'call' | 'run'} id={replay[2]!} /> : <Calls />)
           : section === 'compliance' ? <Compliance />
           : section === 'calls' ? <Calls />
-          : section === 'workflows' ? (workflowId ? <WorkflowDetail id={workflowId} /> : <Workflows />)
+          : section === 'workflows' ? (workflowId ? <WorkflowDetail id={workflowId} production={me.production} /> : <Workflows />)
           : section === 'providers' ? (providerId ? <ProviderDetail id={providerId} /> : <Providers />)
           : <ControlTower />}
       </main>
     </div>
+  );
+}
+
+/** Replace your own sign-in token: the one you were given was shown to whoever added you. The new one is shown once. */
+function NewToken() {
+  const [shown, setShown] = useState<string | null>(null);
+  const act = useAction();
+  return (
+    <>
+      <button className="link" disabled={act.pending} onClick={async () => {
+        if (!confirm('Replace your sign-in token? The old one stops working at once. The new one is shown once: copy it.')) return;
+        const r = await act.run(() => api<{ token: string }>('POST', '/me/token'));
+        if (r) { setToken(r.token); setShown(r.token); }
+      }}>New token</button>
+      <Errors error={act.error} />
+      {shown && <div className="notice" role="status">Your new token (shown once, copy it now): <code>{shown}</code> <button className="link" onClick={() => setShown(null)}>Done</button></div>}
+    </>
   );
 }

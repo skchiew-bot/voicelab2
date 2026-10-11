@@ -82,8 +82,9 @@ export async function reconcileCall(d: CallDeps, actorId: string | null, callId:
       `SELECT detail FROM call_reconciliations WHERE call_id = $1 AND outcome = 'matched' ORDER BY id DESC LIMIT 1`, [callId])).rows[0];
     if (done) return { outcome: 'matched', detail: done.detail, alreadyReconciled: true };
     // Our cost of each leg: the provider's figures cover both (looked up for each leg, or entered by hand as the total).
+    // The speech relay is billed as its own item, outside the call's price, so its lines are not compared here.
     const byLeg = new Map((await c.query(
-      `SELECT leg, sum(amount_usd) AS usd FROM call_cost_lines WHERE call_cost_id = $1 AND provider_id = $2 GROUP BY leg`, [ctx.costId, call.provider_id])).rows
+      `SELECT leg, sum(amount_usd) AS usd FROM call_cost_lines WHERE call_cost_id = $1 AND provider_id = $2 AND billing_line <> 'relay' GROUP BY leg`, [ctx.costId, call.provider_id])).rows
       .map((r) => [r.leg as string, toScaled(r.usd)]));
     const ourCallerUsd = byLeg.get('caller') ?? 0n; const ourAgentUsd = byLeg.get('agent') ?? 0n;
     const ourCostUsd = fromScaled(ourCallerUsd + ourAgentUsd);

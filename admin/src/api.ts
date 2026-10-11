@@ -42,7 +42,7 @@ export async function apiObjectUrl(path: string): Promise<string> {
 
 export interface ParamDef { key: string; label: string; type: 'string' | 'secret' | 'url' | 'number' | 'boolean'; required: boolean; help?: string }
 export interface Adapter {
-  key: string; kind: 'telephony' | 'voice'; displayName: string; docsUrl: string;
+  key: string; kind: 'telephony' | 'voice' | 'model'; displayName: string; docsUrl: string;
   params: ParamDef[]; defaultCapabilities: Record<string, string>;
 }
 export interface Capability { capability: string; support: 'native' | 'composable' | 'unsupported'; notes: string | null }

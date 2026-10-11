@@ -21,8 +21,9 @@ export async function speechAndModelUsage(c: pg.PoolClient, call: CallRow): Prom
 
 /**
  * The speech relay's time on the call, from the first time it connected to the last time it closed (or the end of the
- * call, if sooner), and the characters it synthesised: every line said (a recording costs nothing to synthesise) and
- * every line said again when a reconnected line took the call over.
+ * call, if sooner), and the characters it synthesised: every line said (a recording costs nothing to synthesise), and
+ * every line the relay's voice spoke outside the workflow: said again when a reconnected line took the call over, the
+ * wait line, and the holding message.
  */
 async function relayUsage(c: pg.PoolClient, call: CallRow): Promise<Item[]> {
   const span = (await c.query(
@@ -40,7 +41,8 @@ async function relayUsage(c: pg.PoolClient, call: CallRow): Promise<Item[]> {
   const chars = (await c.query(
     `SELECT (SELECT coalesce(sum((s.payload->>'synthChars')::bigint), 0) FROM workflow_run_steps s JOIN workflow_runs r ON r.id = s.run_id
               WHERE r.call_id = $1 AND r.kind = 'live' AND s.type = 'say')
-          + (SELECT coalesce(sum((payload->>'synthChars')::bigint), 0) FROM call_events WHERE call_id = $1 AND type = 'relay.said_again') AS n`,
+          + (SELECT coalesce(sum((payload->>'synthChars')::bigint), 0) FROM call_events
+              WHERE call_id = $1 AND type IN ('relay.said_again', 'relay.wait_line', 'relay.holding_message')) AS n`,
     [call.id])).rows[0].n;
   return [{ providerId: call.provider_id, usage: { seconds, characters: Number(chars) }, relay: true }];
 }

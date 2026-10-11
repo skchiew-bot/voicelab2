@@ -12,6 +12,12 @@ export function Errors({ error }: { error: unknown }) {
   );
 }
 
+/** A settings change says why: the server refuses one without a reason (src/change-reason.ts), and the change log shows it. */
+export const reasonOk = (reason: string) => reason.trim().length >= 3;
+export function ReasonField({ value, onChange, label = 'Why' }: { value: string; onChange: (v: string) => void; label?: string }) {
+  return <Field label={label} help="Required. Shown in the change log. Never a phone number."><input value={value} onChange={(e) => onChange(e.target.value)} maxLength={500} /></Field>;
+}
+
 export function Field({ label, help, children }: { label: string; help?: string; children: ReactNode }) {
   return (
     <label className="field">

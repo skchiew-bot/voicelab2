@@ -41,6 +41,11 @@ const nextLocal = (hh: string, plusDays = 0): Date => {
   const t = localToInstant(day, hh, KL);
   return t.getTime() > Date.now() + 5 * 60_000 ? t : localToInstant(addDays(day, 1), hh, KL);
 };
+/**
+ * A daytime moment in Kuala Lumpur under 23 hours away, so calls placed now are inside its 24-hour window. The next
+ * 10:00 alone can be a day and five minutes off (just before 10:00), and calls placed now would not count (L-037).
+ */
+const soonDaytime = (): Date => [nextLocal('10:00'), nextLocal('14:00')].find((t) => t.getTime() - Date.now() < 23 * 3_600_000)!;
 const mins = (d: Date, m: number) => new Date(d.getTime() + m * 60_000);
 
 // ---- the customers' numbers: used for one dial and a keyed hash, never stored
@@ -80,14 +85,14 @@ beforeAll(async () => {
   env = await (await import('./helpers.js')).setupDb({ cases: { paymentHttp } });
   tenantId = (await must(post('/internal/tenants', { name: 'Cases Co' }))).json().id;
   telnyxId = (await must(post('/internal/providers', { adapterKey: 'telnyx', name: 'tx', params: { apiKey: 'K', webhookUrl: `${BASE}/h`, connectionId: 'c1', webhookPublicKey: 'AAAA' } }))).json().id;
-  await must(post(`/internal/providers/${telnyxId}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.006', currency: 'USD' }] }));
+  await must(post(`/internal/providers/${telnyxId}/charging`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.006', currency: 'USD' }] }));
   await must(post('/internal/fx', { currency: 'MYR', perUsd: '4.5', effectiveFrom: '2026-01-01T00:00:00Z' }));
   await must(post('/internal/numbers', { providerId: telnyxId, e164: OUR, tenantId, country: 'MY' }));
   await must(post('/internal/dnc/registries', { country: 'MY', requirement: 'registry', source: 'test' }));
   await must(post('/internal/dnc/numbers', { country: 'MY', numbers: ['+60198765432'] }));
-  await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
+  await must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
   await must(post(`/internal/tenants/${tenantId}/integrations`, { name: 'payments', baseUrl: 'https://payments.example.test/v1' }));
-  await must(put(`/internal/tenants/${tenantId}/case-settings`, { paymentIntegration: 'payments', paymentPath: '/cases/{ref}/payments' }));
+  await must(put(`/internal/tenants/${tenantId}/case-settings`, { reason: 'Set up for this test.', paymentIntegration: 'payments', paymentPath: '/cases/{ref}/payments' }));
   answerDials();
   const key = parseKey(env.config.VOICELAB_SECRET_KEY);
   calls = { pool: env.pool, key, dncKey: dncKeyFrom(key), http: env.provider.fetch, baseUrl: BASE };
@@ -108,19 +113,19 @@ describe('when and how often a contact may be called, for every dial', () => {
   });
 
   it('holds a contact to the daily limit and the minimum gap, counting only calls that went out', async () => {
-    await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 2, maxPerWeek: 50, minGapMinutes: 0 }));
-    const phone = newPhone(); const now = nextLocal('10:00');
+    await must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 2, maxPerWeek: 50, minGapMinutes: 0 }));
+    const phone = newPhone(); const now = soonDaytime();
     for (let i = 0; i < 2; i++) expect(await placeOutboundCall(calls, null, { tenantId, to: phone, country: 'MY', now })).toMatchObject({ allowed: true });
     const third = await placeOutboundCall(calls, null, { tenantId, to: phone, country: 'MY', now });
     expect(third).toMatchObject({ allowed: false, reason: 'contact_limit' });
-    await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 10000 }));
+    await must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 10000 }));
     expect(await placeOutboundCall(calls, null, { tenantId, to: phone, country: 'MY', now })).toMatchObject({ allowed: false, reason: 'contact_limit' });     // two calls just made: inside the gap
-    await must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
+    await must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0 }));
     expect(await placeOutboundCall(calls, null, { tenantId, to: phone, country: 'MY', now })).toMatchObject({ allowed: true });                              // blocked ones did not count
   });
 
   it('rejects a policy that cannot work', async () => {
-    const bad = (b: object) => put(`/internal/tenants/${tenantId}/contact-policy`, b);
+    const bad = (b: object) => put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', ...b });
     expect((await bad({ timeZone: 'Mars/Olympus' })).statusCode).toBe(400);
     expect((await bad({ timeZone: KL, maxPerDay: 5, maxPerWeek: 3 })).statusCode).toBe(400);
     expect((await bad({ timeZone: KL, quietStart: '25:00' })).statusCode).toBe(400);
@@ -268,7 +273,7 @@ describe('calls that are not answered', () => {
   });
 
   it('stop at the retry limit and wait for a person, who must say what to do; the case is not called meanwhile', async () => {
-    await must(put(`/internal/tenants/${tenantId}/case-settings`, { retryMax: 1 }));
+    await must(put(`/internal/tenants/${tenantId}/case-settings`, { reason: 'Set up for this test.', retryMax: 1 }));
     const c = await mkCase('exhaust-1'); const T = nextLocal('11:00');
     await must(callbackAt(c.id, T));
     let now = mins(T, 1);
@@ -288,7 +293,7 @@ describe('calls that are not answered', () => {
     expect(dials()).toHaveLength(before);
     expect((await must(post(`/internal/cases/${c.id}/decision`, { decision: 'continue', note: 'Try once more by hand.' }))).json()).toMatchObject({ status: 'open' });
     expect((await post(`/internal/cases/${c.id}/decision`, { decision: 'continue', note: 'again' })).statusCode).toBe(409);       // only a case waiting for one
-    await must(put(`/internal/tenants/${tenantId}/case-settings`, { retryMax: 3 }));
+    await must(put(`/internal/tenants/${tenantId}/case-settings`, { reason: 'Set up for this test.', retryMax: 3 }));
   });
 });
 
@@ -439,7 +444,7 @@ describe('what stays private and what cannot be rewritten', () => {
 });
 
 describe('what the independent review found', () => {
-  const setPolicy = (b: object) => must(put(`/internal/tenants/${tenantId}/contact-policy`, { timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0, ...b }));
+  const setPolicy = (b: object) => must(put(`/internal/tenants/${tenantId}/contact-policy`, { reason: 'Set up for this test.', timeZone: KL, quietStart: '21:00', quietEnd: '08:00', maxPerDay: 20, maxPerWeek: 50, minGapMinutes: 0, ...b }));
 
   it('holds every dial to a contact\'s limits even when they arrive together, or in one dispatcher batch', async () => {
     await setPolicy({ minGapMinutes: 10000 });

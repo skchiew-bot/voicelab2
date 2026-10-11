@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api, type ChargingVersion, type Provider } from './api';
-import { Errors, Field, fmtDate, fmtDecimal, useAction, useLoad } from './ui';
+import { Errors, Field, fmtDate, fmtDecimal, ReasonField, reasonOk, useAction, useLoad } from './ui';
 
 const COMPONENTS = ['telephony_leg', 'stt', 'llm', 'tts', 'platform', 'concurrency', 'other'];
 const UNITS = ['per_minute', 'per_second', 'per_character', 'per_1k_characters', 'per_token', 'per_1k_tokens', 'per_1m_tokens', 'per_credit', 'flat'];
@@ -33,6 +33,7 @@ function CredentialCheck({ provider, onChecked }: { provider: Provider; onChecke
 
 function Capabilities({ provider, onChanged }: { provider: Provider; onChanged: () => void }) {
   const { error, run } = useAction();
+  const [reason, setReason] = useState('');
   return (
     <section className="card">
       <h2>Capabilities</h2>
@@ -40,6 +41,7 @@ function Capabilities({ provider, onChanged }: { provider: Provider; onChanged: 
         Native passes through to the provider. Composable is built from its primitives. Unsupported routes to a provider that has it.
         These are starting values: check them against the provider’s docs.
       </p>
+      <ReasonField label="Why (needed before changing one)" value={reason} onChange={setReason} />
       <Errors error={error} />
       <table>
         <tbody>
@@ -47,9 +49,10 @@ function Capabilities({ provider, onChanged }: { provider: Provider; onChanged: 
             <tr key={c.capability}>
               <td>{c.capability.replace(/_/g, ' ')}</td>
               <td>
-                <select aria-label={`${c.capability} support`} value={c.support}
+                <select aria-label={`${c.capability} support`} value={c.support} disabled={!reasonOk(reason)}
                   onChange={(e) => run(async () => {
-                    await api('PUT', `/internal/providers/${provider.id}/capabilities/${c.capability}`, { support: e.target.value });
+                    await api('PUT', `/internal/providers/${provider.id}/capabilities/${c.capability}`, { support: e.target.value, reason });
+                    setReason('');
                     onChanged();
                   })}>
                   <option value="native">native</option>
@@ -69,22 +72,24 @@ function ReferenceRates({ provider, onAdded }: { provider: Provider; onAdded: ()
   const refs = useLoad(() => api<{ adapterKey: string; summary: string }[]>('GET', '/internal/reference-rates'));
   const [from, setFrom] = useState('');
   const [increment, setIncrement] = useState('');
+  const [reason, setReason] = useState('');
   const { pending, error, run } = useAction();
   const ref = refs.data?.find((r) => r.adapterKey === provider.adapter_key);
   if (!ref) return null;
   return (
     <form className="card" aria-label="Use reference rates" onSubmit={async (e) => {
       e.preventDefault();
-      if (await run(() => api('POST', `/internal/providers/${provider.id}/charging/reference`, { effectiveFrom: new Date(from).toISOString(), billingIncrementSeconds: Number(increment) }))) { setFrom(''); setIncrement(''); onAdded(); }
+      if (await run(() => api('POST', `/internal/providers/${provider.id}/charging/reference`, { effectiveFrom: new Date(from).toISOString(), billingIncrementSeconds: Number(increment), reason }))) { setFrom(''); setIncrement(''); setReason(''); onAdded(); }
     }}>
       <h2>Start from reference rates</h2>
       <p className="muted">{ref.summary} These come from the blueprint's research, are approximate, and are saved as <strong>unconfirmed</strong>: check them against the provider's pricing page. You choose the billing increment, because the research gives none.</p>
       <div className="grid">
         <Field label="Billing increment (seconds)" help="e.g. 1, 6, 30 or 60."><input type="number" min="1" value={increment} onChange={(e) => setIncrement(e.target.value)} required /></Field>
         <Field label="Effective from (your local time)"><input type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} required /></Field>
+        <ReasonField label="Why these rates" value={reason} onChange={setReason} />
       </div>
       <Errors error={error} />
-      <div><button type="submit" className="secondary" disabled={pending}>Add reference rates</button></div>
+      <div><button type="submit" className="secondary" disabled={pending || !reasonOk(reason)}>Add reference rates</button></div>
     </form>
   );
 }
@@ -97,6 +102,7 @@ function AddVersion({ providerId, onAdded }: { providerId: string; onAdded: () =
   const [concurrency, setConcurrency] = useState('');
   const [burst, setBurst] = useState('');
   const [notes, setNotes] = useState('');
+  const [reason, setReason] = useState('');
   const [rows, setRows] = useState<Row[]>([blankRow()]);
   const { pending, error, run } = useAction();
 
@@ -113,8 +119,9 @@ function AddVersion({ providerId, onAdded }: { providerId: string; onAdded: () =
       burstPremiumMultiplier: burst ? Number(burst) : null,
       notes: notes || undefined,
       components: rows,
+      reason,
     }));
-    if (ok) { setRows([blankRow()]); setEffectiveFrom(''); setNotes(''); onAdded(); }
+    if (ok) { setRows([blankRow()]); setEffectiveFrom(''); setNotes(''); setReason(''); onAdded(); }
   }
 
   return (
@@ -134,6 +141,7 @@ function AddVersion({ providerId, onAdded }: { providerId: string; onAdded: () =
         <Field label="Burst premium multiplier (optional)" help="2 means the rate doubles on overburst."><input type="number" min="1" step="0.001" value={burst} onChange={(e) => setBurst(e.target.value)} /></Field>
       </div>
       <Field label="Notes (optional)"><input value={notes} onChange={(e) => setNotes(e.target.value)} /></Field>
+      <ReasonField label="Why the rates are changing" value={reason} onChange={setReason} />
 
       <h3>Billable components</h3>
       {rows.map((r, i) => (
@@ -155,7 +163,7 @@ function AddVersion({ providerId, onAdded }: { providerId: string; onAdded: () =
       ))}
       <button type="button" className="secondary" onClick={() => setRows((rs) => [...rs, blankRow()])}>Add component</button>
       <Errors error={error} />
-      <div><button type="submit" disabled={pending}>Save new version</button></div>
+      <div><button type="submit" disabled={pending || !reasonOk(reason)}>Save new version</button></div>
     </form>
   );
 }

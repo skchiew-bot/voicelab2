@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api, type CapacityRow, type FailoverRow, type FundingRow, type HealthRow, type PolicyView, type Provider } from './api';
 import { AgentPhones } from './AgentPhones';
-import { Errors, Field, fmtDate, useAction, useLoad, fmtDecimal } from './ui';
+import { Errors, Field, fmtDate, ReasonField, reasonOk, useAction, useLoad, fmtDecimal } from './ui';
 
 const STATE_TEXT: Record<HealthRow['state'], string> = { healthy: 'Healthy', failed: 'Failed over', unfunded: 'Out of funding' };
 const LEVEL_TEXT: Record<FundingRow['level'], string> = { ok: 'OK', warn: 'Running low', critical: 'Critical', empty: 'Empty' };
@@ -11,11 +11,12 @@ function Thresholds({ providers, onSaved }: { providers: Provider[]; onSaved: ()
   const [currency, setCurrency] = useState('USD');
   const [warn, setWarn] = useState('');
   const [critical, setCritical] = useState('');
+  const [reason, setReason] = useState('');
   const { pending, error, run } = useAction();
   return (
     <form className="card" aria-label="Funding alert levels" onSubmit={async (e) => {
       e.preventDefault();
-      if (await run(() => api('PUT', `/internal/providers/${providerId}/funding-thresholds`, { currency, warnBelow: warn, criticalBelow: critical }))) { setWarn(''); setCritical(''); onSaved(); }
+      if (await run(() => api('PUT', `/internal/providers/${providerId}/funding-thresholds`, { currency, warnBelow: warn, criticalBelow: critical, reason }))) { setWarn(''); setCritical(''); setReason(''); onSaved(); }
     }}>
       <h2>Funding alert levels</h2>
       <p className="muted">Get a warning while there is still money left. Below the first level the provider shows as running low; below the second, as critical.</p>
@@ -28,9 +29,10 @@ function Thresholds({ providers, onSaved }: { providers: Provider[]; onSaved: ()
         <Field label="Currency"><input maxLength={3} value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase())} required /></Field>
         <Field label="Warn below"><input inputMode="decimal" value={warn} onChange={(e) => setWarn(e.target.value)} required /></Field>
         <Field label="Critical below"><input inputMode="decimal" value={critical} onChange={(e) => setCritical(e.target.value)} required /></Field>
+        <ReasonField value={reason} onChange={setReason} />
       </div>
       <Errors error={error} />
-      <div><button type="submit" disabled={pending}>Save levels</button></div>
+      <div><button type="submit" disabled={pending || !reasonOk(reason)}>Save levels</button></div>
     </form>
   );
 }
@@ -38,6 +40,7 @@ function Thresholds({ providers, onSaved }: { providers: Provider[]; onSaved: ()
 function Policy() {
   const policy = useLoad(() => api<PolicyView>('GET', '/internal/resilience/policy'));
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [reason, setReason] = useState('');
   const { pending, error, run } = useAction();
   const p = policy.data;
   const fields: [keyof PolicyView, string, string][] = [
@@ -54,7 +57,7 @@ function Policy() {
     <form className="card" aria-label="Failover rules" onSubmit={async (e) => {
       e.preventDefault();
       const patch = Object.fromEntries(Object.entries(draft).filter(([, v]) => v !== '').map(([k, v]) => [k, Number(v)]));
-      if (await run(() => api('PUT', '/internal/resilience/policy', patch))) { setDraft({}); policy.reload(); }
+      if (await run(() => api('PUT', '/internal/resilience/policy', { ...patch, reason }))) { setDraft({}); setReason(''); policy.reload(); }
     }}>
       <h2>When to fail over</h2>
       <p className="muted">A provider is failed over after repeated errors or dead air, or when its typical reply is slow for a while. One bad reply never does it. Running out of funding does it at once.</p>
@@ -64,8 +67,9 @@ function Policy() {
           <input inputMode="numeric" placeholder={String(p[k])} value={draft[k] ?? ''} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })} />
         </Field>
       ))}</div>}
+      <ReasonField value={reason} onChange={setReason} />
       <Errors error={error} />
-      <div><button type="submit" disabled={pending || Object.values(draft).every((v) => v === '')}>Save rules</button></div>
+      <div><button type="submit" disabled={pending || Object.values(draft).every((v) => v === '') || !reasonOk(reason)}>Save rules</button></div>
     </form>
   );
 }

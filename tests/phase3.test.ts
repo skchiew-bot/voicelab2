@@ -43,9 +43,9 @@ beforeAll(async () => {
   telnyxId = (await must(post('/internal/providers', { adapterKey: 'telnyx', name: 'tx', params: { apiKey: 'KEY', webhookUrl: `${BASE}/h`, connectionId: 'c1', webhookPublicKey: 'AAAA' } }))).json().id;
   voiceId = (await must(post('/internal/providers', { adapterKey: 'elevenlabs', name: 'el', params: { apiKey: 'k' } }))).json().id;
   for (const [id, rate] of [[twilioId, '0.0140'], [telnyxId, '0.0070']] as const) {
-    await must(post(`/internal/providers/${id}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 6, components: [{ component: 'telephony_leg', unit: 'per_minute', rate, currency: 'USD' }] }));
+    await must(post(`/internal/providers/${id}/charging`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 6, components: [{ component: 'telephony_leg', unit: 'per_minute', rate, currency: 'USD' }] }));
   }
-  await must(post(`/internal/providers/${voiceId}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'tts', unit: 'per_1k_characters', rate: '0.30', currency: 'USD' }] }));
+  await must(post(`/internal/providers/${voiceId}/charging`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'tts', unit: 'per_1k_characters', rate: '0.30', currency: 'USD' }] }));
   await must(post('/internal/fx', { currency: 'MYR', perUsd: '4.5', effectiveFrom: '2026-01-01T00:00:00Z' }));
   for (const [providerId, e164] of [[telnyxId, TX1], [telnyxId, TX2], [twilioId, TW1]] as const) {
     await must(post('/internal/numbers', { providerId, e164, tenantId, projectId, country: 'MY' }));
@@ -379,7 +379,7 @@ describe('found in review', () => {
 
   it('ranks a provider priced in a currency with no exchange rate last instead of failing every dial', async () => {
     const eur = (await must(post('/internal/providers', { adapterKey: 'twilio', name: 'tw-eur', params: { accountSid: 'AC2', authToken: 't', twimlAppVoiceUrl: `${BASE}/v` } }))).json().id;
-    await must(post(`/internal/providers/${eur}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 6, components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.001', currency: 'EUR' }] }));
+    await must(post(`/internal/providers/${eur}/charging`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 6, components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.001', currency: 'EUR' }] }));
     await must(post('/internal/numbers', { providerId: eur, e164: '+60355550002', tenantId: t2, country: 'MY' }));
     env.provider.calls.length = 0;
     expect((await dialT2({ to: '+60123459002' })).statusCode).toBe(201);
@@ -392,7 +392,7 @@ describe('found in review', () => {
     // B: 0.05 MYR/min = 0.01111 USD/min. B is cheaper only if MYR is converted the right way round.
     const mk = async (name: string, rate: string, unit: string, currency: string) => {
       const id = (await must(post('/internal/providers', { adapterKey: 'telnyx', name, params: { apiKey: 'k', webhookUrl: `${BASE}/h`, connectionId: 'c', webhookPublicKey: 'AAAA' } }))).json().id;
-      await must(post(`/internal/providers/${id}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'telephony_leg', unit, rate, currency }] }));
+      await must(post(`/internal/providers/${id}/charging`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'telephony_leg', unit, rate, currency }] }));
       return id as string;
     };
     const a = await mk('rank-a', '0.0002', 'per_second', 'USD');

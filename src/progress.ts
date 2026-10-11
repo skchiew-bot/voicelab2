@@ -87,7 +87,7 @@ export const PHASES: PhaseProgress[] = [
     ], open: [
       'No voice provider is connected to live calls, so voice failover runs on a model of a provider and the bridge and replayed lines are not heard',
       'An outbound dial held back is not queued here: the dialler keeps its list and retries after the time given (a queue would have to keep the customer\'s number)',
-      'A caller waiting in the inbound queue hears a hold message; nothing yet starts the workflow when their turn comes',
+      'A caller waiting in the inbound queue is served the moment a channel frees, billed only from then: on Twilio the hold is cut short and the workflow begins (the redirect request is unchecked against the live service); a Telnyx caller hears the test message, as Telnyx has no voice link yet. Tested against fakes',
       'Funding is drawn down by each call\'s cost as it is recorded, tested only against fakes; the balance is our own estimate, not read back from any provider',
       'Failures are detected from errors at dial time and from reported samples, not yet from provider webhooks',
       'A failed provider recovers only through probes (`probeProviders` is not a scheduled job yet, because no voice provider is connected to probe; a telephony provider has no probe yet)',
@@ -109,7 +109,7 @@ export const PHASES: PhaseProgress[] = [
       'Mood and intent are read by word lists (English and Bahasa Malaysia, extendable per client); a model for turns the lists cannot read is not connected',
       'QA judgement questions need a model; none is connected, so they are left out of the score and the scorecard says it is incomplete',
       'The council (Phase 6) does not exist, so ticket council notes are empty and changes are not reviewed by it',
-      'Changes can be proposed, approved and put live; a change to a live flow made some other way is not stopped from skipping this path',
+      'A workflow version is put live in production only through an approved change, except by the deployers the owner names in PRODUCTION_DEPLOYERS (owner\'s decision, 2026-10-11), and only once each holds a token they chose; none is named until the owner sets it, so until then every production deploy and rollback needs a change. A rollback by anyone else means proposing the earlier version as a change, which needs it live in staging and rehearsed again. Which workflow a number answers with, and a client\'s approval levels, are changed by any admin without approval',
     ],
   },
   {
@@ -127,9 +127,9 @@ export const PHASES: PhaseProgress[] = [
       'The frequency, similarity, confidence and drift thresholds are conservative defaults and have not been tuned',
       'Drift compares how callers reacted before and after promotion; a change in the caller population over the same period would look like drift',
       'A promoted script is a layer over the workflow, not a part of its version: promoting or demoting changes what an in-flight call says at its next line',
-      'Turns from staging test calls count as evidence and a promoted script is spoken in every environment of the client; evidence is not yet kept apart by environment',
+      'Only live calls that really happened are evidence (staging test calls, rehearsals and runs started by hand are not); a promoted script is still spoken in every environment of the client, so a staging test hears what live callers hear while the node is unchanged',
       'Simulations do not use promoted scripts, so the production gate does not exercise what live calls will say; the cluster report is recomputed on each view and will need caching on a busy client',
-      'A person can approve a script that someone else asked about, and it need not be a different person from the one who drew it up',
+      'The person who drew a script up may turn it down but not approve it, and the councils are asked once per script; approval by a second person relies on that person being a separately approved admin',
     ],
   },
   {
@@ -156,9 +156,9 @@ export const PHASES: PhaseProgress[] = [
     id: 'CT', name: 'Control Tower', status: 'in_progress', summary: 'One internal console to see and steer the whole platform. It shows project progress, what needs attention, live calls, provider health, funding with days left, cost and margin, concurrency, stitching, deliverability, journey and QA, the learning loop and the business modules, and a change log of who changed what and why. Operators can drain, fail over and prefer providers, set the dialling pace and retire caller IDs from it, each with a reason.',
     criteria: [
       { text: 'An operator can answer these from one screen without opening a provider console:', state: 'partly', proof: 'tests', note: 'What needs attention, live calls, provider health, funding with days left at the last week\'s spend, cost and margin, concurrency against ceilings, and the stitching, deliverability, journey, learning and module panels are on one screen; cost by campaign is one click away on the Calls screen. Days left are worked out from the balance staff recorded less what each costed call cost (our own estimate, not read back from the providers), and alerts go by email only once a mail service is connected (none is yet). Tested against fakes; no real provider has been connected.' },
-      { text: 'Every action taken in the Control Tower appears in the change log, with who did it and why.', state: 'met', proof: 'tests', note: 'The Control Tower\'s own actions (drain and restore a provider, force or end a failover, prefer a priced telephony provider, set the dialling pace, retire or bring back a caller ID) each require a reason and appear in the change log with who took them and why. Tested against fakes. Changes made on other screens are also in the log; some of those take no reason, and the log says so.' },
+      { text: 'Every action taken in the Control Tower appears in the change log, with who did it and why.', state: 'met', proof: 'tests', note: 'The Control Tower\'s own actions (drain and restore a provider, force or end a failover, prefer a priced telephony provider, set the dialling pace, retire or bring back a caller ID) each require a reason and appear in the change log with who took them and why. Tested against fakes. Settings changed on other screens (failover rules, routes, the fallback ladder, agent phones, channels, funding levels, rate versions, capabilities, the workflow a number answers with, removing a do-not-call entry, journey, QA, model, approval, learning, case, contact, fee and diary settings, and who gets alerts by email) each require a reason too, shown in the log; a record rather than a setting (a new client, user, exchange rate, rate card or workflow version) takes none, and the log says so.' },
     ],
-    open: ['Changing a provider\'s concurrency ceiling from the Control Tower (it needs approval; today it is a new rate version on the provider\'s screen)', 'A reason asked for on settings changes made on other screens that take none today', 'Draining applies to new outbound calls and voice routing; inbound calls still arrive at the provider the caller dialled', 'Alerts by email are built and tested against a fake mail service; no real mail service is connected yet, so none are sent (the Control Tower says so). WhatsApp and Slack are not built', 'Clusters close to the promotion threshold on the learning panel'],
+    open: ['Changing a provider\'s concurrency ceiling from the Control Tower (it needs approval; today it is a new rate version on the provider\'s screen)', 'Draining applies to new outbound calls and voice routing; inbound calls still arrive at the provider the caller dialled', 'Alerts by email are built and tested against a fake mail service; no real mail service is connected yet, so none are sent (the Control Tower says so). WhatsApp and Slack are not built', 'Clusters close to the promotion threshold on the learning panel'],
   },
 ];
 

@@ -33,9 +33,9 @@ beforeAll(async () => {
   otherBranch = (await must(post(`/internal/tenants/${otherTenantId}/locations`, { name: 'Other branch', address: '1 Jalan Lain' }))).json().id;
   const mk = async (name: string, ref: string) => (await must(post(`/internal/tenants/${tenantId}/diaries`, { name, kind: 'individual', officerRef: ref, timeZone: KL }))).json().id as string;
   officerA = await mk('Aminah', 'officer-aminah'); officerB = await mk('Bala', 'officer-bala');
-  for (const d of [officerA, officerB]) await must(put(`/internal/diaries/${d}/hours`, { hours: [0, 1, 2, 3, 4, 5, 6].map((dow) => ({ dow, starts: '09:00', ends: '17:00' })) }));
+  for (const d of [officerA, officerB]) await must(put(`/internal/diaries/${d}/hours`, { reason: 'Set up for this test.', hours: [0, 1, 2, 3, 4, 5, 6].map((dow) => ({ dow, starts: '09:00', ends: '17:00' })) }));
   team = (await must(post(`/internal/tenants/${tenantId}/diaries`, { name: 'Field team', kind: 'group', timeZone: KL, members: [officerA, officerB] }))).json().id;
-  await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { freeUntilHours: 24, lateFee: '25.50', noShowFee: '40', currency: 'MYR', reminderHours: 24 }));
+  await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { reason: 'Set up for this test.', freeUntilHours: 24, lateFee: '25.50', noShowFee: '40', currency: 'MYR', reminderHours: 24 }));
 });
 afterAll(async () => { await env?.teardown(); });
 
@@ -48,8 +48,8 @@ describe('diaries', () => {
     expect((await mk({ kind: 'group' })).statusCode).toBe(400);                                              // no members
     expect((await mk({ kind: 'group', members: [team] })).statusCode).toBe(400);                              // a group is not a member
     expect((await mk({ kind: 'group', members: [crypto.randomUUID()] })).statusCode).toBe(400);
-    expect((await put(`/internal/diaries/${officerA}/hours`, { hours: [{ dow: 1, starts: '17:00', ends: '09:00' }] })).statusCode).toBe(400);
-    expect((await put(`/internal/diaries/${team}/hours`, { hours: [] })).statusCode).toBe(400);               // a group offers its members' hours
+    expect((await put(`/internal/diaries/${officerA}/hours`, { reason: 'Set up for this test.', hours: [{ dow: 1, starts: '17:00', ends: '09:00' }] })).statusCode).toBe(400);
+    expect((await put(`/internal/diaries/${team}/hours`, { reason: 'Set up for this test.', hours: [] })).statusCode).toBe(400);               // a group offers its members' hours
     const g = (await get(`/internal/diaries/${team}`)).json();
     expect(g).toMatchObject({ kind: 'group' }); expect(g.members.map((m: { name: string }) => m.name)).toEqual(['Aminah', 'Bala']);
   });
@@ -159,7 +159,7 @@ describe('a delay moves what follows', () => {
 
 describe('cancelling and moving', () => {
   it('charges a customer who cancels inside the free window the late fee, in exact money, and nobody else', async () => {
-    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { freeUntilHours: 720 }));              // everything in the next 30 days is "late"
+    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { reason: 'Set up for this test.', freeUntilHours: 720 }));              // everything in the next 30 days is "late"
     const a = (await must(comeIn(officerA, dayPlus(11), '09:00'))).json();
     const late = (await must(post(`/internal/appointments/${a.id}/cancel`, { by: 'customer', reason: 'Cannot make it' }))).json();
     expect(late).toMatchObject({ status: 'cancelled', cancelledBy: 'customer', fee: '25.50000000' });
@@ -167,7 +167,7 @@ describe('cancelling and moving', () => {
     expect((await notes(a.id)).find((n) => n.kind === 'fee')!.body).toBe(`A fee of 25.50 MYR applies to the appointment on ${(await notes(a.id))[0]!.body.match(/for (.*), at/)![1]}.`);
     const b = (await must(comeIn(officerA, dayPlus(11), '09:00'))).json();                                      // the time is free again
     expect((await must(post(`/internal/appointments/${b.id}/cancel`, { by: 'officer', reason: 'Officer unwell' }))).json().fee).toBe('0.00000000');
-    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { freeUntilHours: 24 }));
+    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { reason: 'Set up for this test.', freeUntilHours: 24 }));
     const far = (await must(comeIn(officerA, dayPlus(40), '09:00'))).json();
     expect((await must(post(`/internal/appointments/${far.id}/cancel`, { by: 'customer', reason: 'Changed my mind' }))).json().fee).toBe('0.00000000');
     expect((await post(`/internal/appointments/${far.id}/cancel`, { by: 'customer', reason: 'again' })).statusCode).toBe(409);
@@ -175,7 +175,7 @@ describe('cancelling and moving', () => {
   });
 
   it('moves an appointment to a free time, links the new one to the old, and charges a late move like a late cancellation', async () => {
-    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { freeUntilHours: 720 }));
+    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { reason: 'Set up for this test.', freeUntilHours: 720 }));
     const date = dayPlus(12);
     const a = (await must(comeIn(officerA, date, '09:00'))).json();
     await must(comeIn(officerA, date, '10:00'));
@@ -185,7 +185,7 @@ describe('cancelling and moving', () => {
     expect(await appt(a.id)).toMatchObject({ status: 'rescheduled', fee: '25.50000000' });
     expect((await notes(moved.id)).filter((n) => n.kind === 'moved').map((n) => n.recipient_kind).sort()).toEqual(['customer', 'officer']);
     expect((await notes(a.id)).some((n) => n.kind === 'cancelled' && n.recipient_kind === 'officer')).toBe(true);                                       // the first officer is told it is gone
-    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { freeUntilHours: 24 }));
+    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { reason: 'Set up for this test.', freeUntilHours: 24 }));
   });
 
   it('records a no-show with the client\'s fee, but only after the appointment has started', async () => {
@@ -266,7 +266,7 @@ describe('what the independent review found', () => {
   });
 
   it('never charges a customer for a time the business broke', async () => {
-    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { freeUntilHours: 720, lateFee: '10' }));
+    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { reason: 'Set up for this test.', freeUntilHours: 720, lateFee: '10' }));
     const date = dayPlus(29);
     const a = (await must(visit(officerB, date, '15:00', { travelMinutes: 0 }))).json();
     const b = (await must(visit(officerB, date, '16:00'))).json();
@@ -280,13 +280,13 @@ describe('what the independent review found', () => {
     expect((await appt(d.id)).fee).toBe('0.00000000');                                                                // delayed by the business
     const own = (await must(visit(officerB, dayPlus(18), '09:00'))).json();
     expect((await must(post(`/internal/appointments/${own.id}/cancel`, { by: 'customer', reason: 'Busy' }))).json().fee).toBe('10.00000000');           // its own cancellation is charged
-    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { freeUntilHours: 24, lateFee: '25.50' }));
+    await must(put(`/internal/tenants/${tenantId}/cancellation-policy`, { reason: 'Set up for this test.', freeUntilHours: 24, lateFee: '25.50' }));
   });
 
   it('counts a group member\'s load by their own calendar day', async () => {
     const mk = async (name: string, ref: string) => (await must(post(`/internal/tenants/${tenantId}/diaries`, { name, kind: 'individual', officerRef: ref, timeZone: KL }))).json().id as string;
     const c = await mk('Early C', 'officer-c'); const d = await mk('Early D', 'officer-d');
-    for (const x of [c, d]) await must(put(`/internal/diaries/${x}/hours`, { hours: [0, 1, 2, 3, 4, 5, 6].map((dow) => ({ dow, starts: '06:00', ends: '17:00' })) }));
+    for (const x of [c, d]) await must(put(`/internal/diaries/${x}/hours`, { reason: 'Set up for this test.', hours: [0, 1, 2, 3, 4, 5, 6].map((dow) => ({ dow, starts: '06:00', ends: '17:00' })) }));
     const grp = (await must(post(`/internal/tenants/${tenantId}/diaries`, { name: 'Early team', kind: 'group', timeZone: KL, members: [c, d] }))).json().id as string;
     const date = dayPlus(33);
     for (const t of ['06:00', '06:30', '07:00']) await must(comeIn(c, date, t, { durationMinutes: 20 }));                // 22:00 to 23:00 UTC the day before: the same local day
@@ -302,8 +302,8 @@ describe('what the independent review found', () => {
     expect((await post(`/internal/appointments/${r.id}/cancel`, { by: 'customer', reason: 'late' })).statusCode).toBe(409);
     expect((await post(`/internal/appointments/${r.id}/reschedule`, { by: 'customer', startsAt: at(dayPlus(35), '09:00') })).statusCode).toBe(409);
     await must(comeIn(officerA, dayPlus(36), '09:00'));
-    expect((await put(`/internal/diaries/${officerA}/hours`, { hours: [] })).statusCode).toBe(409);                    // would leave that booking with no hours
-    expect((await put(`/internal/diaries/${officerA}/hours`, { hours: [0, 1, 2, 3, 4, 5, 6].map((dow) => ({ dow, starts: '09:00', ends: '17:00' })) })).statusCode).toBe(200);
+    expect((await put(`/internal/diaries/${officerA}/hours`, { reason: 'Set up for this test.', hours: [] })).statusCode).toBe(409);                    // would leave that booking with no hours
+    expect((await put(`/internal/diaries/${officerA}/hours`, { reason: 'Set up for this test.', hours: [0, 1, 2, 3, 4, 5, 6].map((dow) => ({ dow, starts: '09:00', ends: '17:00' })) })).statusCode).toBe(200);
   });
 
   it('refuses to move an appointment into an inactive diary, and sends one reminder even after a delay', async () => {

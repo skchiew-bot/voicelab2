@@ -3,8 +3,11 @@ import pg from 'pg';
 // numeric -> string stays as is (money must not pass through floats); bigint ids -> number.
 pg.types.setTypeParser(20, (v) => Number(v));
 
-/** readOnly: staff who may look but not change anything; their transactions are read-only in the database too. */
-export type Actor = { kind: 'internal'; readOnly?: boolean } | { kind: 'client'; tenantId: string };
+/**
+ * readOnly: staff who may look but not change anything; their transactions are read-only in the database too.
+ * reason: why staff are making a settings change (`src/change-reason.ts`); the transaction carries it to the audit log.
+ */
+export type Actor = { kind: 'internal'; readOnly?: boolean; reason?: string } | { kind: 'client'; tenantId: string };
 
 export function createPool(connectionString: string): pg.Pool {
   // A request that cannot get a connection in time fails, rather than waiting for ever behind the others.
@@ -25,6 +28,7 @@ export async function withActor<T>(
     await c.query(actor.kind === 'internal' && actor.readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
     if (actor.kind === 'internal') {
       await c.query('SET LOCAL ROLE voicelab_internal');
+      if (actor.reason) await c.query("SELECT set_config('voicelab.change_reason', $1, true)", [actor.reason]);
     } else {
       await c.query('SET LOCAL ROLE voicelab_client');
       await c.query("SELECT set_config('app.tenant_id', $1, true)", [actor.tenantId]);

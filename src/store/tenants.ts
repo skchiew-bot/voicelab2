@@ -51,6 +51,18 @@ export async function createUser(
   return { ...rows[0], token, pendingApproval: pending };
 }
 
+/**
+ * A person replaces their own sign-in token: the one they were given was shown to whoever added them. Only the caller's
+ * own row, never someone else's; the new token is returned once, to them, and only its hash is kept.
+ */
+export async function rotateOwnToken(c: pg.PoolClient, userId: string) {
+  const token = newToken();
+  const r = await c.query(`UPDATE users SET token_hash = $2, token_rotated_at = now() WHERE id = $1 AND ${ACTIVE} RETURNING id`, [userId, hashToken(token)]);
+  if (r.rowCount === 0) throw new AppError(403, 'Only an active user can replace their token.');
+  await audit(c, userId, 'user.token', 'user', userId, {});
+  return { token };
+}
+
 /** Every user, staff first. Never the token or its hash. */
 export const listUsers = async (c: pg.PoolClient) => (await c.query(
   `SELECT u.id, u.email, u.role, u.tenant_id, t.name AS tenant, u.created_at, u.created_by, u.disabled_at,

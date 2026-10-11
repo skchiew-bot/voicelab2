@@ -17,9 +17,10 @@ import { eventsForCall } from './store/events.js';
 import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from './store/ledgers.js';
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, gateOutbound, normalizeE164, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
-import { addNumber, callKnown, callQueued, costCall, costPendingCalls, retryFailedCosts, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
+import { addNumber, callKnown, callQueued, callTimedOut, costCall, costPendingCalls, retryFailedCosts, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, promoteWaiting, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
 import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, WAIT_LINE_MS, waitLine, type RelayDeps, type RelaySession } from './store/relay.js';
 import { recordingAudio } from './store/recordings.js';
+import { needsReason, reasonOf, recordRoutes, takeReason } from './change-reason.js';
 import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
 import { accept, afterDial, afterRelay, settleAgentLeg, transferUrl, twimlHangup, twimlHoldingThenHangup, whisper } from './store/transfer.js';
 import { DEFAULT_FALLBACK } from './resilience/fallback.js';
@@ -50,9 +51,10 @@ import { sweepAudio, sweepDrift } from './store/learning.js';
 import { sweepReminders } from './store/appointments.js';
 import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
 import { parseTelnyx, parseTelnyxCost, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
-import { parseTwilio, twimlHold, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
+import { parseTwilio, twimlHold, twimlQueueTimedOut, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
 import { createProvider, getProvider, listProviders, preflight, recheckProvider, setCapability } from './store/providers.js';
-import { ACTIVE, approveAdmin, createProject, createTenant, createUser, disableUser, listProjects, listTenants, listUsers, STAFF_ROLES, type Role } from './store/tenants.js';
+import { ACTIVE, approveAdmin, createProject, createTenant, createUser, disableUser, listProjects, listTenants, listUsers, rotateOwnToken, STAFF_ROLES, type Role } from './store/tenants.js';
+import { productionAccess } from './store/workflows.js';
 
 interface Session { userId: string; email: string; role: Role; actor: Actor }
 
@@ -81,6 +83,7 @@ export interface Deps {
 export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): FastifyInstance {
   const http: Fetch = deps.fetch ?? fetch;
   const app = Fastify({ logger: false });
+  recordRoutes(app);
   const key = parseKey(config.VOICELAB_SECRET_KEY);
   const dncKey = dncKeyFrom(key);
   /** The gate judges quiet hours and contact limits by the keyed hash of the number; derive it for callers who only send the number. */
@@ -107,8 +110,16 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const s = await authenticate(req);
     if (s.actor.kind !== 'internal') throw new AppError(403, 'Internal access only.');
     if (s.actor.readOnly && req.method !== 'GET' && req.method !== 'HEAD') throw new AppError(403, 'Read-only access: this user can look but not change anything.');
-    return s;
+    const why = reasonOf(req);
+    return why ? { ...s, actor: { ...s.actor, reason: why } } : s;
   }
+
+  // A settings change needs a reason: checked once staff are known, before the route reads anything (src/change-reason.ts).
+  app.addHook('preHandler', async (req) => {
+    if (!needsReason(req)) return;
+    await internal(req);
+    takeReason(req);
+  });
 
   /** Managing who can sign in is for admins only. */
   async function admin(req: FastifyRequest): Promise<Session> {
@@ -160,7 +171,14 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   // Who am I: the admin UI uses this to validate a pasted token and pick its menus.
   app.get('/me', async (req) => {
     const s = await authenticate(req);
-    return { email: s.email, role: s.role, readOnly: s.actor.kind === 'internal' && Boolean(s.actor.readOnly) };
+    // production: how this person may put a flow live there (directly, after replacing their token, or by a change).
+    const production = s.actor.kind === 'internal' ? await withActor(pool, s.actor, (c) => productionAccess(c, s.userId, config.PRODUCTION_DEPLOYERS)) : 'change';
+    return { email: s.email, role: s.role, readOnly: s.actor.kind === 'internal' && Boolean(s.actor.readOnly), production };
+  });
+  // Replace your own sign-in token. The one you were given was shown to whoever added you; this one only you see.
+  app.post('/me/token', async (req) => {
+    const s = await authenticate(req);
+    return withActor(pool, { kind: 'internal' }, (c) => rotateOwnToken(c, s.userId));
   });
 
   // ------------------------------------------------------------ users
@@ -432,7 +450,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     return withActor(pool, s.actor, (c) => gateOutbound(c, dncKey, withContact(body)));
   });
 
-  registerWorkflowRoutes(app, { pool, key, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerWorkflowRoutes(app, { pool, key, internal, productionDeployers: config.PRODUCTION_DEPLOYERS, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
   registerAppointmentRoutes(app, { pool, internal });
   registerKnowledgeRoutes(app, { pool, internal });
   registerCaseRoutes(app, { internal, cases: { calls: callDeps, ...deps.cases } });
@@ -465,8 +483,10 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     // missed only because one batch is small. Bounded, and a batch smaller than its limit means nothing more is due.
     { name: 'cases-dispatch', everySeconds: 60, run: () => drain(() => dispatchDue(caseDeps, () => new Date(), 20), 20, 10) },
     { name: 'queue-expire', everySeconds: 60, run: async () => {
+      // A free channel goes to a waiting caller before anyone is timed out of the queue.
+      const promotion = await promoteWaiting(callDeps);   // never throws, so expiry always runs
       const out = await sys((c) => expireQueued(c, null, 300));
-      return { expired: out.expired, hungUp: await hangUpCalls(callDeps, out.hangups) };
+      return { served: promotion.served, promotionFailed: promotion.failed, expired: out.expired, hungUp: await hangUpCalls(callDeps, out.hangups) };
     } },
     { name: 'faults-sweep', everySeconds: 300, run: () => sys((c) => sweepFaults(c)) },
     { name: 'workflow-runs-sweep', everySeconds: 900, run: () => abandonStaleRuns(runDeps, null, { olderThanMinutes: 60 }) },
@@ -637,6 +657,8 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     // A call with a workflow to run is handed to the speech relay; one without hears the test message.
     const relayed = known && !queued && ev ? await relayTarget(callDeps, provider.id, ev.providerCallId) : null;
     if (relayed) return reply.type('text/xml').send(twimlRelay(relayUrl(provider.id), relayed, relayCallToken(key, relayed), relaySettings(provider.params), transferUrl(callDeps.baseUrl!, provider.id, 'relay-ended', relayed)));
+    // A caller timed out of the queue whose line is still open (the hangup has not landed yet) hears that a callback is booked.
+    if (known && !queued && !relayed && ev && await callTimedOut(callDeps, provider.id, ev.providerCallId)) return reply.type('text/xml').send(twimlQueueTimedOut());
     return reply.type('text/xml').send(known ? (queued ? twimlHold(`${callDeps.baseUrl}/webhooks/twilio/${provider.id}/voice${callId ? `?callId=${callId}` : ''}`) : twimlTestCall()) : twimlReject());
   };
   app.post('/webhooks/twilio/:providerId/status', twilioHook(false));

@@ -142,7 +142,7 @@ export async function applyChange(c: pg.PoolClient, actorId: string, changeId: s
   // Changes to one flow go live one at a time, and only against the version they were written for.
   await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`change-live:${ch.workflow_id}:${ch.environment}`]);
   await assertStillCurrent(c, ch);
-  const dep = await deploy(c, actorId, ch.workflow_id, { versionId: ch.to_version_id, environment: ch.environment });
+  const dep = await deploy(c, actorId, ch.workflow_id, { versionId: ch.to_version_id, environment: ch.environment }, { by: 'change' });
   await c.query('INSERT INTO change_applications (change_id, deployment_id, applied_by) VALUES ($1,$2,$3)', [changeId, dep.id, actorId]);
   await audit(c, actorId, 'change.apply', 'change', changeId, { environment: ch.environment, version: ch.to_version });
   return getChange(c, changeId);

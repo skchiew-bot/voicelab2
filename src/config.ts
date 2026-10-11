@@ -12,6 +12,10 @@ const schema = z.object({
   // server at once: each job runs on one server at a time. Turn it off only on a server that should leave the jobs to the
   // others; if no server runs them, the Control Tower raises them as overdue.
   SCHEDULER: z.enum(['on', 'off']).default('on'),
+  // The staff (by sign-in email, comma-separated) who may put a flow live in production directly. Everyone else proposes
+  // a change, which a different person approves. Set by the owner here, outside the API, so no admin can add themselves.
+  PRODUCTION_DEPLOYERS: z.string().default('').transform((s) => s.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean))
+    .pipe(z.array(z.string().email())),
 });
 
 export type Config = z.infer<typeof schema>;

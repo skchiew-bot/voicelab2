@@ -31,14 +31,14 @@ const RELAY_CHARS = { component: 'tts', unit: 'per_1k_characters', rate: '0.30',
 /** A Twilio provider with these rates from the start of the year. */
 async function twilio(name: string, components: object[]) {
   const id = (await must(post('/internal/providers', { adapterKey: 'twilio', name, params: { accountSid: 'AC1', authToken: 'FAKE_TOKEN_tw', twimlAppVoiceUrl: 'https://voicelab.test/v' } }))).json().id as string;
-  await must(post(`/internal/providers/${id}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60, components }));
+  await must(post(`/internal/providers/${id}/charging`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60, components }));
   return id;
 }
 
 /** A model provider for one model id, with its token rates from the start of the year. */
 async function modelProvider(model: string, input: string, output: string | null = null) {
   const id = (await must(post('/internal/providers', { adapterKey: 'anthropic', name: model, params: { model } }))).json().id as string;
-  await must(post(`/internal/providers/${id}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [
+  await must(post(`/internal/providers/${id}/charging`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [
     { component: 'llm', unit: 'per_1m_tokens', rate: input, currency: 'USD', billingLine: 'input' },
     ...(output ? [{ component: 'llm', unit: 'per_1m_tokens', rate: output, currency: 'USD', billingLine: 'output' }] : []),
   ] }));

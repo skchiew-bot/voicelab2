@@ -29,7 +29,7 @@ beforeAll(async () => {
     adapterKey: 'telnyx', name: 'tx', params: { apiKey: 'KEY', webhookUrl: 'https://voicelab.test/h', connectionId: 'conn-1', webhookPublicKey: pubB64 },
   }))).json().id;
   // 0.0070 a minute, billed by the minute: a 61-second call is billed 120 seconds, 0.0140 USD.
-  await must(env.call(st, 'POST', `/internal/providers/${telnyxId}/charging`, {
+  await must(env.call(st, 'POST', `/internal/providers/${telnyxId}/charging`, { reason: 'Set up for this test.',
     effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60,
     components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.0070', currency: 'USD' }],
   }));

@@ -107,7 +107,7 @@ describe('what needs attention', () => {
     await must(env.call(st(), 'POST', '/internal/numbers', { providerId: p.id, e164: '+60311112222', tenantId: tenant, country: 'MY' }));
     expect((await alerts('tw-rates'))[0]).toMatchObject({ severity: 'high', code: 'no_rates', link: `#/providers/${p.id}` });
 
-    const v = (await must(env.call(st(), 'POST', `/internal/providers/${p.id}/charging/reference`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60 }))).json();
+    const v = (await must(env.call(st(), 'POST', `/internal/providers/${p.id}/charging/reference`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60 }))).json();
     expect(await codes('tw-rates')).toEqual(['rates_unconfirmed']);
     await must(env.call(st(), 'POST', `/internal/charging/${v.id}/confirm`, { sourceUrl: 'https://example.com/pricing' }));
     expect(await codes('tw-rates')).toEqual([]);

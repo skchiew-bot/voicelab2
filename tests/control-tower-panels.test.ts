@@ -45,7 +45,7 @@ beforeAll(async () => {
   tenantId = (await must(env.call(st(), 'POST', '/internal/tenants', { name: 'Panel Co' }))).json().id;
   providerId = (await must(env.call(st(), 'POST', '/internal/providers', { adapterKey: 'twilio', name: 'tw-panel',
     params: { accountSid: 'AC1', authToken: 'tok', twimlAppVoiceUrl: 'https://x.example/v' } }))).json().id;
-  const v = (await must(env.call(st(), 'POST', `/internal/providers/${providerId}/charging/reference`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60 }))).json();
+  const v = (await must(env.call(st(), 'POST', `/internal/providers/${providerId}/charging/reference`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60 }))).json();
   await must(env.call(st(), 'POST', `/internal/charging/${v.id}/confirm`, { sourceUrl: 'https://example.com/pricing' }));
   await must(env.call(st(), 'POST', '/internal/fx', { currency: 'MYR', perUsd: '4.5', effectiveFrom: '2026-01-01T00:00:00Z' }));
 });
@@ -67,7 +67,7 @@ describe('the change log', () => {
   it('says why, from the record the change made, and scrubs any number from it', async () => {
     const mk = async (email: string) => (await withActor(env.pool, { kind: 'internal' }, (c) => createUser(c, null, { tenantId: null, email, role: 'internal_admin' }))).token;
     const b = await mk('cl-b@daythree.test'); const c = await mk('cl-c@daythree.test'); const d = await mk('cl-d@daythree.test');
-    await must(env.call(st(), 'PUT', `/internal/tenants/${tenantId}/policy/levels`, { levels: ['Owner', 'Compliance'] }));
+    await must(env.call(st(), 'PUT', `/internal/tenants/${tenantId}/policy/levels`, { reason: 'Compliance signs off every policy now.', levels: ['Owner', 'Compliance'] }));
     const p = (await must(env.call(st(), 'POST', `/internal/tenants/${tenantId}/policy/proposals`, { rules: [{ id: 'r', kind: 'must_not_say', phrases: ['we will sue'] }], summary: 'Stop threats on calls.' }))).json();
     await must(env.call(b, 'POST', `/internal/policy-versions/${p.id}/decision`, { decision: 'approved', note: 'Reads right.' }));
     await must(env.call(c, 'POST', `/internal/policy-versions/${p.id}/decision`, { decision: 'approved', note: 'Second look done.' }));
@@ -78,7 +78,7 @@ describe('the change log', () => {
       ['policy.decide', 'cl-c@daythree.test', 'Second look done.'],                  // each approver's own note, not the other's
       ['policy.decide', 'cl-b@daythree.test', 'Reads right.'],
       ['policy.propose', 'staff@daythree.test', 'Stop threats on calls.'],
-      ['policy.levels', 'staff@daythree.test', null],                                  // no reason was given, and none is made up
+      ['policy.levels', 'staff@daythree.test', 'Compliance signs off every policy now.'],   // a settings change says why too
     ]);
     expect(pol[0]!.link).toBe('#/knowledge');
     await env.pool.query(`INSERT INTO audit_log (actor_id, action, entity, entity_id, detail) VALUES (NULL, 'dnc.add', 'dnc', NULL, $1)`, [{ reason: 'asked by +60 12-345 6789 to stop' }]);

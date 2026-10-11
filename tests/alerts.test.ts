@@ -45,7 +45,7 @@ const sweep = (withMail = true) => sweepAlerts(deps(withMail), new Date(clock));
 const act = (b: object) => must(env.call(st(), 'POST', '/internal/control-tower/actions', b));
 const deliveries = async () => (await must(env.call(st(), 'GET', '/internal/alerts/deliveries'))).json() as { email: string; kind: string; status: string; alertKey: string; episode: number }[];
 const staff = async (email: string) => withActor(env.pool, { kind: 'internal' }, (c) => createUser(c, null, { tenantId: null, email, role: 'internal_admin' }));
-const subscribe = (userId: string, minSeverity: string) => must(env.call(st(), 'PUT', '/internal/alerts/subscriptions', { userId, minSeverity }));
+const subscribe = (userId: string, minSeverity: string) => must(env.call(st(), 'PUT', '/internal/alerts/subscriptions', { userId, minSeverity, reason: 'Set up for this test.' }));
 const drain = () => act({ action: 'drain', providerId: twilioId, reason: 'Testing alerts.' });
 const restore = () => act({ action: 'restore', providerId: twilioId, reason: 'Done testing.' });
 const settle = async () => { await restore(); later(31); await sweep(); };
@@ -61,7 +61,7 @@ describe('alerts by email', () => {
   it('only staff can be subscribed, and only an admin can subscribe them', async () => {
     const t = (await must(env.call(st(), 'POST', '/internal/tenants', { name: 'Mail Co' }))).json().id;
     const client = (await must(env.call(st(), 'POST', `/internal/tenants/${t}/users`, { email: 'client@mail.test', role: 'tenant_admin' }))).json();
-    const r = await env.call(st(), 'PUT', '/internal/alerts/subscriptions', { userId: client.id, minSeverity: 'low' });
+    const r = await env.call(st(), 'PUT', '/internal/alerts/subscriptions', { userId: client.id, minSeverity: 'low', reason: 'Set up for this test.' });
     expect(r.statusCode).toBe(400); expect(r.json().error).toContain('Only Daythree staff');
     for (const [m, u] of [['PUT', '/internal/alerts/subscriptions'], ['GET', '/internal/alerts/subscriptions'], ['GET', '/internal/alerts/deliveries'], ['POST', '/internal/alerts/sweep']] as const) {
       expect((await env.call(client.token, m, u, m === 'PUT' ? { userId: client.id, minSeverity: 'low' } : undefined)).statusCode).toBe(403);
@@ -97,7 +97,7 @@ describe('alerts by email', () => {
     sent.length = 0;
     await subscribe(carol.id, 'medium'); later(1); await sweep();
     expect(sent.map((m) => m.to)).toEqual(['carol@daythree.test']); expect(sent[0]!.text).toContain('no client rate card'); expect(sent[0]!.text).not.toContain('No MYR');
-    await must(env.call(st(), 'POST', `/internal/alerts/subscriptions/${carol.id}/end`));
+    await must(env.call(st(), 'POST', `/internal/alerts/subscriptions/${carol.id}/end`, { reason: 'Set up for this test.' }));
   });
 
   it('does not email again an alert that flickers, and does once it has been gone a while and comes back', async () => {
@@ -166,7 +166,7 @@ describe('alerts by email', () => {
   it('sends nothing to someone disabled or unsubscribed, and does not list them', async () => {
     sent.length = 0;
     await must(env.call(st(), 'POST', `/internal/users/${bob.id}/disable`));
-    await must(env.call(st(), 'POST', `/internal/alerts/subscriptions/${alice.id}/end`));
+    await must(env.call(st(), 'POST', `/internal/alerts/subscriptions/${alice.id}/end`, { reason: 'Set up for this test.' }));
     await drain(); later(1); await sweep(); expect(sent).toEqual([]);
     expect((await must(env.call(st(), 'GET', '/internal/alerts/subscriptions'))).json()).toEqual([]);
     expect((await env.call(st(), 'POST', `/internal/alerts/subscriptions/${bob.id}/test`)).statusCode).toBe(404);   // no test email to a disabled person

@@ -44,7 +44,7 @@ beforeAll(async () => {
   env = await (await import('./helpers.js')).setupDb();
   tenantId = (await must(post('/internal/tenants', { name: 'Journey Co' }))).json().id;
   telnyxId = (await must(post('/internal/providers', { adapterKey: 'telnyx', name: 'tx', params: { apiKey: 'K', webhookUrl: `${BASE}/h`, connectionId: 'c1', webhookPublicKey: 'AAAA' } }))).json().id;
-  await must(post(`/internal/providers/${telnyxId}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.006', currency: 'USD' }] }));
+  await must(post(`/internal/providers/${telnyxId}/charging`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.006', currency: 'USD' }] }));
   await must(post('/internal/fx', { currency: 'MYR', perUsd: '4.5', effectiveFrom: '2026-01-01T00:00:00Z' }));
   await must(post('/internal/numbers', { providerId: telnyxId, e164: OUR, tenantId, country: 'MY' }));
   const mk = async (name: string, def: WorkflowDefinition) => {
@@ -240,7 +240,7 @@ describe('who ended the call, and system drops', () => {
   });
 
   it('catches a drop that never came with an end event, once the failure is older than the agreed latency', async () => {
-    await must(put('/internal/journey/drop-latency', { seconds: 90 }));
+    await must(put('/internal/journey/drop-latency', { reason: 'Set up for this test.', seconds: 90 }));
     const { callId, pcid } = await liveCall(failingId, {});                    // the flow failed; nobody hung up, so the call stays open
     expect((await callRow(pcid)).status).toBe('in_progress');
     const now = new Date();
@@ -253,8 +253,8 @@ describe('who ended the call, and system drops', () => {
     expect((await callRow(pcid)).fault).toBe(true);
     expect((await run(new Date(now.getTime() + 200_000))).flagged).toEqual([]);   // once only
     expect((await get(`/internal/tickets?tenantId=${tenantId}`)).json().filter((t: { call_id: string }) => t.call_id === callId)).toHaveLength(1);
-    expect((await put('/internal/journey/drop-latency', { seconds: 0 })).statusCode).toBe(400);
-    await must(put('/internal/journey/drop-latency', { seconds: 60 }));
+    expect((await put('/internal/journey/drop-latency', { reason: 'Set up for this test.', seconds: 0 })).statusCode).toBe(400);
+    await must(put('/internal/journey/drop-latency', { reason: 'Set up for this test.', seconds: 60 }));
   });
 });
 
@@ -337,13 +337,13 @@ describe('how a client\'s calls are read', () => {
   it('lets a client add words and change when to escalate, and refuses nonsense', async () => {
     const t = (await must(post('/internal/tenants', { name: 'Config Co' }))).json().id;
     expect((await get(`/internal/tenants/${t}/journey-config`)).json()).toMatchObject({ maxRecoveries: 2, severeBelow: -0.75 });
-    const set = await put(`/internal/tenants/${t}/journey-config`, { maxRecoveries: 3, lexicon: { severe: ['ombudsman'], topics: { rebate: ['rebate'] } } });
+    const set = await put(`/internal/tenants/${t}/journey-config`, { reason: 'Set up for this test.', maxRecoveries: 3, lexicon: { severe: ['ombudsman'], topics: { rebate: ['rebate'] } } });
     expect(set.json()).toMatchObject({ maxRecoveries: 3 });
-    expect((await put(`/internal/tenants/${t}/journey-config`, { lexicon: { severe: 'x' } })).statusCode).toBe(400);
-    expect((await put(`/internal/tenants/${t}/journey-config`, { lexicon: { evil: ['x'] } })).statusCode).toBe(400);
-    expect((await put(`/internal/tenants/${t}/journey-config`, { lexicon: { topics: { constructor: ['x'] } } })).statusCode).toBe(400);
-    expect((await put(`/internal/tenants/${t}/journey-config`, { negativeBelow: -0.8, severeBelow: -0.2 })).statusCode).toBe(400);
-    expect((await put(`/internal/tenants/${t}/journey-config`, { maxRecoveries: 0 })).statusCode).toBe(400);
+    expect((await put(`/internal/tenants/${t}/journey-config`, { reason: 'Set up for this test.', lexicon: { severe: 'x' } })).statusCode).toBe(400);
+    expect((await put(`/internal/tenants/${t}/journey-config`, { reason: 'Set up for this test.', lexicon: { evil: ['x'] } })).statusCode).toBe(400);
+    expect((await put(`/internal/tenants/${t}/journey-config`, { reason: 'Set up for this test.', lexicon: { topics: { constructor: ['x'] } } })).statusCode).toBe(400);
+    expect((await put(`/internal/tenants/${t}/journey-config`, { reason: 'Set up for this test.', negativeBelow: -0.8, severeBelow: -0.2 })).statusCode).toBe(400);
+    expect((await put(`/internal/tenants/${t}/journey-config`, { reason: 'Set up for this test.', maxRecoveries: 0 })).statusCode).toBe(400);
     // the word the client added is read as severe on that client's calls, and only theirs
     const wf = (await must(post(`/internal/tenants/${t}/workflows`, { name: 'cfg_flow', definition: { start: 'a', nodes: { a: { type: 'speak', speech: 'fixed', text: 'Hi', listen: { captureAs: 'x' }, transitions: [{ to: 'a' }] } } } }))).json();
     await must(post(`/internal/workflows/${wf.workflow.id}/deploy`, { versionId: wf.version.id, environment: 'staging' }));
@@ -358,7 +358,7 @@ import { startRun } from '../src/store/runs.js';
 
 describe('the audit trail of what an AI decided', () => {
   it('records each model-written line as used, tidied or turned down, with why, the model, its tier and its tokens', async () => {
-    await must(put('/internal/model-config/speak_dynamic', { tier: 'haiku', modelId: 'haiku-model', escalateTo: 'sonnet' }));
+    await must(put('/internal/model-config/speak_dynamic', { reason: 'Set up for this test.', tier: 'haiku', modelId: 'haiku-model', escalateTo: 'sonnet' }));
     const dyn: WorkflowDefinition = { start: 'd', nodes: { d: { type: 'speak', speech: 'dynamic', prompt: 'Greet the caller', text: 'Good day.', transitions: [{ to: 'z' }] }, z: { type: 'end', outcome: 'ok' } } };
     const c = (await must(post(`/internal/tenants/${tenantId}/workflows`, { name: 'dyn_flow', definition: dyn }))).json();
     await must(post(`/internal/workflows/${c.workflow.id}/deploy`, { versionId: c.version.id, environment: 'staging' }));

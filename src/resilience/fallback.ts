@@ -3,7 +3,8 @@
  * if one is on hand, else a callback offer, else voicemail. Whatever is configured, a callback request is recorded
  * unless the call went to a person, so the client can always follow up. The ladder never ends in silence.
  */
-export interface FallbackPlan { holdingMessage: string; offerCallback: boolean; humanTransfer: boolean; voicemail: boolean }
+/** `waitMessage` is the short line a reconnected caller hears while the call waits to carry on; null means the default. */
+export interface FallbackPlan { holdingMessage: string; offerCallback: boolean; humanTransfer: boolean; voicemail: boolean; waitMessage?: string | null }
 export type FallbackStep =
   | { kind: 'holding_message'; text: string }
   | { kind: 'transfer_human' }

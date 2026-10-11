@@ -4,6 +4,7 @@ import {
 } from './definition.js';
 import { isWorkflowName } from './refs.js';
 import { slotsIn } from './render.js';
+import { validTimeZone } from './callback.js';
 
 export interface Issue { code: string; nodeId?: string; message: string }
 export interface ValidationResult { errors: Issue[]; warnings: Issue[] }
@@ -79,6 +80,7 @@ export function validateDefinition(input: unknown): ValidationResult {
   const assigned = new Set<string>([...BUILT_IN, ...declared]);
   const used: { name: string; nodeId: string }[] = [];
   const spoken: { name: string; nodeId: string }[] = [];   // read out loud or fed to a model
+  const recorded: { name: string; nodeId: string }[] = []; // read into the call's outcome (a callback time)
   const sent: { name: string; nodeId: string }[] = [];     // sent to an integration
   const sensitive = new Set<string>();
   if (def.sensitiveVariables !== undefined) {
@@ -157,7 +159,8 @@ export function validateDefinition(input: unknown): ValidationResult {
           else {
             assigned.add(l.captureAs);
             if (l.sensitive !== undefined && typeof l.sensitive !== 'boolean') nodeErr('bad_listen', 'listen.sensitive must be true or false.');
-            if (l.sensitive === true) sensitive.add(l.captureAs);
+            // What a sensitive answer meant is as sensitive as the answer.
+            if (l.sensitive === true) { sensitive.add(l.captureAs); if (l.intents !== undefined) sensitive.add(`${l.captureAs}_intent`); }
             if (l.intents !== undefined) {
               if (!isObj(l.intents) || !Object.entries(l.intents).every(([k, v]) => isName(k) && Array.isArray(v) && v.length > 0 && v.every((p) => typeof p === 'string' && p.trim() !== ''))) {
                 nodeErr('bad_intents', 'intents must map each intent name to a non-empty list of phrases.');
@@ -201,6 +204,17 @@ export function validateDefinition(input: unknown): ValidationResult {
         if (n.contact !== undefined && !(CONTACT_OUTCOMES as readonly unknown[]).includes(n.contact)) {
           nodeErr('unknown_contact', `"${String(n.contact)}" is not a call outcome (${CONTACT_OUTCOMES.join(', ')}). Leave it out when this end does not say.`);
         }
+        if (n.callback !== undefined) {
+          const cb = n.callback as unknown as Record<string, unknown>;
+          if (!isObj(cb) || !isName(cb.day) || !isName(cb.hour) || typeof cb.timeZone !== 'string' || Object.keys(cb).some((k) => !['day', 'hour', 'timeZone'].includes(k))) {
+            nodeErr('bad_callback', 'callback needs "day" and "hour" (the variables holding them) and "timeZone" (such as Asia/Kuala_Lumpur), and nothing else.');
+          } else {
+            if (!validTimeZone(cb.timeZone)) nodeErr('bad_callback', `"${cb.timeZone}" is not a time zone name, such as Asia/Kuala_Lumpur.`);
+            if (n.contact === undefined) nodeErr('callback_without_contact', 'A callback time is recorded with the call\'s outcome, so this end must also say "contact".');
+            else if (n.contact === 'wrong_number') nodeErr('callback_without_contact', 'A wrong number has no callback time.');
+            for (const v of [cb.day, cb.hour]) { addUse(v); recorded.push({ name: v, nodeId: id }); }
+          }
+        }
         break;
       default: nodeErr('unknown_node_type', `"${String((n as { type: unknown }).type)}" is not a node type (speak, api, subflow, handoff, end).`);
     }
@@ -221,6 +235,7 @@ export function validateDefinition(input: unknown): ValidationResult {
 
   for (const u of spoken) if (sensitive.has(u.name)) err('sensitive_in_speech', `"${u.name}" is sensitive, so it cannot be spoken or given to a model.`, u.nodeId);
   for (const u of sent) if (sensitive.has(u.name)) err('sensitive_in_request', `"${u.name}" is sensitive, so it cannot be sent to an integration.`, u.nodeId);
+  for (const u of recorded) if (sensitive.has(u.name)) err('sensitive_in_record', `"${u.name}" is sensitive, so it cannot be recorded as a callback time.`, u.nodeId);
   for (const name of sensitive) if (!assigned.has(name)) err('unknown_variable', `"${name}" is marked sensitive but is never set.`);
   for (const u of used) {
     if (!assigned.has(u.name)) err('unknown_variable', `"${u.name}" is used but never set: declare it in "variables" or capture it earlier.`, u.nodeId);

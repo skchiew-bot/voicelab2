@@ -36,11 +36,13 @@ const stringsIn = (v: Json | undefined, out: string[] = []): string[] => {
 /** Variables a workflow marks sensitive, by list or by a sensitive answer. */
 export function sensitiveOf(def: WorkflowDefinition): Set<string> {
   const out = new Set<string>(def.sensitiveVariables ?? []);
-  for (const n of Object.values(def.nodes)) if (n.type === 'speak' && n.listen?.sensitive) out.add(n.listen.captureAs);
+  for (const n of Object.values(def.nodes)) {
+    if (n.type === 'speak' && n.listen?.sensitive) { out.add(n.listen.captureAs); if (n.listen.intents) out.add(`${n.listen.captureAs}_intent`); }
+  }
   return out;
 }
 
-/** Variables a workflow reads out loud, gives to a model, or sends to an integration. */
+/** Variables a workflow reads out loud, gives to a model, sends to an integration, or records as a callback time. */
 export function leavesTheCall(def: WorkflowDefinition): Set<string> {
   const out = new Set<string>();
   for (const n of Object.values(def.nodes)) {
@@ -49,6 +51,8 @@ export function leavesTheCall(def: WorkflowDefinition): Set<string> {
       for (const t of [...texts, ...(n.speech === 'dynamic' && n.prompt ? [n.prompt] : [])]) slotsIn(t).forEach((s) => out.add(s));
     } else if (n.type === 'api') {
       for (const t of [n.path, ...stringsIn(n.body as Json | undefined)]) slotsIn(t).forEach((s) => out.add(s));
+    } else if (n.type === 'end' && n.callback) {
+      for (const v of [n.callback.day, n.callback.hour]) if (typeof v === 'string') out.add(v);
     }
   }
   return out;
@@ -74,7 +78,7 @@ export function checkReferences(
     const theirUse = leavesTheCall(target); const myUse = leavesTheCall(def);
     const leaks = [...mine].filter((v) => theirUse.has(v));
     if (r.kind === 'subflow') leaks.push(...[...theirs].filter((v) => myUse.has(v) && !leaks.includes(v)));
-    if (leaks.length) issues.push({ code: 'sensitive_across_workflows', node: r.node, message: `${leaks.map((m) => `"${m}"`).join(', ')} is sensitive in "${leaks.some((v) => mine.has(v)) ? name : r.workflow}" but spoken or sent by "${leaks.some((v) => mine.has(v)) ? r.workflow : name}". A sensitive value is never spoken or sent, in any workflow of the call.` });
+    if (leaks.length) issues.push({ code: 'sensitive_across_workflows', node: r.node, message: `${leaks.map((m) => `"${m}"`).join(', ')} is sensitive in "${leaks.some((v) => mine.has(v)) ? name : r.workflow}" but spoken, sent or recorded by "${leaks.some((v) => mine.has(v)) ? r.workflow : name}". A sensitive value is never spoken, sent or recorded, in any workflow of the call.` });
     const missing = (target.variables ?? []).filter((v) => !known.has(v));
     if (missing.length) issues.push({ code: 'missing_context', node: r.node, message: `"${r.workflow}" needs ${missing.map((m) => `"${m}"`).join(', ')}, which "${name}" never has, so the call could not carry it over.` });
   }

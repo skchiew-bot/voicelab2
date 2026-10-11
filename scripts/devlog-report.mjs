@@ -199,6 +199,9 @@ function money(units, cfg) {
   return out;
 }
 
+/** Whether two task titles name the same work: case and spacing aside. */
+export const sameWork = (a = '', b = '') => a.toLowerCase().replace(/\s+/g, ' ').trim() === b.toLowerCase().replace(/\s+/g, ' ').trim();
+
 /** Fold Task events into the board, newest values winning. Exported for the task CLI. */
 export function buildBoard(events = activity(), now = new Date()) {
   const tasks = new Map();
@@ -207,6 +210,11 @@ export function buildBoard(events = activity(), now = new Date()) {
     for (const k of ['title', 'epic', 'workstream', 'phase', 'owner', 'status', 'progress', 'attempt', 'tests', 'blocker', 'next', 'pr', 'branch']) {
       if (e[k] !== undefined) t[k] = e[k];
     }
+    // An id started again for different work: sessions on separate branches cannot see each other's ids. A rename is
+    // the same work, and so is a title that differs only in case or spacing.
+    if (e.title && e.action === 'start') t.starts = [...(t.starts ?? []), e.title];
+    else if (e.title && t.starts?.length) t.starts = [...t.starts.slice(0, -1), e.title];
+    if (t.starts) t.starts = t.starts.filter((x, i, all) => all.findIndex((y) => sameWork(x, y)) === i);
     if (e.action === 'done') { t.finished = e.ts; t.blocker = ''; }
     else if (e.status && !['done', 'abandoned'].includes(e.status)) delete t.finished; // reopened
     if (!t.sessions.includes(e.session)) t.sessions.push(e.session);
@@ -449,6 +457,8 @@ export function build(opts = {}) {
   for (const l of lessons) for (const g of l.guards) if (!g.ok) attention.push({ level: 'critical', text: `${l.id} lost its guard: "${g.text}" is no longer in ${g.file}.` });
   for (const a of alerts.filter((x) => x.kind === 'stop-loss' && x.ts >= since(2))) attention.push({ level: 'critical', text: `Stop-loss in ${a.session.slice(-8)}: ${a.rule} (${a.key}).` });
   for (const t of board.filter((x) => x.blocker && x.status !== 'done')) attention.push({ level: 'warning', text: `${t.id} is blocked: ${t.blocker}` });
+  // Still shown once done: the record mixes the two pieces of work whatever its status.
+  for (const t of board.filter((x) => (x.starts?.length ?? 0) > 1)) attention.push({ level: t.status === 'done' ? 'info' : 'warning', text: `${t.id} was started for ${t.starts.length} different pieces of work (${t.starts.join('; ')}): its record mixes them. Give each its own id.` });
   for (const t of board.filter((x) => (x.attempt ?? 1) > (cfg.stopLoss?.maxTaskAttempts ?? 99) && x.status !== 'done')) attention.push({ level: 'warning', text: `${t.id} is on attempt ${t.attempt}.` });
   for (const l of lessons.filter((x) => x.times >= 2)) attention.push({ level: 'warning', text: `${l.id} has happened ${l.times} times: ${l.title}.` });
   if (behind > 0) attention.push({ level: 'warning', text: `This branch is ${behind} commits behind main (lesson L-013).` });

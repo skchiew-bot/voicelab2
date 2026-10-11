@@ -13,6 +13,11 @@ export interface NormalizedEvent {
   /** Billed-relevant call length, when the provider reports it (Twilio does; Telnyx we derive). */
   durationSeconds?: number;
   endReason?: 'completed' | 'busy' | 'no_answer' | 'canceled' | 'rejected' | 'failed';
+  /**
+   * The SIP final response the provider says ended the call, when it reports one (Telnyx: `sip_hangup_cause`; Twilio:
+   * `SipResponseCode`, assumed). Some responses mean the number we showed was blocked for this contact.
+   */
+  sipCode?: number;
   /** Our own call id, echoed back by the provider, so an event can never be matched to the wrong call. */
   callIdHint?: string;
   /**
@@ -38,3 +43,7 @@ export class ProviderRefused extends Error {}
 
 /** Provider error text can quote the numbers involved. Strip anything that looks like one. */
 export const redactNumbers = (text: string): string => text.replace(/\+?\d[\d\s().-]{6,}\d/g, '[number]');
+
+/** A SIP final response code (100 to 699) as a provider sends it, or undefined for anything else ("unspecified", empty). */
+export const sipCode = (v: unknown): number | undefined =>
+  typeof v === 'string' && /^[1-6][0-9]{2}$/.test(v) ? Number(v) : typeof v === 'number' && Number.isInteger(v) && v >= 100 && v <= 699 ? v : undefined;

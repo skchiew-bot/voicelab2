@@ -154,6 +154,12 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   }
   // A call the system dropped is loud: it is an alert the moment it is flagged, until someone has acknowledged it.
   const faults = (await c.query(`SELECT count(*)::int AS n FROM calls c WHERE c.fault AND NOT EXISTS (SELECT 1 FROM fault_acks a WHERE a.call_id = c.id)`)).rows[0].n as number;
+  // A carrier blocked the number we showed but the lock could not be written: until a person locks it, the DID can be
+  // shown to that contact again. Cleared by a lock on the call, by hand or otherwise.
+  const unlocked = (await c.query(
+    `SELECT count(DISTINCT a.entity_id)::int AS n FROM audit_log a
+      WHERE a.action = 'did.lock_failed' AND NOT EXISTS (SELECT 1 FROM did_failures f WHERE f.call_id::text = a.entity_id)`)).rows[0].n as number;
+  if (unlocked > 0) add('high', 'did_lock_failed', `${unlocked} outbound call${unlocked === 1 ? ' was' : 's were'} blocked by the carrier, but the number shown could not be locked away from the contact. Lock it on the call by hand.`, '#/numbers');
   if (faults > 0) add('high', 'system_drop', `${faults} call${faults === 1 ? ' was' : 's were'} dropped by the system and ${faults === 1 ? 'has' : 'have'} not been looked at.`, '#/faults');
   // A promoted script that drifted was put back to live speech: say so, and say what is waiting for a person.
   const drifted = (await c.query(

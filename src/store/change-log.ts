@@ -16,7 +16,7 @@ export type Category = (typeof CATEGORIES)[number];
 // audited, but they are not changes to the platform, and one busy day of them must not bury the changes.
 const ACTIVITY = new Set(['call.outbound', 'workflow.run', 'workflow.runs_abandoned', 'webhook.unknown_call', 'inbound.unrouted', 'queue.expired',
   'call_cost.record', 'call_cost.reconcile', 'outbound.outcome', 'case.step_failed', 'case.open', 'qa.score_batch', 'ticket.open', 'ticket.event',
-  'did.lock', 'channels.charge', 'learning.distil', 'appointment.book', 'appointment.cancel', 'appointment.reschedule', 'appointment.no_show', 'appointment.complete']);
+  'did.lock', 'did.lock_failed', 'channels.charge', 'learning.distil', 'appointment.book', 'appointment.cancel', 'appointment.reschedule', 'appointment.no_show', 'appointment.complete']);
 
 const PREFIX: [string, Category][] = [
   ['workflow.', 'workflows'], ['change.', 'workflows'], ['approval.', 'workflows'], ['integration.', 'workflows'],

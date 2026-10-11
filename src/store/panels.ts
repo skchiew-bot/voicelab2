@@ -121,24 +121,60 @@ async function journeyQa(c: pg.PoolClient) {
 /** A cluster at or above this share of its client's frequency threshold, and not yet past it, is shown as close. */
 export const CLOSE_PERCENT = 50;
 const CLOSE_SHOWN = 10;
+/**
+ * Clustering reads every turn since a node's last demotion, so a client's clusters are worked out again only when its
+ * turns, promotions or settings have changed, and then at most once a minute (shown with the time they are from).
+ */
+export const CLUSTER_CACHE = { minAgeMs: 60_000 };
+const clusterCache = new Map<string, { at: Date; key: string; report: Awaited<ReturnType<typeof clusterReport>> }>();
 
-async function learning(c: pg.PoolClient) {
-  const tenants = (await c.query('SELECT DISTINCT p.tenant_id, t.name FROM promotions p JOIN tenants t ON t.id = p.tenant_id ORDER BY t.name')).rows;
-  // Clusters come from the Learning screen's own report, so the two never disagree (lesson L-033); every client with
-  // logged turns is counted, and the totals are over every cluster, not just the ones listed.
-  const withTurns = (await c.query('SELECT DISTINCT l.tenant_id, t.name FROM learning_turns l JOIN tenants t ON t.id = l.tenant_id ORDER BY t.name')).rows;
-  const close: { tenantId: string; tenant: string; workflow: string; node: string; language: string; context: string; script: string; support: number; threshold: number; percentOfThreshold: number }[] = [];
-  let ready = 0;
-  for (const t of withTurns) {
-    const r = await clusterReport(c, t.tenant_id);
-    for (const k of r.clusters.filter((x) => x.next)) {       // only what distilling would act on
-      if (k.ready) ready += 1;
-      else if (k.support * 100 >= r.threshold * CLOSE_PERCENT) {
-        close.push({ tenantId: t.tenant_id, tenant: t.name, workflow: k.workflow, node: k.node, language: k.language, context: k.context, script: k.script, support: k.support, threshold: r.threshold, percentOfThreshold: k.percentOfThreshold });
+type Close = { tenantId: string; tenant: string; workflow: string; node: string; language: string; context: string; script: string; support: number; threshold: number; percentOfThreshold: number };
+
+/**
+ * Clusters near or past the promotion threshold, from the Learning screen's own report so the two never disagree
+ * (lesson L-033). Only the cluster distilling would act on counts; one past the threshold that it would skip (its wording
+ * was already proposed there, or it fails the rule checks) is counted apart, never as waiting. Totals are over every
+ * cluster, not just the ones listed, and a client whose clusters cannot be worked out is named, not dropped (L-006).
+ */
+async function nearThreshold(c: pg.PoolClient) {
+  const tenants = (await c.query('SELECT t.id, t.name FROM tenants t WHERE EXISTS (SELECT 1 FROM learning_turns l WHERE l.tenant_id = t.id) ORDER BY t.name')).rows;
+  const close: Close[] = [];
+  let ready = 0; let asOf: Date | null = null;
+  const stuck = { alreadyProposed: 0, failsRules: 0 };
+  const unavailable: string[] = [];
+  for (const t of tenants) {
+    await c.query('SAVEPOINT near_client');
+    try {
+      const key = JSON.stringify((await c.query(
+        `SELECT (SELECT max(id) FROM learning_turns WHERE tenant_id = $1) AS turn,
+                (SELECT max(e.id) FROM promotion_events e JOIN promotions p ON p.id = e.promotion_id WHERE p.tenant_id = $1) AS event,
+                (SELECT updated_at FROM learning_config WHERE tenant_id = $1) AS config`, [t.id])).rows[0]);
+      const hit = clusterCache.get(t.id);
+      const fresh = hit && (hit.key === key || Date.now() - hit.at.getTime() < CLUSTER_CACHE.minAgeMs);
+      const entry = fresh ? hit : { at: new Date(), key, report: await clusterReport(c, t.id) };
+      clusterCache.set(t.id, entry);
+      if (!asOf || entry.at < asOf) asOf = entry.at;
+      const r = entry.report;
+      for (const k of r.clusters.filter((x) => x.next)) {
+        if (k.stuck === 'already_proposed') stuck.alreadyProposed += 1;
+        else if (k.stuck === 'fails_rules') stuck.failsRules += 1;
+        else if (k.ready) ready += 1;
+        else if (k.support * 100 >= r.threshold * CLOSE_PERCENT) {
+          close.push({ tenantId: t.id, tenant: t.name, workflow: k.workflow, node: k.node, language: k.language, context: k.context, script: k.script, support: k.support, threshold: r.threshold, percentOfThreshold: k.percentOfThreshold });
+        }
       }
+      await c.query('RELEASE SAVEPOINT near_client');
+    } catch {
+      await c.query('ROLLBACK TO SAVEPOINT near_client');
+      unavailable.push(t.name);
     }
   }
   close.sort((a, b) => b.support * a.threshold - a.support * b.threshold || b.support - a.support);
+  return { asOf: asOf?.toISOString() ?? null, closeAtPercent: CLOSE_PERCENT, close: close.length, readyToDistil: ready, stuck, unavailable, clusters: close.slice(0, CLOSE_SHOWN) };
+}
+
+async function learning(c: pg.PoolClient) {
+  const tenants = (await c.query('SELECT DISTINCT p.tenant_id, t.name FROM promotions p JOIN tenants t ON t.id = p.tenant_id ORDER BY t.name')).rows;
   const total = { inReview: 0, approved: 0, promoted: 0, demoted: 0, rejected: 0 };
   for (const t of tenants) {
     const s = await learningSummary(c, t.tenant_id);
@@ -149,7 +185,6 @@ async function learning(c: pg.PoolClient) {
        FROM promotion_events WHERE kind = 'demoted' AND created_at > now() - interval '7 days'`)).rows[0];
   return {
     ...total, driftDemotions7d: demotions.drift as number, forcedDemotions7d: demotions.forced as number,
-    nearThreshold: { closeAtPercent: CLOSE_PERCENT, close: close.length, readyToDistil: ready, clusters: close.slice(0, CLOSE_SHOWN) },
   };
 }
 
@@ -194,7 +229,7 @@ async function funding(c: pg.PoolClient) {
   return { providers: rows, spendWithoutBalance: unfunded };
 }
 
-const PANELS = { stitching, deliverability, concurrency, journeyQa, learning, modules, funding } as const;
+const PANELS = { stitching, deliverability, concurrency, journeyQa, learning, nearThreshold, modules, funding } as const;
 type Panels = { -readonly [K in keyof typeof PANELS]: Awaited<ReturnType<(typeof PANELS)[K]>> | null };
 
 /** Every panel, each worked out on its own: a panel that fails is null with its name in `unavailable`, and the rest still show. */

@@ -185,22 +185,43 @@ export async function clusterGroups(c: pg.PoolClient, tenantId: string, cfg: Lea
 /**
  * Clusters and how close each is to the frequency threshold: what the console shows before anything is promoted.
  * `next` marks the cluster distilling would act on: the top one of its node and context, which has no script in review,
- * approved or promoted (distilling skips those, so its turns cannot lead to a new script).
+ * approved or promoted (distilling skips those, so its turns cannot lead to a new script). For such a cluster past the
+ * threshold, `stuck` says why distilling would still skip its callers' own wording, as it decides: the wording was
+ * already proposed there (`already_proposed`), or it fails the rule checks against the workflow (`fails_rules`). A
+ * model distiller, when one is connected, may still word a new script; a person can decide otherwise.
  */
 export async function clusterReport(c: pg.PoolClient, tenantId: string) {
   const cfg = await getLearningConfig(c, tenantId);
   const groups = await clusterGroups(c, tenantId, cfg);
   const key = (w: string, n: string, l: string, k: string, t: string) => [w, n, l, k, t].join('\n');
-  const open = new Set((await listPromotions(c, tenantId)).filter((p) => LIVE.includes(p.status))
-    .map((p) => key(p.workflow, p.node, p.language, p.context_kind, p.context_topic)));
-  return {
-    threshold: cfg.minSupport,
-    clusters: groups.flatMap((g) => g.clusters.map((k, i) => ({
-      workflow: g.workflow, node: g.node, language: g.language, context: g.contextKind + (g.contextTopic ? `/${g.contextTopic}` : ''),
-      script: k.canonical, support: k.support, variants: k.variants, ready: k.support >= cfg.minSupport, percentOfThreshold: Math.min(100, Math.round((k.support / cfg.minSupport) * 100)),
-      next: i === 0 && !open.has(key(g.workflow, g.node, g.language, g.contextKind, g.contextTopic)),
-    }))).sort((a, b) => b.support - a.support),
-  };
+  const all = await listPromotions(c, tenantId);
+  const open = new Set(all.filter((p) => LIVE.includes(p.status)).map((p) => key(p.workflow, p.node, p.language, p.context_kind, p.context_topic)));
+  const tried = new Map<string, string[]>();
+  for (const p of all) { const k = key(p.workflow, p.node, p.language, p.context_kind, p.context_topic); tried.set(k, [...(tried.get(k) ?? []), p.script]); }
+  const clusters = [];
+  for (const g of groups) {
+    const gk = key(g.workflow, g.node, g.language, g.contextKind, g.contextTopic);
+    for (const [i, k] of g.clusters.entries()) {
+      const ready = k.support >= cfg.minSupport;
+      const next = i === 0 && !open.has(gk);
+      let stuck: 'already_proposed' | 'fails_rules' | null = null;
+      if (next && ready) {
+        if ((tried.get(gk) ?? []).includes(k.canonical)) stuck = 'already_proposed';
+        else {
+          const last = (await c.query('SELECT run_id FROM learning_turns WHERE tenant_id = $1 AND workflow = $2 AND node = $3 ORDER BY id DESC LIMIT 1', [tenantId, g.workflow, g.node])).rows[0];
+          const def = last ? await definitionFor(c, last.run_id, g.workflow) : undefined;
+          if (!checkScript(k.canonical, { variables: def?.variables ?? [], sensitive: def?.sensitiveVariables ?? [] }).ok) stuck = 'fails_rules';
+        }
+      }
+      clusters.push({
+        workflow: g.workflow, node: g.node, language: g.language, context: g.contextKind + (g.contextTopic ? `/${g.contextTopic}` : ''),
+        script: k.canonical, support: k.support, variants: k.variants, ready,
+        // Rounded down short of the threshold, so 199 of 200 never shows as 100%.
+        percentOfThreshold: ready ? 100 : Math.floor((k.support * 100) / cfg.minSupport), next, stuck,
+      });
+    }
+  }
+  return { threshold: cfg.minSupport, clusters: clusters.sort((a, b) => b.support - a.support) };
 }
 
 // ------------------------------------------------------------------------------------------------ distilling

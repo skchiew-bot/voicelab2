@@ -100,7 +100,10 @@ export interface Panels {
   journeyQa: { qa: { scored: number; scores: number; average: string | null; distribution: { band: string; n: number }[] }; escalations: { trigger: string; n: number }[]; unacknowledgedFaults: number; sentiment: { day: string; turns: number; average: string | null; severe: number }[] } | null;
   learning: {
     inReview: number; approved: number; promoted: number; demoted: number; rejected: number; driftDemotions7d: number; forcedDemotions7d: number;
-    nearThreshold: { closeAtPercent: number; close: number; readyToDistil: number; clusters: { tenantId: string; tenant: string; workflow: string; node: string; language: string; context: string; script: string; support: number; threshold: number; percentOfThreshold: number }[] };
+  } | null;
+  nearThreshold: {
+    asOf: string | null; closeAtPercent: number; close: number; readyToDistil: number; stuck: { alreadyProposed: number; failsRules: number }; unavailable: string[];
+    clusters: { tenantId: string; tenant: string; workflow: string; node: string; language: string; context: string; script: string; support: number; threshold: number; percentOfThreshold: number }[];
   } | null;
   modules: { cases: { open: number; decisionRequired: number; needsHuman: number; missedOrUnknown: number; brokenPromises7d: number }; appointments: { needsReschedule: number; upcoming: number; unsentOverAnHour: number; movedByDelays7d: number } } | null;
   funding: { providers: { providerId: string; provider: string; status: string; currency: string; balance: string; recordedAt: string; spent7d: string; perDay: string; runwayDays: string | null;

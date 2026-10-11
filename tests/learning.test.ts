@@ -3,6 +3,8 @@ import { withActor } from '../src/db.js';
 import { parseKey } from '../src/secrets.js';
 import { replyRun, startRun, type RunDeps } from '../src/store/runs.js';
 import { sweepAudio, type Council, type Recorder } from '../src/store/learning.js';
+import { CLUSTER_CACHE } from '../src/store/panels.js';
+import { randomUUID } from 'node:crypto';
 import type { WorkflowDefinition } from '../src/workflows/definition.js';
 import type { SpeakerResult } from '../src/workflows/engine.js';
 
@@ -55,11 +57,12 @@ async function call(answer: string) {
   return r.id;
 }
 const steps = async (runId: string) => (await env.pool.query(`SELECT type, node, payload FROM workflow_run_steps WHERE run_id = $1 ORDER BY seq`, [runId])).rows;
-const near = async () => (await must(get('/internal/control-tower/panels'))).json().learning.nearThreshold;
+const near = async () => (await must(get('/internal/control-tower/panels'))).json().nearThreshold;
 const promotions = async (status?: string) => (await get(`/internal/tenants/${tenantId}/learning/promotions${status ? `?status=${status}` : ''}`)).json() as { id: string; status: string; node: string; script: string }[];
 
 beforeAll(async () => {
   env = await (await import('./helpers.js')).setupDb({ learning: { recorder, councils: councils as never } });
+  CLUSTER_CACHE.minAgeMs = 0;                                                    // every change shows at once in these tests
   runDeps = { pool: env.pool, key: parseKey(env.config.VOICELAB_SECRET_KEY), speaker };
   tenantId = (await must(post('/internal/tenants', { name: 'Learning Co' }))).json().id;
   voiceId = (await must(post('/internal/providers', { adapterKey: 'elevenlabs', name: 'el', params: { apiKey: 'k' } }))).json().id;
@@ -83,7 +86,7 @@ describe('logging, clustering and distilling', () => {
     expect(report.threshold).toBe(5);
     expect(report.clusters[0]).toMatchObject({ node: 'ask', support: 3, ready: false, percentOfThreshold: 60, next: true });
     // The Control Tower shows it as close: three of the five turns needed, from the same report (lesson L-033).
-    expect(await near()).toEqual({ closeAtPercent: 50, close: 1, readyToDistil: 0, clusters: [
+    expect(await near()).toEqual({ asOf: expect.any(String), closeAtPercent: 50, close: 1, readyToDistil: 0, stuck: { alreadyProposed: 0, failsRules: 0 }, unavailable: [], clusters: [
       { tenantId, tenant: 'Learning Co', workflow: 'learn_flow', node: 'ask', language: 'en', context: 'start', script: report.clusters[0].script, support: 3, threshold: 5, percentOfThreshold: 60 },
     ] });
     expect((await post(`/internal/tenants/${tenantId}/learning/scan`, {})).json().created).toEqual([]);          // not enough evidence yet
@@ -197,6 +200,78 @@ describe('drift', () => {
     const again = (await post(`/internal/tenants/${tenantId}/learning/scan`, {})).json();
     expect(again.created).toHaveLength(0);                                                              // the same script is not offered twice
     expect(again.skipped[0].reason).toContain('already proposed');
+    // The Control Tower does not call it waiting: it is past the threshold, but its wording was already tried there.
+    expect(await near()).toMatchObject({ readyToDistil: 0, stuck: { alreadyProposed: 1, failsRules: 0 } });
+    expect((await get(`/internal/tenants/${tenantId}/learning`)).json().clusters[0]).toMatchObject({ node: 'ask', ready: true, next: true, stuck: 'already_proposed' });
+  });
+});
+
+describe('the Control Tower\'s clusters near the threshold', () => {
+  /** Turns written as if spoken, for a client of the test's own, with a threshold the test sets. */
+  const client = async (name: string, minSupport?: number) => {
+    const id = (await must(post('/internal/tenants', { name }))).json().id as string;
+    if (minSupport) await must(put(`/internal/tenants/${id}/learning/config`, { minSupport }));
+    return id;
+  };
+  const turns = async (tenant: string, node: string, text: string, n: number) => {
+    const run = randomUUID();
+    for (let i = 0; i < n; i++) {
+      await env.pool.query(`INSERT INTO learning_turns (tenant_id, run_id, workflow, node, language, context_kind, text, synth_chars, slot_chars) VALUES ($1,$2,'synthetic',$3,'en','start',$4,40,0)`, [tenant, run, node, text]);
+    }
+  };
+  const mine = (n: { clusters: { tenantId: string; node: string; support: number; percentOfThreshold: number }[] }, t: string) => n.clusters.filter((k) => k.tenantId === t).map((k) => [k.node, k.support, k.percentOfThreshold]);
+
+  it('counts from half the threshold, only the cluster distilling would act on, and a stuck one apart', async () => {
+    const before = await near();
+    const t = await client('Near Co', 4);
+    await turns(t, 'a', 'Thank you for holding, your account is being checked now.', 3);         // 3 of 4: close
+    await turns(t, 'b', 'We can set up a payment plan that suits your budget.', 2);              // 2 of 4: exactly half, close
+    await turns(t, 'c', 'Could you confirm the reference printed on your letter?', 1);           // 1 of 4: too far
+    await turns(t, 'd', 'Your next instalment falls due at the end of this month.', 3);          // the top wording of d: close
+    await turns(t, 'd', 'Lovely weather today, isn\'t it, zebra quartz.', 2);                    // a second wording of d: never next
+    await turns(t, 'e', '{{ghost}} {{name}}', 4);                                                // past it, but fails the rule checks
+    await turns(t, 'f', 'Thanks for calling, an officer will call you back today.', 4);          // past it, waiting to be drawn up
+    const after = await near();
+    expect(mine(after, t).sort()).toEqual([['a', 3, 75], ['b', 2, 50], ['d', 3, 75]]);
+    expect(after.close - before.close).toBe(3);
+    expect(after.readyToDistil - before.readyToDistil).toBe(1);
+    expect(after.stuck.failsRules - before.stuck.failsRules).toBe(1);
+    expect(after.unavailable).toEqual([]);
+  });
+
+  it('uses each client\'s own threshold, the default for a client with no settings, and sorts across clients by how close', async () => {
+    const t = await client('Default Co');                                                         // no settings: a threshold of 20
+    await turns(t, 'g', 'We have received your payment, thank you very much indeed.', 18);
+    const n = await near();
+    expect(mine(n, t)).toEqual([['g', 18, 90]]);
+    const shares = n.clusters.map((k: { support: number; threshold: number }) => k.support / k.threshold);
+    expect(shares).toEqual([...shares].sort((x: number, y: number) => y - x));                  // the closest first, whatever the client
+    expect(n.clusters[0]).toMatchObject({ tenantId: t, threshold: 20, percentOfThreshold: 90 });
+  });
+
+  it('lists at most ten but counts them all, and rounds down short of the threshold', async () => {
+    const before = await near();
+    const t = await client('Many Co', 200);
+    for (let i = 0; i < 12; i++) await turns(t, `n${i}`, `Message number ${['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'][i]} about your account balance`, 199 - i);
+    const after = await near();
+    expect(after.close - before.close).toBe(12);
+    expect(after.clusters).toHaveLength(10);
+    expect(after.clusters[0]).toMatchObject({ tenantId: t, support: 199, threshold: 200, percentOfThreshold: 99 });   // never "100%" short of it
+  });
+
+  it('works clusters out again only when something changed, and at most once a minute, saying when they are from', async () => {
+    const t = await client('Cache Co', 2);
+    await turns(t, 'h', 'Your callback has been booked for tomorrow morning.', 1);
+    const first = await near();                                                                   // counted: one of two
+    expect((await near()).asOf).toBe(first.asOf);                                                 // nothing changed: nothing worked out again
+    CLUSTER_CACHE.minAgeMs = 3_600_000;
+    try {
+      await turns(t, 'i', 'Please keep your reference number close at hand.', 1);
+      const held = await near();
+      expect(held.close).toBe(first.close);                                                      // within the minute: the last count, as of then
+      expect(Date.parse(held.asOf)).toBeLessThanOrEqual(Date.parse(first.asOf));
+    } finally { CLUSTER_CACHE.minAgeMs = 0; }
+    expect((await near()).close).toBe(first.close + 1);
   });
 });
 

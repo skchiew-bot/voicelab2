@@ -70,6 +70,8 @@ export interface Deps {
   fetch?: Fetch;
   /** How workflow integrations connect. Only tests change this; production always uses the guarded default. */
   integrationHttp?: HttpDeps;
+  /** Models that read a caller's reply the phrase rules cannot, by tier. None by default: replies are read by rules only. */
+  interpreters?: import('./store/runs.js').RunDeps['interpreters'];
   /** Models that judge QA criteria, by tier. None by default: only the rules are applied. */
   judges?: import('./store/qa.js').QaDeps['judges'];
   /** The models and recorder behind the learning loop. None is connected to a live provider yet. */
@@ -464,14 +466,14 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     return withActor(pool, s.actor, (c) => gateOutbound(c, dncKey, withContact(body)));
   });
 
-  registerWorkflowRoutes(app, { pool, key, internal, productionDeployers: config.PRODUCTION_DEPLOYERS, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerWorkflowRoutes(app, { pool, key, internal, productionDeployers: config.PRODUCTION_DEPLOYERS, runDeps: { pool, key, integrationHttp: deps.integrationHttp, interpreters: deps.interpreters } });
   registerAppointmentRoutes(app, { pool, internal });
   registerKnowledgeRoutes(app, { pool, internal });
   registerCaseRoutes(app, { internal, cases: { calls: callDeps, ...deps.cases } });
   registerLearningRoutes(app, { internal, learn: { pool, ...deps.learning } });
-  registerJourneyRoutes(app, { pool, internal, judges: deps.judges, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerJourneyRoutes(app, { pool, internal, judges: deps.judges, runDeps: { pool, key, integrationHttp: deps.integrationHttp, interpreters: deps.interpreters } });
   registerResilienceRoutes(app, { pool, internal, callDeps });
-  registerStitchingRoutes(app, { pool, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp } });
+  registerStitchingRoutes(app, { pool, internal, runDeps: { pool, key, integrationHttp: deps.integrationHttp, interpreters: deps.interpreters } });
 
   // ------------------------------------------------- control tower
   app.get('/internal/control-tower', async (req) => {
@@ -487,7 +489,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
 
   // ------------------------------------------------- scheduled jobs
   // The same work the sweep endpoints do, with their default settings, run by the app itself (src/scheduler.ts).
-  const runDeps = { pool, key, integrationHttp: deps.integrationHttp };
+  const runDeps = { pool, key, integrationHttp: deps.integrationHttp, interpreters: deps.interpreters };
   const caseDeps = { calls: callDeps, ...deps.cases };
   const learnDeps = { pool, ...deps.learning };
   const sys = <T>(fn: (c: pg.PoolClient) => Promise<T>) => withActor(pool, { kind: 'internal' }, fn);
@@ -707,7 +709,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   // Twilio's speech relay connects here once a call with a workflow is answered. The connection is refused before it
   // opens unless Twilio's signature on it checks out; then only the call it names, on this provider, is served.
   const relayUrl = (providerId: string) => `${(callDeps.baseUrl ?? '').replace(/^http/, 'ws')}/relay/twilio/${providerId}`;
-  const relayDeps: RelayDeps = { runs: { pool, key, integrationHttp: deps.integrationHttp }, baseUrl: callDeps.baseUrl ?? '' };
+  const relayDeps: RelayDeps = { runs: { pool, key, integrationHttp: deps.integrationHttp, interpreters: deps.interpreters }, baseUrl: callDeps.baseUrl ?? '' };
   app.register(fastifyWebsocket, { options: { maxPayload: 64 * 1024 } });
   app.register(async (f) => {
     f.get('/relay/twilio/:providerId', {

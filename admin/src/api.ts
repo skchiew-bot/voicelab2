@@ -165,7 +165,7 @@ export interface FaultRow { id: string; direction: string; ended_node: string | 
 export interface QaSet { id: string; use_case: string; version: number; criteria: { id: string; label: string; type: string; weight: number }[] }
 export interface QaScore { id: string; run_id: string; workflow: string; use_case: string; criteria_version: number; score: string; scorer: string; model: string | null; tier: string | null; input_tokens: number; output_tokens: number; escalated_from: string | null; results: { complete: boolean; results: { id: string; label: string; passed: boolean | null; detail: string; scorer: string }[] }; created_at: string }
 export interface QaSummary { byWorkflow: { workflow: string; scored: number; average: string; lowest: string }[]; mostFailed: { criterion: string; label: string; failed: number }[]; unscored: number }
-export interface AiUsage { task: string; model: string; tier: string; decisions: number; input_tokens: string; output_tokens: string; rejected: number; reworked: number; escalations: number }
+export interface AiUsage { task: string; model: string; tier: string; decisions: number; input_tokens: string; output_tokens: string; unknown_tokens: number; rejected: number; reworked: number; escalations: number }
 export interface ChangeRow { id: string; workflow: string; environment: string; from_version: string | null; to_version: string; status: 'pending' | 'approved' | 'rejected' | 'applied'; reason: string; changes: number; levelsDone: number; levelsTotal: number; created_at: string }
 export interface ChangeFull extends ChangeRow {
   diff: { shape: string; summary: string[]; lines: { op: '+' | '-' | '~'; node: string | null; text: string }[] };

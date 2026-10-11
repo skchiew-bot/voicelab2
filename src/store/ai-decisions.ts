@@ -8,7 +8,7 @@ export type Tier = 'rules' | 'haiku' | 'sonnet' | 'opus';
 
 export interface DecisionInput {
   tenantId?: string | null; task: string; subjectType: string; subjectId: string; decision: Decision; reason: string;
-  model?: string | null; tier?: Tier | null; inputTokens?: number; outputTokens?: number; confidence?: number | null;
+  model?: string | null; tier?: Tier | null; /** null: not known (the model failed or timed out); left out: none. */ inputTokens?: number | null; outputTokens?: number | null; confidence?: number | null;
   escalatedFrom?: string | null; callId?: string | null;
 }
 
@@ -18,7 +18,7 @@ export async function recordDecision(c: pg.PoolClient, d: DecisionInput) {
   await c.query(
     `INSERT INTO ai_decisions (tenant_id, task, subject_type, subject_id, decision, reason, model, tier, input_tokens, output_tokens, confidence, escalated_from, call_id)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-    [d.tenantId ?? null, d.task, d.subjectType, d.subjectId, d.decision, d.reason.slice(0, 1000), d.model ?? null, d.tier ?? null, d.inputTokens ?? 0, d.outputTokens ?? 0, d.confidence ?? null, d.escalatedFrom ?? null, d.callId ?? null]);
+    [d.tenantId ?? null, d.task, d.subjectType, d.subjectId, d.decision, d.reason.slice(0, 1000), d.model ?? null, d.tier ?? null, d.inputTokens === undefined ? 0 : d.inputTokens, d.outputTokens === undefined ? 0 : d.outputTokens, d.confidence ?? null, d.escalatedFrom ?? null, d.callId ?? null]);
 }
 
 // ------------------------------------------------------------------------------------- model configuration
@@ -47,11 +47,24 @@ async function tierOf(c: pg.PoolClient, model: string | null | undefined): Promi
   return ((await c.query('SELECT tier FROM model_config WHERE model_id = $1 LIMIT 1', [model])).rows[0]?.tier as Tier | undefined) ?? null;
 }
 
-/** The decisions recorded in a run's steps (a model's line that was used, tidied or turned down), put in the audit trail. */
+/** The decisions recorded in a run's steps (a model's line that was used, tidied or turned down, and each model that read a reply), put in the audit trail. */
 export async function recordStepDecisions(
   c: pg.PoolClient, e: { tenantId: string; callId: string | null; runId: string; records: { type: string; node?: string; payload: Record<string, Json> }[] },
 ) {
   for (const r of e.records) {
+    // Every model asked to read a reply, whether its answer was taken or not (a heard step can hold two: one a tier up).
+    if (r.type === 'heard' && Array.isArray(r.payload.interpreted)) {
+      for (const a of r.payload.interpreted as Record<string, Json>[]) {
+        await recordDecision(c, {
+          tenantId: e.tenantId, task: 'interpret_reply', subjectType: 'run_step', subjectId: `${e.runId}:${r.node ?? ''}`, callId: e.callId,
+          decision: a.decision as Decision, reason: String(a.reason ?? 'No reason given.'),
+          model: (a.model as string | undefined) ?? null, tier: (a.tier as Tier | undefined) ?? null, escalatedFrom: (a.escalatedFrom as string | undefined) ?? null,
+          inputTokens: a.inputTokens == null ? null : Number(a.inputTokens), outputTokens: a.outputTokens == null ? null : Number(a.outputTokens),
+          confidence: a.confidence === undefined ? null : Number(a.confidence),
+        });
+      }
+      continue;
+    }
     const ai = r.type === 'say' ? (r.payload.ai as Record<string, Json> | undefined) : undefined;
     if (!ai?.decision) continue;
     await recordDecision(c, {
@@ -74,7 +87,8 @@ export const listDecisions = async (c: pg.PoolClient, o: { tenantId?: string; ca
 export const tokenUsage = async (c: pg.PoolClient, o: { tenantId?: string } = {}) =>
   (await c.query(
     `SELECT task, coalesce(model, 'rules') AS model, coalesce(tier, 'rules') AS tier, count(*)::int AS decisions,
-            sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens,
+            coalesce(sum(input_tokens), 0)::bigint AS input_tokens, coalesce(sum(output_tokens), 0)::bigint AS output_tokens,
+            count(*) FILTER (WHERE input_tokens IS NULL OR output_tokens IS NULL)::int AS unknown_tokens,
             count(*) FILTER (WHERE decision = 'rejected')::int AS rejected, count(*) FILTER (WHERE decision = 'reworked')::int AS reworked,
             count(*) FILTER (WHERE escalated_from IS NOT NULL)::int AS escalations
        FROM ai_decisions WHERE ($1::uuid IS NULL OR tenant_id = $1) GROUP BY 1, 2, 3 ORDER BY 1, 2`, [o.tenantId ?? null])).rows;

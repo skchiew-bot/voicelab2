@@ -58,7 +58,7 @@ export const PHASES: PhaseProgress[] = [
       'Live phone calls hold this conversation through Twilio\'s speech relay, which turns the caller\'s words into text; tested only against a fake relay, with no live call yet',
       'The prompt-to-workflow builder (deferred in the plan)',
       'A visual canvas: the console shows an outline and a JSON editor',
-      'Replies are understood by phrase rules only; nothing yet handles a reply the rules cannot match',
+      'A reply the phrase rules cannot read goes to a model on a question whose author allows it (`listen.model: true`), once the task `interpret_reply` is configured (a tier up below 0.7 confidence, six seconds each), shown only the words without numbers and the intents on offer, never a sensitive answer; tested with stand-in models only, as no model is connected. Simulations, and so the production gate, read replies by rules only, so the gate does not show where a model would send an unclear reply. A model call that failed or timed out is recorded with its tokens unknown; the call is costed from the known tokens and flagged on its cost and in the Control Tower (owner\'s decision). Turning the model on counts more turns as understood, which moves the QA, drift and change-impact figures that count misunderstood turns',
     ],
   },
   {
@@ -167,7 +167,7 @@ export const CROSS_CUTTING: Criterion[] = [
   {
     text: 'each AI task the phase introduces has a configured model tier, a logged token count and a documented escalation rule.',
     state: 'partly', proof: 'none',
-    note: 'The model for a task is configuration (`model_config`), and every AI decision, with its model, tier, tokens and any step up a tier, goes in an append-only record (`ai_decisions`) that the console rolls up. The two AI tasks that exist (a model-written line, and a QA judgement) log tokens and escalate on low confidence; no real model is connected yet, so this is tested with stand-ins.',
+    note: 'The model for a task is configuration (`model_config`), and every AI decision, with its model, tier, tokens and any step up a tier, goes in an append-only record (`ai_decisions`) that the console rolls up. The AI tasks that exist (a model-written line, a reply the rules cannot read, and a QA judgement) log tokens, and the last two escalate on low confidence; no real model is connected yet, so this is tested with stand-ins.',
   },
 ];
 

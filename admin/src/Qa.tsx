@@ -97,7 +97,7 @@ export function Qa() {
         {usage.data && (usage.data.length === 0 ? <p className="muted">No AI step has run yet.</p> : (
           <table>
             <thead><tr><th>Task</th><th>Model</th><th>Tier</th><th>Decisions</th><th>Tokens in / out</th><th>Turned down</th><th>Tidied</th><th>Stepped up</th></tr></thead>
-            <tbody>{usage.data.map((u, i) => <tr key={i}><td>{u.task}</td><td>{u.model}</td><td>{u.tier}</td><td>{u.decisions}</td><td>{u.input_tokens} / {u.output_tokens}</td><td>{u.rejected}</td><td>{u.reworked}</td><td>{u.escalations}</td></tr>)}</tbody>
+            <tbody>{usage.data.map((u, i) => <tr key={i}><td>{u.task}</td><td>{u.model}</td><td>{u.tier}</td><td>{u.decisions}</td><td>{u.input_tokens} / {u.output_tokens}{u.unknown_tokens > 0 ? ` (and ${u.unknown_tokens} call${u.unknown_tokens === 1 ? '' : 's'} whose tokens are unknown)` : ''}</td><td>{u.rejected}</td><td>{u.reworked}</td><td>{u.escalations}</td></tr>)}</tbody>
           </table>
         ))}
       </section>

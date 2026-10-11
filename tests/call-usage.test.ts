@@ -144,13 +144,32 @@ describe('a call\'s cost record holds everything the call used', () => {
     // the workflow runs live on the call: it says its greeting and asks its question (21 + 22 characters)
     await must(post(`/internal/workflows/${wfId}/runs`, { environment: 'production', kind: 'live', variables: {}, callId: call.id }));
     await event(call.id, 'relay.said_again', new Date(call.started.getTime() + 60_000), { lines: 1, synthChars: 22 });   // a reconnected line asked again
+    // the relay's own voice also said the wait line (19 characters) and the holding message (31): speech too
+    await event(call.id, 'relay.wait_line', new Date(call.started.getTime() + 61_000), { synthChars: 19, at: 1 });
+    await event(call.id, 'relay.holding_message', new Date(call.started.getTime() + 62_000), { synthChars: 31 });
     expect(await cost(call.id)).toBe('recorded');
-    // the phone line (3 minutes) and the relay (90 s billed by the minute, 65 characters), all on Twilio, which bills them
+    // the phone line (3 minutes) and the relay (90 s billed by the minute; 43 + 22 + 19 + 31 = 115 characters at 0.0003),
+    // all on Twilio, which bills them
     expect((await lines(call.id)).map((l) => [l.line, l.provider_id === twilioId, l.quantity, l.amount]).sort()).toEqual([
       ['platform:relay', true, '120s', '0.14000000'],
       ['telephony_leg:main', true, '180s', '0.02550000'],
-      ['tts:relay', true, '65', '0.01950000'],
+      ['tts:relay', true, '115', '0.03450000'],
     ]);
+    // a live call's cost is never taken from figures entered by hand, which would leave its relay and models out
+    const manual = await post(`/internal/calls/${call.id}/cost`, { tenantId: (await env.pool.query('SELECT tenant_id FROM calls WHERE id = $1', [call.id])).rows[0].tenant_id, direction: 'inbound', occurredAt: call.started.toISOString(), usage: [{ providerId: twilioId, usage: { seconds: 180 } }] });
+    expect(manual.statusCode).toBe(409);
+    expect(manual.json().error).toContain('re-price');
+    // the same for a relay call whose workflow never got as far as a run (its start died), before it is costed, and for a
+    // call still under way: nothing is recorded, so its own records still price it
+    const died = await finishedCall(60, twilioId, 0);
+    await event(died.id, 'relay.connected', died.started);
+    const tenant = (await env.pool.query('SELECT tenant_id FROM calls WHERE id = $1', [died.id])).rows[0].tenant_id;
+    const byHand = (id: string) => post(`/internal/calls/${id}/cost`, { tenantId: tenant, direction: 'inbound', occurredAt: died.started.toISOString(), usage: [{ providerId: twilioId, usage: { seconds: 60 } }] });
+    expect((await byHand(died.id)).statusCode).toBe(409);
+    await env.pool.query('UPDATE calls SET ended_at = NULL WHERE id = $1', [died.id]);
+    const open = await byHand(died.id);
+    expect(open.statusCode).toBe(409); expect(open.json().error).toContain('not ended');
+    expect((await env.pool.query('SELECT count(*)::int AS n FROM call_costs WHERE call_id = $1', [died.id])).rows[0].n).toBe(0);
     expect(await credits(call.id)).toEqual([{ credits: '-3.0000' }]);           // 3 inbound minutes: the relay draws none
   });
 

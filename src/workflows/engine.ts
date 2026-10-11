@@ -1,6 +1,6 @@
 import { redactNumbers } from '../telephony/types.js';
 import { evalCondition, type Vars } from './conditions.js';
-import { readDay, readHour, validTimeZone } from './callback.js';
+import { canonicalZone, readDay, readHour } from './callback.js';
 import { CONTACT_OUTCOMES, own, RESERVED_NAMES, SLOT_RE, type ApiNode, type CallbackFrom, type Json, type SpeakNode, type WorkflowDefinition, type WorkflowNode } from './definition.js';
 import { interpretDetail } from './interpret.js';
 import { analyseTurn, intentChanged, observeTurn, type JourneyConfig, type JourneyState } from '../journey/tracker.js';
@@ -127,8 +127,9 @@ export function checkVars(vars: Vars): void {
 function callbackAt(state: RunState, from: CallbackFrom): Json {
   const value = (name: unknown) => (typeof name === 'string' && own(state.vars, name) && !state.sensitive.includes(name) ? state.vars[name] : undefined);
   const day = readDay(value(from.day)); const hour = readHour(value(from.hour));
-  if (day === null || hour === null || typeof from.timeZone !== 'string' || !validTimeZone(from.timeZone)) return 'unread';
-  return { day, hour, timeZone: from.timeZone };
+  const timeZone = canonicalZone(from.timeZone);
+  if (day === null || hour === null || timeZone === null) return 'unread';
+  return { day, hour, timeZone };
 }
 
 /** Variables are set by name from outside (callers, integrations): names every object inherits are skipped. */
@@ -420,7 +421,9 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         // Only a known call outcome is carried (a version saved before outcomes were checked may hold anything there).
         const contact = (CONTACT_OUTCOMES as readonly unknown[]).includes(node.contact) ? node.contact : undefined;
         // Read before the end forgets the call's sensitive values; only the day and hour themselves are kept.
-        const callback = contact && contact !== 'wrong_number' && node.callback ? callbackAt(state, node.callback) : undefined;
+        // A version saved before callbacks were checked may hold anything there: only an object is read.
+        const from = node.callback as unknown;
+        const callback = contact && contact !== 'wrong_number' && typeof from === 'object' && from !== null && !Array.isArray(from) ? callbackAt(state, from as CallbackFrom) : undefined;
         const said: Record<string, Json> = { ...(contact ? { contact } : {}), ...(callback !== undefined ? { callback } : {}) };
         out.push({ type: 'reached_end', workflow: wf, node: id, payload: { outcome: node.outcome, ...said } });
         leave(state, out, node.outcome, deps, said);

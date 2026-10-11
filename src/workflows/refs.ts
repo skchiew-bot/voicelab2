@@ -36,7 +36,9 @@ const stringsIn = (v: Json | undefined, out: string[] = []): string[] => {
 /** Variables a workflow marks sensitive, by list or by a sensitive answer. */
 export function sensitiveOf(def: WorkflowDefinition): Set<string> {
   const out = new Set<string>(def.sensitiveVariables ?? []);
-  for (const n of Object.values(def.nodes)) if (n.type === 'speak' && n.listen?.sensitive) out.add(n.listen.captureAs);
+  for (const n of Object.values(def.nodes)) {
+    if (n.type === 'speak' && n.listen?.sensitive) { out.add(n.listen.captureAs); if (n.listen.intents) out.add(`${n.listen.captureAs}_intent`); }
+  }
   return out;
 }
 

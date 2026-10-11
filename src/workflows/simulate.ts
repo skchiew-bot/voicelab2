@@ -13,7 +13,7 @@ export interface Scenario {
    * `contact`: the call outcome the end it finishes at records (`none` for an end that records none). `callback`: the
    * callback time it records (day 0 = Sunday, hour 0 to 23), `unread` when it asks for one the rules cannot read, or `none`.
    */
-  expect?: { outcome?: string; says?: string[]; doesNotSay?: string[]; handoff?: string; contact?: string; callback?: { day: number; hour: number } | 'none' | 'unread' };
+  expect?: { outcome?: string; says?: string[]; doesNotSay?: string[]; handoff?: string; contact?: string; callback?: { day: number; hour: number; timeZone?: string } | 'none' | 'unread' };
 }
 
 export interface ScenarioResult { name: string; passed: boolean; outcome: string | null; failures: string[]; runId?: string }
@@ -57,8 +57,10 @@ export function evaluateScenario(s: Scenario, result: { state: RunState; records
   }
   if (s.expect?.callback !== undefined) {
     const got = end?.payload.callback;
-    const said = got === undefined ? 'none' : got === 'unread' ? 'unread' : typeof got === 'object' && got !== null && !Array.isArray(got) ? `day ${String(got.day)} at ${String(got.hour)}:00` : 'none';
-    const want = typeof s.expect.callback === 'string' ? s.expect.callback : `day ${s.expect.callback.day} at ${s.expect.callback.hour}:00`;
+    const zoned = typeof s.expect.callback === 'object' && s.expect.callback.timeZone !== undefined; // the zone is checked only when asked for
+    const said = got === undefined ? 'none' : got === 'unread' ? 'unread' : typeof got === 'object' && got !== null && !Array.isArray(got)
+      ? `day ${String(got.day)} at ${String(got.hour)}:00${zoned ? ` ${String(got.timeZone)}` : ''}` : 'none';
+    const want = typeof s.expect.callback === 'string' ? s.expect.callback : `day ${s.expect.callback.day} at ${s.expect.callback.hour}:00${zoned ? ` ${s.expect.callback.timeZone}` : ''}`;
     if (!end) failures.push(`Expected a callback time of ${want} but the call had not ended.`);
     else if (said !== want) failures.push(`Expected a callback time of ${want} but it was ${said}.`);
   }

@@ -25,16 +25,17 @@ const flow: WorkflowDefinition = {
 
 describe('reading a callback time by fixed rules', () => {
   it('reads a day of the week in English or Malay, 0 = Sunday, and nothing else', () => {
-    const days = ['Sunday', 'ahad', 'Monday', 'isnin', 'tue', 'Selasa', ' hari Rabu ', 'thurs', 'Khamis', 'fri', 'jumaat', 'Saturday', 'sabtu', 3, '6'];
-    expect(days.map(readDay)).toEqual([0, 0, 1, 1, 2, 2, 3, 4, 4, 5, 5, 6, 6, 3, 6]);
-    for (const v of ['tomorrow', 'esok', 'next week', '7', 7, -1, 2.5, '', null, undefined, true, 'constructor', 'toString', ['tuesday'], { day: 2 }]) {
+    const days = ['Sunday', 'ahad', 'Monday', 'isnin', 'tue', 'Selasa.', ' hari Rabu ', 'thurs', 'Khamis!', 'fri', '"Jumaat"', 'Saturday,', 'sabtu', 3, 0];
+    expect(days.map(readDay)).toEqual([0, 0, 1, 1, 2, 2, 3, 4, 4, 5, 5, 6, 6, 3, 0]);
+    // A digit someone said may be a date, and "minggu" is also "week": neither is read as a day.
+    for (const v of ['3', '6', 'minggu', 'tomorrow', 'esok', 'next week', '7', 7, -1, 2.5, '', null, undefined, true, 'constructor', 'toString', ['tuesday'], { day: 2 }]) {
       expect(readDay(v as never), String(v)).toBeNull();
     }
   });
 
   it('reads an hour when it can only mean one thing, and drops the minutes', () => {
     const hours: [string | number, number][] = [
-      ['3pm', 15], ['3 PM', 15], ['3 p.m.', 15], ['12pm', 12], ['12am', 0], ['9am', 9], ['9:30 am', 9], ['11.45pm', 23],
+      ['3pm', 15], ['3 PM', 15], ['3 p.m.', 15], ['At 3pm.', 15], ['3pm,', 15], ['Pukul 3 petang.', 15], ['"9am"', 9], ['12 noon', 12], ['12 tengah malam', 0], ['12pm', 12], ['12am', 0], ['9am', 9], ['9:30 am', 9], ['11.45pm', 23],
       ['15', 15], ['15:00', 15], ['09', 9], ['09:30', 9], ['00:15', 0], ['0', 0], ['23', 23],
       ['pukul 3 petang', 15], ['10 pagi', 10], ['jam 8 malam', 20], ['12 malam', 0], ['1 tengah hari', 13], ['12 tengahari', 12], ['7 petang', 19],
       ['noon', 12], ['midnight', 0], ['tengah hari', 12], ['at 4pm', 16],
@@ -44,7 +45,7 @@ describe('reading a callback time by fixed rules', () => {
   });
 
   it('does not read an hour that could be morning or evening, or anything that is not an hour', () => {
-    for (const v of ['3', '10', '12', '10:30', '3.15', '13pm', '0am', '24', '25:00', '15:60', '8 petang', '5 malam', '4 tengah hari', 'afternoon', 'petang',
+    for (const v of ['3', '10', '12', '10:30', '3.15', '12 pagi', 'three pm', '13pm', '0am', '24', '25:00', '15:60', '8 petang', '5 malam', '4 tengah hari', 'afternoon', 'petang',
       '0123456789', '+60123456789', '3pm please call 0123456789', 'after 3pm', '', 24, -1, 9.5, null, undefined, false, ['3pm']]) {
       expect(readHour(v as never), String(v)).toBeNull();
     }
@@ -62,6 +63,9 @@ describe('an end that records a callback time', () => {
     expect(codes({ type: 'end', outcome: 'x', contact: 'contacted', callback: { day: 'd_intent', timeZone: 'Asia/Kuala_Lumpur' } })).toEqual([['bad_callback', 'later']]);
     expect(codes({ type: 'end', outcome: 'x', contact: 'contacted', callback: { day: 'constructor', hour: 't', timeZone: 'Asia/Kuala_Lumpur' } })).toEqual([['bad_callback', 'later']]);
     expect(codes({ type: 'end', outcome: 'x', contact: 'contacted', callback: { day: 'never_set', hour: 't', timeZone: 'Asia/Kuala_Lumpur' } })).toEqual([['unknown_variable', 'later']]);
+    expect(codes({ type: 'end', outcome: 'x', contact: 'contacted', callback: 'tuesday' })).toEqual([['bad_callback', 'later']]);
+    expect(codes({ type: 'end', outcome: 'x', contact: 'contacted', callback: { day: 'd_intent', hour: 't', timeZone: 'Asia/Kuala_Lumpur', minute: 't' } })).toEqual([['bad_callback', 'later']]);
+    for (const zone of ['EST', '+08:00', 'Etc/GMT+8']) expect(codes({ type: 'end', outcome: 'x', contact: 'contacted', callback: { day: 'd_intent', hour: 't', timeZone: zone } }), zone).toEqual([['bad_callback', 'later']]);
   });
 
   it('refuses a sensitive variable as a callback time, in this workflow or in the one it hands over to', () => {
@@ -74,6 +78,16 @@ describe('an end that records a callback time', () => {
     const child: WorkflowDefinition = { start: 'e', variables: ['when'], nodes: {
       e: { type: 'end', outcome: 'later', contact: 'contacted', callback: { day: 'when', hour: 'when', timeZone: 'Asia/Kuala_Lumpur' } } } };
     expect(checkReferences('parent', parent, () => child).map((i) => i.code)).toEqual(['sensitive_across_workflows']);
+    // What a sensitive answer meant (its intent) is sensitive too, so it cannot be the day either.
+    const day = { ...flow, nodes: { ...flow.nodes, which_day: { ...flow.nodes.which_day, listen: { captureAs: 'd', sensitive: true, intents: { tuesday: ['tuesday'] } } } } } as WorkflowDefinition;
+    expect(validateDefinition(day).errors.map((e) => [e.code, e.nodeId])).toEqual([['sensitive_in_record', 'later']]);
+    // The same across workflows: a parent's sensitive answer, whose intent the workflow it hands over to records.
+    const asks: WorkflowDefinition = { start: 'p', variables: [], nodes: {
+      p: { type: 'speak', speech: 'fixed', text: 'Which day?', listen: { captureAs: 'when', sensitive: true, intents: { monday: ['monday'] } }, transitions: [{ to: 'h' }] },
+      h: { type: 'handoff', target: { workflow: 'child' } } } };
+    const records: WorkflowDefinition = { start: 'e', variables: ['when_intent'], nodes: {
+      e: { type: 'end', outcome: 'later', contact: 'contacted', callback: { day: 'when_intent', hour: 'when_intent', timeZone: 'Asia/Kuala_Lumpur' } } } };
+    expect(checkReferences('asks', asks, () => records).map((i) => i.code)).toEqual(['sensitive_across_workflows']);
   });
 
   const deps: Deps = { load: () => flow };
@@ -104,6 +118,29 @@ describe('an end that records a callback time', () => {
     expect(r.records.find((x) => x.type === 'end')?.payload).toEqual({ outcome: 'call_back', contact: 'contacted', callback: 'unread' });
   });
 
+  it('reads an old version\'s callback only as far as it can: no time for a wrong number, no outcome, a bad zone or a callback that is not an object', async () => {
+    const run = async (later: unknown) => {
+      const old = { ...flow, nodes: { ...flow.nodes, later } } as unknown as WorkflowDefinition; // saved before callbacks were checked
+      let r = await start('old', {}, { load: () => old });
+      for (const text of ['later', 'tuesday', '3pm']) r = await reply(r.state, text, { load: () => old });
+      return r.records.find((x) => x.type === 'end')?.payload;
+    };
+    const cb = { day: 'd_intent', hour: 't', timeZone: 'Asia/Kuala_Lumpur' };
+    expect(await run({ type: 'end', outcome: 'x', contact: 'wrong_number', callback: cb })).toEqual({ outcome: 'x', contact: 'wrong_number' });
+    expect(await run({ type: 'end', outcome: 'x', callback: cb })).toEqual({ outcome: 'x' });
+    expect(await run({ type: 'end', outcome: 'x', contact: 'contacted', callback: { ...cb, timeZone: 'Mars/Olympus' } })).toEqual({ outcome: 'x', contact: 'contacted', callback: 'unread' });
+    expect(await run({ type: 'end', outcome: 'x', contact: 'contacted', callback: { ...cb, timeZone: 'asia/kuala_lumpur' } }))
+      .toEqual({ outcome: 'x', contact: 'contacted', callback: { day: 2, hour: 15, timeZone: 'Asia/Kuala_Lumpur' } });
+    expect(await run({ type: 'end', outcome: 'x', contact: 'contacted', callback: 'tuesday at 3' })).toEqual({ outcome: 'x', contact: 'contacted' });
+  });
+
+  it('records nothing for a callback on the end of a subflow that hands back', async () => {
+    const child: WorkflowDefinition = { start: 'x', variables: ['d', 'h'], nodes: { x: { type: 'end', outcome: 'asked', contact: 'contacted', callback: { day: 'd', hour: 'h', timeZone: 'Asia/Kuala_Lumpur' } } } };
+    const parent: WorkflowDefinition = { start: 's', variables: ['d', 'h'], nodes: { s: { type: 'subflow', workflow: 'child', transitions: [{ to: 'done' }] }, done: { type: 'end', outcome: 'finished' } } };
+    const r = await start('parent', { d: 'monday', h: '9am' }, { load: (n) => ({ parent, child } as Record<string, WorkflowDefinition>)[n] });
+    expect(r.records.find((x) => x.type === 'end')?.payload).toEqual({ outcome: 'finished' });
+  });
+
   it('can be expected by a rehearsal: a time, unread, or none', async () => {
     const ok = evaluateScenario({ name: 'tue', variables: {}, expect: { outcome: 'call_back', callback: { day: 2, hour: 15 } } }, await talk('later', 'tuesday', '3pm'));
     expect(ok.failures).toEqual([]);
@@ -111,6 +148,9 @@ describe('an end that records a callback time', () => {
     expect(evaluateScenario({ name: 'n', variables: {}, expect: { callback: 'none' } }, await talk('yes')).failures).toEqual([]);
     const wrong = evaluateScenario({ name: 'w', variables: {}, expect: { callback: { day: 5, hour: 15 } } }, await talk('later', 'tuesday', '3pm'));
     expect(wrong.failures).toEqual(['Expected a callback time of day 5 at 15:00 but it was day 2 at 15:00.']);
+    expect(evaluateScenario({ name: 'z', variables: {}, expect: { callback: { day: 2, hour: 15, timeZone: 'Asia/Kuala_Lumpur' } } }, await talk('later', 'tuesday', '3pm')).failures).toEqual([]);
+    expect(evaluateScenario({ name: 'z2', variables: {}, expect: { callback: { day: 2, hour: 15, timeZone: 'Asia/Jakarta' } } }, await talk('later', 'tuesday', '3pm')).failures)
+      .toEqual(['Expected a callback time of day 2 at 15:00 Asia/Jakarta but it was day 2 at 15:00 Asia/Kuala_Lumpur.']);
     const waiting = await talk('later');
     expect(evaluateScenario({ name: 's', variables: {}, expect: { callback: 'none' } }, waiting).failures)
       .toEqual(['The call was still waiting for the caller after the last scripted reply.', 'Expected a callback time of none but the call had not ended.']);
@@ -174,7 +214,12 @@ describe('a live outbound call that ends asking to be called back', () => {
     const runId = await liveTalk(callId, 'nanti', 'Jumaat', 'pukul 10 pagi');
     expect(await outcomesOf(callId)).toEqual([{ outcome: 'contacted', callback_day: 5, callback_hour: 10, callback_tz: 'Asia/Kuala_Lumpur', recorded_by: null }]);
     expect(await auditOf(callId)).toEqual([{ outcome: 'contacted', callback: true, source: 'workflow', run: runId }]);
+    expect(await slots()).toEqual([]);                                                // counted once the call has completed
+    await env.pool.query(`UPDATE calls SET status = 'completed', ended_at = now() WHERE id = $1`, [callId]);
     expect(await slots()).toEqual([{ day: 5, hour: 10, time_zone: 'Asia/Kuala_Lumpur', requests: 1 }]);
+    // A person listening back corrects it with no callback time: theirs is current, so the slot goes.
+    await must(post(`/internal/calls/${callId}/outcome`, { outcome: 'contacted' }));
+    expect(await slots()).toEqual([]);
   });
 
   it('records the outcome with no callback time when the answer could not be read, and says so in the audit', async () => {
@@ -184,6 +229,37 @@ describe('a live outbound call that ends asking to be called back', () => {
     expect(await auditOf(callId)).toEqual([{ outcome: 'contacted', callback: 'unread', source: 'workflow', run: runId }]);
     const steps = (await env.pool.query('SELECT payload FROM workflow_run_steps WHERE run_id = $1 AND type = $2', [runId, 'end'])).rows;
     expect(steps).toEqual([{ payload: { outcome: 'call_back', contact: 'contacted', callback: 'unread' } }]);
+  });
+
+  it('records no callback time, and nothing at all, when a person has already said how the call went', async () => {
+    const callId = await liveCall();
+    const r = await startRunSpoken(runs(), null, { workflowId: wfId, environment: 'production', kind: 'live', variables: {}, callId });
+    await env.pool.query(`UPDATE calls SET status = 'completed', ended_at = now() WHERE id = $1`, [callId]);
+    await must(post(`/internal/calls/${callId}/outcome`, { outcome: 'rejected' }));
+    let version = r.view.version;
+    for (const text of ['later', 'tuesday', '3pm']) version = (await replyRunSpoken(runs(), r.view.id, text, version))!.view.version;
+    expect((await outcomesOf(callId)).map((o) => [o.outcome, o.callback_hour, o.recorded_by === null])).toEqual([['rejected', null, false]]);
+  });
+
+  it('stores only a checked time: out of range, an extra field, a wrong number or an unknown zone store none', async () => {
+    const { recordWorkflowOutcome } = await import('../src/store/outbound.js');
+    const cases: [string, unknown, unknown][] = [
+      ['contacted', { day: 7, hour: 10, timeZone: 'Asia/Kuala_Lumpur' }, null],
+      ['contacted', { day: 1, hour: 24, timeZone: 'Asia/Kuala_Lumpur' }, null],
+      ['contacted', { day: 1.5, hour: 10, timeZone: 'Asia/Kuala_Lumpur' }, null],
+      ['contacted', { day: 1, hour: 10, timeZone: 'EST' }, null],
+      ['contacted', { day: 1, hour: 10, timeZone: '+08:00' }, null],
+      ['wrong_number', { day: 1, hour: 10, timeZone: 'Asia/Kuala_Lumpur' }, null],
+      ['contacted', 'unread', null],
+      ['third_party', { day: 1, hour: 10, timeZone: 'asia/kuala_lumpur' }, [1, 10, 'Asia/Kuala_Lumpur']],
+    ];
+    for (const [contact, callback, want] of cases) {
+      const callId = await liveCall();
+      const c = await env.pool.connect();
+      try { await recordWorkflowOutcome(c, { callId, runId: randomUUID(), contact: contact as never, callback: callback as never }); } finally { c.release(); }
+      const [o] = await outcomesOf(callId);
+      expect(o.callback_day === null ? null : [o.callback_day, o.callback_hour, o.callback_tz], JSON.stringify(callback)).toEqual(want);
+    }
   });
 
   it('refuses a rehearsal expecting an impossible callback time', async () => {

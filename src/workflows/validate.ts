@@ -159,7 +159,8 @@ export function validateDefinition(input: unknown): ValidationResult {
           else {
             assigned.add(l.captureAs);
             if (l.sensitive !== undefined && typeof l.sensitive !== 'boolean') nodeErr('bad_listen', 'listen.sensitive must be true or false.');
-            if (l.sensitive === true) sensitive.add(l.captureAs);
+            // What a sensitive answer meant is as sensitive as the answer.
+            if (l.sensitive === true) { sensitive.add(l.captureAs); if (l.intents !== undefined) sensitive.add(`${l.captureAs}_intent`); }
             if (l.intents !== undefined) {
               if (!isObj(l.intents) || !Object.entries(l.intents).every(([k, v]) => isName(k) && Array.isArray(v) && v.length > 0 && v.every((p) => typeof p === 'string' && p.trim() !== ''))) {
                 nodeErr('bad_intents', 'intents must map each intent name to a non-empty list of phrases.');
@@ -205,8 +206,8 @@ export function validateDefinition(input: unknown): ValidationResult {
         }
         if (n.callback !== undefined) {
           const cb = n.callback as unknown as Record<string, unknown>;
-          if (!isObj(cb) || !isName(cb.day) || !isName(cb.hour) || typeof cb.timeZone !== 'string') {
-            nodeErr('bad_callback', 'callback needs "day" and "hour" (the variables holding them) and "timeZone" (such as Asia/Kuala_Lumpur).');
+          if (!isObj(cb) || !isName(cb.day) || !isName(cb.hour) || typeof cb.timeZone !== 'string' || Object.keys(cb).some((k) => !['day', 'hour', 'timeZone'].includes(k))) {
+            nodeErr('bad_callback', 'callback needs "day" and "hour" (the variables holding them) and "timeZone" (such as Asia/Kuala_Lumpur), and nothing else.');
           } else {
             if (!validTimeZone(cb.timeZone)) nodeErr('bad_callback', `"${cb.timeZone}" is not a time zone name, such as Asia/Kuala_Lumpur.`);
             if (n.contact === undefined) nodeErr('callback_without_contact', 'A callback time is recorded with the call\'s outcome, so this end must also say "contact".');

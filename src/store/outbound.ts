@@ -3,7 +3,7 @@ import { AppError } from '../errors.js';
 import { audit } from './audit.js';
 
 import { CONTACT_OUTCOMES, type ContactOutcome, type Json } from '../workflows/definition.js';
-import { validTimeZone, type CallbackTime } from '../workflows/callback.js';
+import { canonicalZone, type CallbackTime } from '../workflows/callback.js';
 
 export const OUTCOMES = CONTACT_OUTCOMES;
 export type Outcome = ContactOutcome;
@@ -23,13 +23,14 @@ export async function recordOutcome(
   if (!call) throw new AppError(404, 'Call not found.');
   if (call.direction !== 'outbound') throw new AppError(409, 'Outcomes are for outbound calls.');
   if (call.status !== 'completed') throw new AppError(409, 'Only an answered call (one that completed) has an outcome. Unanswered and failed calls are counted from their status.');
-  if (e.callback && !validTimeZone(e.callback.timeZone)) throw new AppError(400, 'That is not a time zone name, e.g. Asia/Kuala_Lumpur.');
+  const zone = e.callback ? canonicalZone(e.callback.timeZone) : null;
+  if (e.callback && zone === null) throw new AppError(400, 'That is not a time zone name, e.g. Asia/Kuala_Lumpur.');
   if (e.callback && e.outcome === 'wrong_number') throw new AppError(400, 'A wrong number has no callback time.');
   await lockOutcomes(c, callId);
   const row = (await c.query(
     `INSERT INTO outbound_outcomes (tenant_id, project_id, call_id, outcome, callback_day, callback_hour, callback_tz, recorded_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, call_id, outcome, callback_day, callback_hour, callback_tz, created_at`,
-    [call.tenant_id, call.project_id, callId, e.outcome, e.callback?.day ?? null, e.callback?.hour ?? null, e.callback?.timeZone ?? null, actorId])).rows[0];
+    [call.tenant_id, call.project_id, callId, e.outcome, e.callback?.day ?? null, e.callback?.hour ?? null, zone, actorId])).rows[0];
   await audit(c, actorId, 'outbound.outcome', 'call', callId, { outcome: e.outcome, callback: Boolean(e.callback) });
   return row;
 }
@@ -69,8 +70,8 @@ function callbackTime(contact: Outcome, v: Json | undefined): CallbackTime | nul
   const { day, hour, timeZone } = v as Record<string, Json>;
   if (!Number.isInteger(day) || (day as number) < 0 || (day as number) > 6) return null;
   if (!Number.isInteger(hour) || (hour as number) < 0 || (hour as number) > 23) return null;
-  if (typeof timeZone !== 'string' || !validTimeZone(timeZone)) return null;
-  return { day: day as number, hour: hour as number, timeZone };
+  const zone = canonicalZone(timeZone);
+  return zone === null ? null : { day: day as number, hour: hour as number, timeZone: zone };
 }
 
 const pct = (n: number, d: number) => (d === 0 ? null : Math.round((n / d) * 1000) / 10);
@@ -101,7 +102,7 @@ export async function outboundAnalytics(c: pg.PoolClient, e: { tenantId?: string
     `WITH latest AS (SELECT DISTINCT ON (call_id) call_id, callback_day, callback_hour, callback_tz FROM outbound_outcomes ORDER BY call_id, id DESC)
      SELECT l.callback_day AS day, l.callback_hour AS hour, l.callback_tz AS time_zone, count(*)::int AS requests
        FROM calls c JOIN latest l ON l.call_id = c.id
-      WHERE ${where} AND l.callback_hour IS NOT NULL
+      WHERE ${where} AND c.status = 'completed' AND l.callback_hour IS NOT NULL
       GROUP BY 1, 2, 3 ORDER BY requests DESC, day, hour, time_zone LIMIT 10`, params)).rows;
   return {
     period: { from: e.from.toISOString(), to: e.to.toISOString() },

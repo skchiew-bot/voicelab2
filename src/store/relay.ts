@@ -288,16 +288,24 @@ async function catchUp(d: RelayDeps, session: RelaySession): Promise<{ send: Rel
 /**
  * The connection has had nothing to say for WAIT_LINE_MS. It looks once more first (as the timer above does), so anything
  * that is now ready is said instead. Only if it must still wait, and nothing has been said on this connection, does the
- * caller hear the client's wait line: once per connection, never after a question, and recorded on the call with the
+ * caller hear the client's wait line: once per question the call is on, never after a question, and recorded on the call with the
  * characters the voice provider speaks. The holding line and callback still follow if the call cannot carry on.
  */
 export async function waitLine(d: RelayDeps, session: RelaySession): Promise<RelayOutbound[]> {
   if (session.ended || session.closed || session.spoke) return [];
-  const r = await standbyCheck(d, session);
-  if (r.send.length || !r.again || session.ended || session.closed || session.spoke) return r.send;
-  const text = await asInternal(d, async (c) => (await getFallbackPlan(c, session.tenantId))?.waitMessage ?? DEFAULT_WAIT_LINE).catch(() => DEFAULT_WAIT_LINE);
+  // A failed look is left to the timer above, which falls back if it fails too: the wait line is never worth ending a call for.
+  const r = await standbyCheck(d, session).catch(() => null);
+  if (!r || r.send.length || !r.again || session.ended || session.closed || session.spoke) return r?.send ?? [];
+  // Once per question, not once per connection: a line that keeps reconnecting while the same start or reply is stuck
+  // hears it once, never in a loop. The question is the run's version, or none while the call has not started.
+  const at = session.runId ? session.version : null;
+  const text = await asInternal(d, async (c) => {
+    const said = (await c.query(`SELECT 1 FROM call_events WHERE call_id = $1 AND type = 'relay.wait_line' AND payload->'at' = $2::jsonb LIMIT 1`, [session.callId, JSON.stringify(at)])).rowCount;
+    return said ? null : (await getFallbackPlan(c, session.tenantId))?.waitMessage ?? DEFAULT_WAIT_LINE;
+  }).catch(() => null);
+  if (text === null || session.ended || session.closed) return [];   // said already, or the line has gone: nothing is spoken or recorded
   session.spoke = true;
-  await event(d, session, 'relay.wait_line', { synthChars: text.length }).catch(() => undefined);
+  await event(d, session, 'relay.wait_line', { synthChars: text.length, at }).catch(() => undefined);
   return [{ type: 'text', token: text, last: true }];
 }
 

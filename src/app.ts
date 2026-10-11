@@ -21,7 +21,7 @@ import { addNumber, callKnown, callQueued, costCall, getCall, hangUpCalls, listC
 import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, type RelayDeps, type RelaySession } from './store/relay.js';
 import { recordingAudio } from './store/recordings.js';
 import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
-import { accept, afterDial, afterRelay, transferUrl, twimlHangup, twimlHoldingThenHangup, whisper } from './store/transfer.js';
+import { accept, afterDial, afterRelay, settleAgentLeg, transferUrl, twimlHangup, twimlHoldingThenHangup, whisper } from './store/transfer.js';
 import { DEFAULT_FALLBACK } from './resilience/fallback.js';
 import { registerJourneyRoutes } from './routes/journey.js';
 import { registerAppointmentRoutes } from './routes/appointments.js';
@@ -590,11 +590,16 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
     return withActor(pool, s.actor, (c) => getCall(c, callId));
   });
-  // Re-price a call whose cost could not be recorded, e.g. after adding the missing FX rate.
+  // Re-price a call whose cost could not be recorded, e.g. after adding the missing FX rate. A call whose agent leg was
+  // never reported by Twilio can be settled here with that leg's duration, taken from the provider's own records.
   app.post('/internal/calls/:callId/cost/retry', async (req) => {
     const s = await internal(req);
     const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
-    const outcome = await withActor(pool, s.actor, (c) => costCall(c, s.userId, callId));
+    const b = z.object({ agentLegSeconds: z.number().int().min(0).max(86_400).optional() }).strict().parse(req.body ?? {});
+    const outcome = await withActor(pool, s.actor, async (c) => {
+      if (b.agentLegSeconds !== undefined) await settleAgentLeg(c, s.userId, callId, b.agentLegSeconds);
+      return costCall(c, s.userId, callId);
+    });
     return { cost_status: outcome };
   });
 

@@ -150,8 +150,11 @@ type StartInput = { workflowId: string; environment: Environment; kind: RunKind;
  */
 async function recordContact(c: pg.PoolClient, kind: string, callId: string | null, runId: string, records: StepRecord[]) {
   if (kind !== 'live' || !callId) return;
-  const contact = records.find((r) => r.type === 'end')?.payload.contact;
-  if (typeof contact === 'string' && (CONTACT_OUTCOMES as readonly string[]).includes(contact)) await recordWorkflowOutcome(c, { callId, runId, contact: contact as ContactOutcome });
+  const end = records.find((r) => r.type === 'end')?.payload;
+  const contact = end?.contact;
+  if (typeof contact === 'string' && (CONTACT_OUTCOMES as readonly string[]).includes(contact)) {
+    await recordWorkflowOutcome(c, { callId, runId, contact: contact as ContactOutcome, callback: end?.callback });
+  }
 }
 
 /** As startRun, and also the lines to say, for the live call voice link. */

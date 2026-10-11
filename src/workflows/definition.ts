@@ -56,7 +56,13 @@ export type ContactOutcome = (typeof CONTACT_OUTCOMES)[number];
  * refused, a wrong number, someone else answered); it is recorded as the call's outcome when a live outbound call's run
  * ends here. An end inside a subflow hands back to its parent, so only the end the call finishes at counts.
  */
-export interface EndNode extends Common { type: 'end'; outcome: string; contact?: ContactOutcome }
+export interface EndNode extends Common { type: 'end'; outcome: string; contact?: ContactOutcome; callback?: CallbackFrom }
+/**
+ * Where an end that records an outcome finds the callback time the person asked for: the variables holding the day of
+ * the week and the hour (read by fixed rules in `callback.ts`; usually the intents of what they said), and the time zone
+ * they are in. A time that cannot be read is recorded as no callback time, never guessed.
+ */
+export interface CallbackFrom { day: string; hour: string; timeZone: string }
 
 export type WorkflowNode = SpeakNode | ApiNode | SubflowNode | HandoffNode | EndNode;
 

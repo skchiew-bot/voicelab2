@@ -9,8 +9,11 @@ export interface Scenario {
   replies?: string[];
   /** Canned answers for the integrations the workflow calls: simulations never touch a real system. */
   integrations?: Record<string, Json>;
-  /** `contact`: the call outcome the end it finishes at records (`none` for an end that records none). */
-  expect?: { outcome?: string; says?: string[]; doesNotSay?: string[]; handoff?: string; contact?: string };
+  /**
+   * `contact`: the call outcome the end it finishes at records (`none` for an end that records none). `callback`: the
+   * callback time it records (day 0 = Sunday, hour 0 to 23), `unread` when it asks for one the rules cannot read, or `none`.
+   */
+  expect?: { outcome?: string; says?: string[]; doesNotSay?: string[]; handoff?: string; contact?: string; callback?: { day: number; hour: number } | 'none' | 'unread' };
 }
 
 export interface ScenarioResult { name: string; passed: boolean; outcome: string | null; failures: string[]; runId?: string }
@@ -51,6 +54,13 @@ export function evaluateScenario(s: Scenario, result: { state: RunState; records
   const contact = end?.payload.contact ?? 'none';
   if (s.expect?.contact !== undefined && (!end || contact !== s.expect.contact)) {
     failures.push(end ? `Expected the call to end as "${s.expect.contact}" but it ended as "${String(contact)}".` : `Expected the call to end as "${s.expect.contact}" but it had not ended.`);
+  }
+  if (s.expect?.callback !== undefined) {
+    const got = end?.payload.callback;
+    const said = got === undefined ? 'none' : got === 'unread' ? 'unread' : typeof got === 'object' && got !== null && !Array.isArray(got) ? `day ${String(got.day)} at ${String(got.hour)}:00` : 'none';
+    const want = typeof s.expect.callback === 'string' ? s.expect.callback : `day ${s.expect.callback.day} at ${s.expect.callback.hour}:00`;
+    if (!end) failures.push(`Expected a callback time of ${want} but the call had not ended.`);
+    else if (said !== want) failures.push(`Expected a callback time of ${want} but it was ${said}.`);
   }
   return { name: s.name, passed: failures.length === 0, outcome: state.outcome ?? null, failures };
 }

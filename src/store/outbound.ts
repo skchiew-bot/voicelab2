@@ -2,14 +2,14 @@ import type pg from 'pg';
 import { AppError } from '../errors.js';
 import { audit } from './audit.js';
 
-import { CONTACT_OUTCOMES, type ContactOutcome } from '../workflows/definition.js';
+import { CONTACT_OUTCOMES, type ContactOutcome, type Json } from '../workflows/definition.js';
+import { validTimeZone, type CallbackTime } from '../workflows/callback.js';
 
 export const OUTCOMES = CONTACT_OUTCOMES;
 export type Outcome = ContactOutcome;
 /** Calls that never reached the dialling stage: not attempts, and not the provider's doing. */
 const NOT_DIALLED = `('did_locked', 'all_locked_for_contact', 'no_numbers', 'providers_unhealthy')`;
 
-const validTimeZone = (tz: string) => { try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch { return false; } };
 
 /**
  * Say how an answered outbound call turned out, and, if the person asked to be called back, when. The latest
@@ -47,18 +47,30 @@ const lockOutcomes = (c: pg.PoolClient, callId: string) => c.query(`SELECT pg_ad
  * and the latest statement is the current one; once a person has spoken, the workflow records nothing. The call may not have completed yet (its end is reported after the
  * workflow's); the analytics count an outcome only once the call has.
  */
-export async function recordWorkflowOutcome(c: pg.PoolClient, e: { callId: string; runId: string; contact: Outcome }) {
+export async function recordWorkflowOutcome(c: pg.PoolClient, e: { callId: string; runId: string; contact: Outcome; callback?: Json }) {
   const call = (await c.query('SELECT tenant_id, project_id, direction FROM calls WHERE id = $1', [e.callId])).rows[0];
   if (!call || call.direction !== 'outbound') return null;
   // A person's statement is never replaced by the workflow's, even one that lands after it (a reply still being applied
   // when the call ended and someone classified it).
   await lockOutcomes(c, e.callId);
   if ((await c.query('SELECT 1 FROM outbound_outcomes WHERE call_id = $1 AND recorded_by IS NOT NULL LIMIT 1', [e.callId])).rowCount) return null;
+  const at = callbackTime(e.contact, e.callback);
   const row = (await c.query(
-    `INSERT INTO outbound_outcomes (tenant_id, project_id, call_id, outcome) VALUES ($1,$2,$3,$4) RETURNING id`,
-    [call.tenant_id, call.project_id, e.callId, e.contact])).rows[0];
-  await audit(c, null, 'outbound.outcome', 'call', e.callId, { outcome: e.contact, callback: false, source: 'workflow', run: e.runId });
+    `INSERT INTO outbound_outcomes (tenant_id, project_id, call_id, outcome, callback_day, callback_hour, callback_tz) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+    [call.tenant_id, call.project_id, e.callId, e.contact, at?.day ?? null, at?.hour ?? null, at?.timeZone ?? null])).rows[0];
+  // 'unread': the end asked for a callback time and the caller's answer could not be read, so none is recorded.
+  await audit(c, null, 'outbound.outcome', 'call', e.callId, { outcome: e.contact, callback: at ? true : e.callback === undefined ? false : 'unread', source: 'workflow', run: e.runId });
   return row;
+}
+
+/** A callback time from a run's end, checked again here: two small numbers and a known zone, or none. */
+function callbackTime(contact: Outcome, v: Json | undefined): CallbackTime | null {
+  if (contact === 'wrong_number' || typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+  const { day, hour, timeZone } = v as Record<string, Json>;
+  if (!Number.isInteger(day) || (day as number) < 0 || (day as number) > 6) return null;
+  if (!Number.isInteger(hour) || (hour as number) < 0 || (hour as number) > 23) return null;
+  if (typeof timeZone !== 'string' || !validTimeZone(timeZone)) return null;
+  return { day: day as number, hour: hour as number, timeZone };
 }
 
 const pct = (n: number, d: number) => (d === 0 ? null : Math.round((n / d) * 1000) / 10);

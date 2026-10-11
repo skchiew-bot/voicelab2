@@ -1247,6 +1247,28 @@ describe.skipIf(!run)('admin UI', () => {
     await viewer.close(); await page.close();
   }, 60_000);
 
+  it('links a telephony provider to the voice its live calls speak with, from the provider screen', async () => {
+    const st = env.staffToken;
+    const tw = (await env.call(st, 'POST', '/internal/providers', { adapterKey: 'twilio', name: 'ui-tw-speech', params: { accountSid: 'AC1', authToken: 't', twimlAppVoiceUrl: 'https://x.example/v' } }));
+    expect(tw.statusCode).toBe(201);
+    const el = (await env.call(st, 'POST', '/internal/providers', { adapterKey: 'elevenlabs', name: 'ui-el-speech', params: { apiKey: 'k' } }));
+    expect(el.statusCode).toBe(201);
+    const page = await browser.newPage({ viewport: { width: 1200, height: 1000 } });
+    await signIn(page, st);
+    await page.goto(`${base}#/providers/${tw.json().id}`);
+    const card = page.getByLabel('Live call speech');
+    await expect(card).toContainText('None linked');
+    await field(card, 'Voice provider').selectOption({ label: 'ui-el-speech' });
+    await card.getByRole('button', { name: 'Save voice provider' }).click();
+    await expect(card).toContainText('Now: ui-el-speech');
+    expect((await env.pool.query('SELECT speech_provider_id FROM providers WHERE id = $1', [tw.json().id])).rows[0].speech_provider_id).toBe(el.json().id);
+    // a voice provider's own screen has no such link: only telephony providers speak on live calls
+    await page.goto(`${base}#/providers/${el.json().id}`);
+    await expect(page.getByRole('heading', { name: 'ui-el-speech', level: 1 })).toBeVisible();
+    await expect(page.getByLabel('Live call speech')).toHaveCount(0);
+    await page.close();
+  }, 60_000);
+
   it('keeps the signed-in session across a reload', async () => {
     const page = await browser.newPage();
     await signIn(page, env.staffToken);

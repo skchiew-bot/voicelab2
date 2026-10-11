@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { AppError } from '../errors.js';
+import { MODEL_NAME } from './voice-usage.js';
 import type { Json } from '../workflows/definition.js';
 import { audit } from './audit.js';
 
@@ -33,6 +34,8 @@ export async function modelFor(c: pg.PoolClient, taskKey: string): Promise<Model
 export async function setModel(c: pg.PoolClient, actorId: string | null, m: ModelChoice) {
   const order = { haiku: 0, sonnet: 1, opus: 2 } as const;
   if (m.escalateTo && order[m.escalateTo] <= order[m.tier]) throw new AppError(400, 'A task escalates to a stronger tier than its own.');
+  // Named so its tokens can be given a rate: a model whose name a rate cannot hold could never be priced.
+  if (!MODEL_NAME.test(m.modelId)) throw new AppError(400, 'A model is named as its provider names it: letters, digits and . _ : / @ - [ ] (up to 200).');
   await c.query(
     `INSERT INTO model_config (task_key, tier, model_id, escalate_to) VALUES ($1,$2,$3,$4)
      ON CONFLICT (task_key) DO UPDATE SET tier = $2, model_id = $3, escalate_to = $4, updated_at = now()`, [m.taskKey, m.tier, m.modelId, m.escalateTo]);

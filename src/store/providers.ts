@@ -7,7 +7,7 @@ import { decryptSecrets, encryptSecrets } from '../secrets.js';
 import { audit } from './audit.js';
 
 /** Public shape of a provider: secrets are reported only as "which keys are set". */
-const publicCols = `p.id, p.adapter_key, p.kind, p.name, p.params, p.status, p.created_at, p.credentials_checked_at,
+const publicCols = `p.id, p.adapter_key, p.kind, p.name, p.params, p.status, p.created_at, p.credentials_checked_at, p.speech_provider_id,
   octet_length(p.secret_params) > 0 AS secrets_stored`;
 
 export interface ProviderInput { adapterKey: string; name: string; params: ParamValues; skipValidation?: boolean }

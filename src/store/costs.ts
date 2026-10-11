@@ -141,6 +141,10 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
       });
     }
     // A leg with time on it and no rate to price it is refused, never recorded as free.
+    // One speech rate prices the characters once: two that both match would charge them twice, so it is refused.
+    if (item.speech && lines.length - before > 1) {
+      throw new AppError(409, `Provider ${item.providerId} has more than one per-character speech rate in force, so it is not clear which prices the speech. Keep one.`);
+    }
     if (item.speech && lines.length === before) {
       throw new AppError(409, `Provider ${item.providerId} has no per-character speech rate in force at ${input.occurredAt.toISOString()}, so the speech synthesised for this call cannot be priced. Add one before costing calls.`);
     }

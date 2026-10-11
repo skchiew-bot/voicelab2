@@ -118,7 +118,7 @@ beforeAll(async () => {
   // The voice the speech relay speaks with, priced per character (28 characters say "Let me find someone for you.").
   voiceId = (await must(post('/internal/providers', { adapterKey: 'elevenlabs', name: 'el-transfer', params: { apiKey: 'k' } }))).json().id;
   await must(post(`/internal/providers/${voiceId}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'tts', unit: 'per_character', rate: '0.00002', currency: 'USD' }] }));
-  await env.pool.query(`UPDATE providers SET params = params || jsonb_build_object('relayVoiceProviderId', $2::text) WHERE id = $1`, [twilioId, voiceId]);
+  await must(put(`/internal/providers/${twilioId}/speech-voice`, { voiceProviderId: voiceId }));
   await must(post('/internal/fx', { currency: 'MYR', perUsd: '4.5', effectiveFrom: '2026-01-01T00:00:00Z' }));
   await must(post('/internal/rate-card', { effectiveFrom: '2026-01-01T00:00:00Z', inboundCreditsPerMinute: '1', outboundCreditsPerMinute: '2', creditValueUsd: '0.01' }));
   await env.app.listen({ port: 0, host: '127.0.0.1' });

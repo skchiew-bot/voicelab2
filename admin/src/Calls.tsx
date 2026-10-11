@@ -43,7 +43,7 @@ function CallDetail({ call, onChanged }: { call: CallRow; onChanged: () => void 
           <table>
             <thead><tr><th>Component</th><th>Line</th><th>Quantity</th><th>Rate</th><th>Amount</th></tr></thead>
             <tbody>{cost.data.lines.map((l, i) => (
-              <tr key={i}><td>{l.component}</td><td>{l.model ? `${l.model} ${l.billing_line}` : l.billing_line}</td><td>{l.quantity}</td><td>{fmtDecimal(l.rate)} {l.currency} {l.unit.replace('_', ' ')}</td><td>{fmtDecimal(l.amount_usd)} USD</td></tr>
+              <tr key={i}><td>{l.component}</td><td>{l.model ? `${l.model} ${l.billing_line}` : l.billing_line}</td><td>{l.quantity}</td><td>{fmtDecimal(l.rate)} {l.currency} {l.unit.replace(/_/g, ' ')}</td><td>{fmtDecimal(l.amount_usd)} USD</td></tr>
             ))}</tbody>
           </table>
         </>

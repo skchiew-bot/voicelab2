@@ -11,6 +11,7 @@ import { CAPABILITIES, type Fetch } from './adapters/types.js';
 import type { Config } from './config.js';
 import { withActor, type Actor } from './db.js';
 import { AppError } from './errors.js';
+import { audit } from './store/audit.js';
 import { hashToken, parseKey } from './secrets.js';
 import { chargingAt, addChargingVersion, confirmVersion, listChargingVersions } from './store/charging.js';
 import { eventsForCall } from './store/events.js';
@@ -40,7 +41,7 @@ import { actionSchema, controlState, runAction } from './store/control-actions.j
 import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
 import { clientAddUser, clientCalls, clientDisableUser, clientSummary, clientUsers } from './store/portal.js';
 import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
-import { addModelRate, listModelRates } from './store/voice-usage.js';
+import { addModelRate, listModelRates, setSpeechProvider } from './store/voice-usage.js';
 import { countsOf, createScheduler, drain, listJobs, runJobNow, updateJob, type Job } from './scheduler.js';
 import { sweepFaults } from './store/call-end.js';
 import { expireQueued } from './store/concurrency.js';
@@ -375,6 +376,13 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     }).strict().parse(req.body);
     return reply.status(201).send(await withActor(pool, s.actor, (c) => addModelRate(c, s.userId, body)));
   });
+  // Which voice provider prices the speech on a telephony provider's live calls (the voice its speech relay speaks with).
+  app.put('/internal/providers/:id/speech-voice', async (req) => {
+    const s = await internal(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const b = z.object({ voiceProviderId: z.string().uuid().nullable() }).strict().parse(req.body);
+    return withActor(pool, s.actor, (c) => setSpeechProvider(c, s.userId, id, b.voiceProviderId));
+  });
   app.get('/internal/model-rates', async (req) => {
     const s = await internal(req);
     return withActor(pool, s.actor, listModelRates);
@@ -396,7 +404,14 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
         }),
       })).min(1),
     }).parse(req.body);
-    return reply.status(201).send(await withActor(pool, s.actor, (c) => recordCallCost(c, s.userId, { callId, ...body })));
+    return reply.status(201).send(await withActor(pool, s.actor, async (c) => {
+      // A live call carried voice usage this route cannot see (speech, model tokens): it is priced from its own records
+      // through `cost/retry`, never from figures entered here that would leave them out.
+      if ((await c.query(`SELECT 1 FROM workflow_runs WHERE call_id = $1 AND kind = 'live'`, [callId])).rowCount) {
+        throw new AppError(409, 'This was a live call with a workflow: its speech and model tokens are priced from its own records. Use re-price instead.');
+      }
+      return recordCallCost(c, s.userId, { callId, ...body });
+    }));
   });
   app.get('/internal/calls/:callId/cost', async (req) => {
     const s = await internal(req);
@@ -610,10 +625,13 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   app.post('/internal/calls/:callId/cost/retry', async (req) => {
     const s = await internal(req);
     const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
-    const b = z.object({ agentLegSeconds: z.number().int().min(0).max(86_400).optional() }).strict().parse(req.body ?? {});
+    // `relayGone`: a person says the relay that served the call is gone (its server died holding it), so the call is priced
+    // from what was recorded rather than waiting for the relay to let go. Audited.
+    const b = z.object({ agentLegSeconds: z.number().int().min(0).max(86_400).optional(), relayGone: z.literal(true).optional() }).strict().parse(req.body ?? {});
     const outcome = await withActor(pool, s.actor, async (c) => {
       if (b.agentLegSeconds !== undefined) await settleAgentLeg(c, s.userId, callId, b.agentLegSeconds);
-      return costCall(c, s.userId, callId);
+      if (b.relayGone) await audit(c, s.userId, 'call_cost.relay_gone', 'call', callId, {});
+      return costCall(c, s.userId, callId, { relayGone: b.relayGone });
     });
     return { cost_status: outcome };
   });

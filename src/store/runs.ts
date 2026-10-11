@@ -25,6 +25,7 @@ import { recordingIndex } from './recordings.js';
 import type { Segment } from '../workflows/stitch.js';
 import { ticketForEscalation } from './tickets.js';
 import { getWorkflow, liveVersionId, type Environment } from './workflows.js';
+import { priceIfWaiting } from './calls.js';
 
 export interface RunDeps { pool: pg.Pool; key: Buffer; integrationHttp?: HttpDeps; speaker?: Deps['speaker'] }
 export type RunKind = 'simulation' | 'test' | 'live';
@@ -202,6 +203,16 @@ export async function startRunSpoken(d: RunDeps, actorId: string | null, e: Star
  * A start or reply refused at its last step had still run: any model it asked was paid for, so the decisions are recorded
  * all the same (L-026). Its steps are not: nothing it said was heard. A failure here does not hide the refusal.
  */
+/**
+ * A reply being applied has landed, been handed back or been refused. A live call that ended meanwhile was waiting for
+ * it before being priced: it is priced now, in a transaction of its own, after the run's (the call's row is always
+ * locked before a run's, never after: lesson L-030).
+ */
+async function afterReply(d: RunDeps, run: { kind: string; call_id?: string | null }) {
+  if (run.kind !== 'live' || !run.call_id) return;
+  await asInternal(d, (c) => priceIfWaiting(c, run.call_id!)).catch(() => undefined);
+}
+
 async function recordRefused(d: RunDeps, e: { tenantId: string; callId: string | null; runId: string; records: StepRecord[] }) {
   await asInternal(d, (c) => recordStepDecisions(c, e)).catch(() => undefined);
 }
@@ -236,6 +247,7 @@ export async function replyRunSpoken(d: RunDeps, runId: string, text: string, ex
   catch (err) {
     // Nothing was applied: hand the turn back so the caller can be asked again.
     await asInternal(d, (c) => c.query(`UPDATE workflow_runs SET status = 'awaiting_reply', claimed_at = NULL, updated_at = now() WHERE id = $1 AND status = 'processing'`, [runId]));
+    await afterReply(d, ctx.run);
     throw err;
   }
 
@@ -256,8 +268,9 @@ export async function replyRunSpoken(d: RunDeps, runId: string, text: string, ex
     if (out.state.escalation || out.state.outcome === 'handoff_human') await ticketForEscalation(c, null, runId);
     return { view: view(runId, out.state, out.records, ctx.run.state_version + 1), speech: spokenIn(out.records) };
   });
-  if (written) return written;
+  if (written) { await afterReply(d, ctx.run); return written; }
   await recordRefused(d, { tenantId: ctx.run.tenant_id, callId: ctx.run.call_id ?? null, runId, records: out.records });
+  await afterReply(d, ctx.run);
   throw new AppError(409, 'This call was closed while your reply was being processed. Nothing was changed.');
 }
 
@@ -266,15 +279,18 @@ export async function replyRunSpoken(d: RunDeps, runId: string, text: string, ex
  * nothing sensitive stays held for a call that is never coming back.
  */
 export async function abandonStaleRuns(d: RunDeps, actorId: string | null, e: { olderThanMinutes: number }) {
-  return asInternal(d, async (c) => {
+  const out = await asInternal(d, async (c) => {
     const rows = (await c.query(
-      `SELECT id, state FROM workflow_runs
+      `SELECT id, state, kind, call_id FROM workflow_runs
         WHERE status IN ('running', 'awaiting_reply', 'processing') AND updated_at < now() - make_interval(mins => $1)
         ORDER BY updated_at LIMIT 500 FOR UPDATE SKIP LOCKED`, [e.olderThanMinutes])).rows;
     for (const r of rows) await abandonRow(c, r);
     if (rows.length) await audit(c, actorId, 'workflow.runs_abandoned', 'workflow_run', null, { count: rows.length });
-    return { abandoned: rows.length };
+    return rows as { kind: string; call_id: string | null }[];
   });
+  // Calls that ended waiting for a reply that never landed are priced now, each in its own transaction.
+  for (const r of out) await afterReply(d, r);
+  return { abandoned: out.length };
 }
 
 /**

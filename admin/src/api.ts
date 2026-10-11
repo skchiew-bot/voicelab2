@@ -49,6 +49,7 @@ export interface Capability { capability: string; support: 'native' | 'composabl
 export interface Provider {
   id: string; adapter_key: string; kind: string; name: string; params: Record<string, unknown>;
   status: string; secrets_stored: boolean; credentials_checked_at: string | null; capabilities: Capability[];
+  speech_provider_id?: string | null;
 }
 export interface Component { component: string; unit: string; rate: string; currency: string; billing_line: string; direction: string }
 export interface ChargingVersion {

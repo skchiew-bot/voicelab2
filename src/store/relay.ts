@@ -13,6 +13,7 @@ import { withActor } from '../db.js';
 import { AppError } from '../errors.js';
 import { DEFAULT_FALLBACK } from '../resilience/fallback.js';
 import { sayMessages, type RelayInbound, type RelayOutbound } from '../telephony/relay.js';
+import { priceIfWaiting } from './calls.js';
 import { recordEvent } from './events.js';
 import { addCallbackRequest, getFallbackPlan } from './resilience.js';
 import { abandonRow, replyRunSpoken, startRunSpoken, type RunDeps, type SpokenLine } from './runs.js';
@@ -333,6 +334,8 @@ export async function closeRelay(d: RelayDeps, session: RelaySession): Promise<v
     await c.query('UPDATE calls SET relay_owner = NULL WHERE id = $1', [session.callId]);
     const run = (await c.query(`SELECT id, state FROM workflow_runs WHERE call_id = $1 AND kind = 'live' AND status IN ('running', 'awaiting_reply') FOR UPDATE`, [session.callId])).rows[0];
     if (run) await abandonRow(c, run);
+    // A call that ended while this connection served it waited for its voice usage: everything is in now.
+    await priceIfWaiting(c, session.callId);
   }).catch(() => undefined);
   await event(d, session, 'relay.closed', { finished: wasEnded }).catch(() => undefined);
 }
@@ -360,6 +363,8 @@ export async function failed(d: RelayDeps, session: RelaySession, already: Relay
     return (await getFallbackPlan(c, session.tenantId)) ?? DEFAULT_FALLBACK;
   }).catch(() => DEFAULT_FALLBACK);
   await event(d, session, 'relay.fallback', { steps: ['record_callback_request', 'holding_message'] }).catch(() => undefined);
+  // The relay's own voice speaks the holding message: its characters are speech on the call, priced with the rest.
+  await event(d, session, 'relay.holding_message', { synthChars: plan.holdingMessage.length }).catch(() => undefined);
   // The run ends now, whatever it was doing, so nothing sensitive is held for a call that has given up. A reply still being
   // applied cannot then land: its write needs the run to be as it left it. What that reply did to a client's system is
   // unknown, so the end says it was cut off (L-002).

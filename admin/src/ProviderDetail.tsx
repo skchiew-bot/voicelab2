@@ -236,6 +236,37 @@ function Funding({ providerId }: { providerId: string }) {
   );
 }
 
+/**
+ * The voice provider whose per-character rate prices the speech on this telephony provider's live calls: the voice its
+ * speech relay speaks with. Without it, a live call with synthesised speech cannot be costed.
+ */
+function SpeechVoice({ provider, onChanged }: { provider: Provider; onChanged: () => void }) {
+  const all = useLoad(() => api<Provider[]>('GET', '/internal/providers'));
+  const voices = (all.data ?? []).filter((p) => p.kind === 'voice');
+  const [choice, setChoice] = useState<string | null>(null);
+  const { pending, error, run } = useAction();
+  const current = provider.speech_provider_id ?? '';
+  const value = choice ?? current;
+  const name = voices.find((v) => v.id === current)?.name;
+  return (
+    <form className="card" aria-label="Live call speech" onSubmit={async (e) => {
+      e.preventDefault();
+      if (await run(() => api('PUT', `/internal/providers/${provider.id}/speech-voice`, { voiceProviderId: value === '' ? null : value }))) { setChoice(null); onChanged(); }
+    }}>
+      <h2>Live call speech</h2>
+      <p className="muted">The voice provider its live calls speak with. Its per-character speech rate prices the characters synthesised on each call; recordings cost nothing. {current ? <>Now: <strong>{name ?? current}</strong>.</> : <strong>None linked: a live call with synthesised speech cannot be costed.</strong>}</p>
+      <Errors error={all.error} />
+      <Field label="Voice provider">
+        <select value={value} onChange={(e) => setChoice(e.target.value)}>
+          <option value="">None</option>{voices.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+        </select>
+      </Field>
+      <Errors error={error} />
+      <div><button type="submit" disabled={pending || value === current}>Save voice provider</button></div>
+    </form>
+  );
+}
+
 export function ProviderDetail({ id }: { id: string }) {
   const provider = useLoad(() => api<Provider>('GET', `/internal/providers/${id}`), [id]);
   const versions = useLoad(() => api<ChargingVersion[]>('GET', `/internal/providers/${id}/charging`), [id]);
@@ -258,6 +289,7 @@ export function ProviderDetail({ id }: { id: string }) {
               ? <p className="muted">No non-secret settings.</p>
               : <table><tbody>{Object.entries(provider.data.params).map(([k, v]) => <tr key={k}><td>{k}</td><td>{String(v)}</td></tr>)}</tbody></table>}
           </section>
+          {provider.data.kind === 'telephony' && <SpeechVoice provider={provider.data} onChanged={provider.reload} />}
           <Capabilities provider={provider.data} onChanged={provider.reload} />
         </>
       )}

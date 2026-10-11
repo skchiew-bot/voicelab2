@@ -337,16 +337,17 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
  * The voice provider whose rates price the speech on a call: the one an operator linked to the call's telephony provider
  * (the voice its speech relay speaks with). None linked, or not a voice provider, refuses the cost: never a guess.
  */
-async function speechProvider(c: pg.PoolClient, telephonyProviderId: string): Promise<string> {
-  const p = (await c.query('SELECT name, params FROM providers WHERE id = $1', [telephonyProviderId])).rows[0];
-  const linked = typeof p?.params?.relayVoiceProviderId === 'string' ? p.params.relayVoiceProviderId as string : null;
-  const voice = linked && /^[0-9a-f-]{36}$/.test(linked) ? (await c.query(`SELECT id FROM providers WHERE id = $1 AND kind = 'voice'`, [linked])).rows[0] : null;
+async function speechProvider(c: pg.PoolClient, call: { provider_id: string; speech_provider_id: string | null }): Promise<string> {
+  // The voice fixed for the call when it was handed to the relay; for a call from before that was recorded, the link now.
+  const p = (await c.query('SELECT name, speech_provider_id FROM providers WHERE id = $1', [call.provider_id])).rows[0];
+  const linked = call.speech_provider_id ?? p?.speech_provider_id ?? null;
+  const voice = linked ? (await c.query(`SELECT id FROM providers WHERE id = $1 AND kind = 'voice'`, [linked])).rows[0] : null;
   if (!voice) throw new AppError(409, `Speech was synthesised on this call, but ${p?.name ?? 'its telephony provider'} has no voice provider linked to price it. Link the voice provider its live calls speak with, then re-price.`);
   return voice.id as string;
 }
 
 /** Price a finished call and store the result. Failing to price never loses the call or fails the webhook. */
-export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'unchecked' | 'not_applicable' | 'pending'> {
+export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string, o: { relayGone?: boolean } = {}): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'unchecked' | 'not_applicable' | 'pending'> {
   const call = (await c.query('SELECT * FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
   if (!call) throw new AppError(404, 'Call not found.');
   if (!call.ended_at) throw new AppError(409, 'The call has not ended yet.');
@@ -362,12 +363,25 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
     }
     return 'pending';
   }
+  // While the relay still serves the call, or a reply is being applied, speech and model decisions may still land: the
+  // cost waits for them (lesson L-029) and is priced when the relay lets go or the reply lands. A person who knows the
+  // relay is gone (a server died holding it) prices it with `relayGone`.
+  if (!o.relayGone) {
+    const busy = call.relay_owner !== null
+      || (await c.query(`SELECT 1 FROM workflow_runs WHERE call_id = $1 AND kind = 'live' AND status = 'processing'`, [callId])).rowCount;
+    if (busy) {
+      if (!(await c.query(`SELECT 1 FROM call_events WHERE call_id = $1 AND type = 'call.cost_waiting' AND payload->>'for' = 'voice'`, [callId])).rowCount) {
+        await recordEvent(c, { tenantId: call.tenant_id, projectId: call.project_id ?? undefined, callId, type: 'call.cost_waiting', payload: { for: 'voice' } });
+      }
+      return 'pending';
+    }
+  }
   const agentSeconds = call.transfer_seconds === null ? 0 : Number(call.transfer_seconds);
   try {
     // The call's voice usage (owner's decisions, 2026-10-11): the characters synthesised for it, priced at the voice
     // provider its telephony provider's speech relay speaks with, and its model decisions' tokens, priced by model.
     const synthChars = await callSynthCharacters(c, callId);
-    const speech = synthChars > 0 ? [{ providerId: await speechProvider(c, call.provider_id), usage: { characters: synthChars }, speech: true as const }] : [];
+    const speech = synthChars > 0 ? [{ providerId: await speechProvider(c, call), usage: { characters: synthChars }, speech: true as const }] : [];
     const models = await callModelUsage(c, callId);
     await recordCallCost(c, actorId, {
       callId, tenantId: call.tenant_id, projectId: call.project_id ?? undefined, direction: call.direction,
@@ -393,6 +407,15 @@ export async function costCall(c: pg.PoolClient, actorId: string | null, callId:
     await recordEvent(c, { tenantId: call.tenant_id, projectId: call.project_id ?? undefined, callId, type: 'call.cost_failed', payload: { reason: err.message } });
     return 'failed';
   }
+}
+
+/** A call that has ended and was waiting for its voice usage is priced now (never a second time: costCall prices once). */
+export async function priceIfWaiting(c: pg.PoolClient, callId: string) {
+  const r = (await c.query('SELECT ended_at, cost_status FROM calls WHERE id = $1', [callId])).rows[0];
+  if (!r?.ended_at || r.cost_status !== 'pending') return;
+  await c.query('SAVEPOINT price_waiting');
+  try { await costCall(c, null, callId); await c.query('RELEASE SAVEPOINT price_waiting'); }
+  catch { await c.query('ROLLBACK TO SAVEPOINT price_waiting'); }
 }
 
 async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: NormalizedEvent, hint?: string, contactKey?: Buffer):
@@ -509,7 +532,11 @@ export const callQueued = (d: CallDeps, providerId: string, providerCallId: stri
 /** The call to hand to the speech relay: one we know, still open, with a workflow to run. Null otherwise. */
 export const relayTarget = (d: CallDeps, providerId: string, providerCallId: string) =>
   asInternal(d, async (c) =>
-    ((await c.query(`SELECT id FROM calls WHERE provider_id = $1 AND provider_call_id = $2 AND workflow_id IS NOT NULL AND status IN ('ringing', 'in_progress', 'dialing')`,
+    // The call is handed to the relay: the voice it will speak with is fixed on it now, for pricing its speech (L-025).
+    ((await c.query(
+      `UPDATE calls ca SET speech_provider_id = coalesce(ca.speech_provider_id, p.speech_provider_id) FROM providers p
+        WHERE p.id = ca.provider_id AND ca.provider_id = $1 AND ca.provider_call_id = $2 AND ca.workflow_id IS NOT NULL AND ca.status IN ('ringing', 'in_progress', 'dialing')
+        RETURNING ca.id`,
       [providerId, providerCallId])).rows[0]?.id as string | undefined) ?? null);
 
 export const callKnown = (d: CallDeps, providerId: string, providerCallId: string) =>

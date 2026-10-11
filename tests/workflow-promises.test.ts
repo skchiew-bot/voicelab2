@@ -114,8 +114,8 @@ async function talk(callId: string, answer: string, o: { environment?: string; k
 }
 const promisesOf = async (caseId: string) => (await env.pool.query(`SELECT amount::text, due_on::text, status, created_by FROM promises WHERE case_id = $1 ORDER BY created_at`, [caseId])).rows;
 const caseEvents = async (caseId: string) => ((await must(get(`/internal/cases/${caseId}`))).json().events as { kind: string; detail: Record<string, unknown> }[]);
-/** The next such weekday (today included) in a zone, read before and after the call, so a run across midnight still agrees. */
-const nextWeekday = (dow: number, tz = KL) => { const l = localParts(new Date(), tz); return addDays(l.date, (dow - l.dow + 7) % 7); };
+/** The next such weekday (never today) in a zone, read before and after the call, so a run across midnight still agrees. */
+const nextWeekday = (dow: number, tz = KL) => { const l = localParts(new Date(), tz); return addDays(l.date, ((dow - l.dow + 6) % 7) + 1); };
 
 describe('a live call on a case whose workflow ends with a promise', () => {
   it('records the promise on the case, for the case\'s balance, due on the day the person chose in the case\'s time zone', async () => {
@@ -165,7 +165,7 @@ describe('a live call on a case whose workflow ends with a promise', () => {
     }
   });
 
-  it('works the due date out from the moment the call ends, in the case\'s own time zone: the next such weekday, today included, or a number of days on, across a month\'s end', async () => {
+  it('works the due date out from the moment the call ends, in the case\'s own time zone: the next such weekday, never today, or a number of days on, across a month\'s end', async () => {
     const { recordPromiseFromCall } = await import('../src/store/cases.js');
     const due = async (tz: string, at: string, when: { days: number } | { weekday: number }) => {
       const cs = await caseWith('500', tz);
@@ -180,7 +180,7 @@ describe('a live call on a case whose workflow ends with a promise', () => {
     // 2026-10-09T23:30Z is Friday 9 October in UTC and in Pago Pago, but already Saturday 10 October in Kiritimati.
     const at = '2026-10-09T23:30:00Z';
     expect(await due('Pacific/Kiritimati', at, { weekday: 5 })).toBe('2026-10-16');             // Saturday there: the Friday after
-    expect(await due('Pacific/Pago_Pago', at, { weekday: 5 })).toBe('2026-10-09');              // Friday there: today
+    expect(await due('Pacific/Pago_Pago', at, { weekday: 5 })).toBe('2026-10-16');              // Friday there: next Friday, never today
     expect(await due('Pacific/Kiritimati', at, { weekday: 1 })).toBe('2026-10-12');
     expect(await due('Pacific/Pago_Pago', at, { weekday: 1 })).toBe('2026-10-12');
     expect(await due('Pacific/Kiritimati', at, { days: 2 })).toBe('2026-10-12');

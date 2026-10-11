@@ -528,7 +528,8 @@ export async function recordPromiseFromCall(c: pg.PoolClient, e: { callId: strin
     const cs = await caseRow(c, caseId);
     // One clock for "today": the same moment works out the date and is checked against it.
     const local = localParts(now, cs.time_zone);
-    const days = e.weekday !== undefined ? (e.weekday - local.dow + 7) % 7 : e.days ?? 0;   // the next such weekday, today included
+    // The next such weekday, never today: "Friday" said on a Friday means next Friday (owner's decision, 2026-10-11).
+    const days = e.weekday !== undefined ? ((e.weekday - local.dow + 6) % 7) + 1 : e.days ?? 0;
     const parsed = promiseSchema.safeParse({ amount: e.amount, dueOn: addDays(local.date, days) });
     if (!parsed.success) throw new AppError(400, 'The amount from the call is not an exact amount.');
     if (toScaled(parsed.data.amount) <= 0n) throw new AppError(400, 'A promise is for an amount above nothing.');

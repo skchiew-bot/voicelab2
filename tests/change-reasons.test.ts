@@ -49,7 +49,7 @@ const EXEMPT: Record<string, 'asks its own' | 'approval' | 'people' | 'record' |
   // people
   'POST /internal/staff': 'people',
   'POST /internal/users/:id/approve': 'people',
-  'POST /internal/users/:id/disable': 'people',
+  'POST /internal/users/:id/disable': 'people',                        // no reason asked: the owner's decision, 2026-10-11
   'POST /internal/tenants/:tenantId/users': 'people',
   // record
   'POST /internal/tenants': 'record',

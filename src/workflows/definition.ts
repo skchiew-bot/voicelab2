@@ -63,7 +63,7 @@ export const MAX_PROMISE_DAYS = 60;
  * A promise to pay the person made on the call, recorded on the call's case. The amount is read from a variable holding
  * an exact amount (such as `case_balance`). It falls due a fixed number of days from today, or on the day the answer
  * maps to: with `as: 'days'` the map gives days from today ("tomorrow" to 1), with `as: 'weekday'` it gives a day of the
- * week (0 Sunday to 6), meaning the next such day, today included. Days are counted in the case's own time zone when
+ * week (0 Sunday to 6), meaning the next such day, never today ("Friday" said on a Friday is next Friday). Days are counted in the case's own time zone when
  * the promise is recorded. An amount that is not exact, or an answer the map does not hold, records no promise.
  */
 export interface PromiseAsked {

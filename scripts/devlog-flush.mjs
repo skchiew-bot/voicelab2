@@ -121,7 +121,8 @@ export function clean(raw) {
     if (PROCESSES.includes(raw.process)) out.process = raw.process;
     set('task', taskId(raw.task));
     if (TRIGGERS.includes(raw.trigger)) out.trigger = raw.trigger;
-    if (raw.shadow === true) out.shadow = true;
+    // A shadow run is a second opinion on a review: no other process carries the flag.
+    if (raw.shadow === true && raw.process === 'review') out.shadow = true;
     set('first', isoTime(raw.first));
     set('last', isoTime(raw.last));
     set('tokens', tokensOf(raw.tokens));
@@ -131,7 +132,7 @@ export function clean(raw) {
     if (!taskId(raw.task) || !PROCESSES.includes(raw.process) || !['passed', 'failed'].includes(raw.result)) return null;
     out.task = raw.task; out.process = raw.process; out.result = raw.result;
     set('agent', id(raw.agent));
-    set('shadowOf', id(raw.shadowOf));
+    if (raw.process === 'review') set('shadowOf', id(raw.shadowOf)); // only a review can shadow another
     set('round', nat(raw.round, 99));
   }
   if (raw.event === 'Task') {

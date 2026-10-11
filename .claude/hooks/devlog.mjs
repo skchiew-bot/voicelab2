@@ -140,6 +140,9 @@ export function parseTag(description) {
   if (!m) return null;
   const [, process, task, extra, trigger] = m;
   if (extra === 'shadow' && process !== 'review') return null;
+  // The task id is the one free-form part: refuse one that scrubbing would change (a key, an email, a long mixed run)
+  // or that holds a phone-number's worth of digits, so such a tag is no tag and nothing of it is recorded.
+  if (scrub(task, 40) !== task || (task.match(/\d/g) ?? []).length >= 7) return null;
   const out = { process, task };
   if (trigger) out.trigger = trigger;
   if (extra === 'shadow') out.shadow = true;

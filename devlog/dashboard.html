@@ -96,7 +96,10 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th { text-align: left; font-weight: 600; color: var(--ink-muted); font-size: 13px; padding: 9px 12px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
 td { padding: 9px 12px; border-top: 1px solid var(--rule); vertical-align: top; }
 tbody tr:first-child td { border-top: 0; }
-td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+th.num { text-align: right; }
+td.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+/* Words in a number column (not recorded, not applicable) are words: the normal font, kept on one line. */
+td.num .na { font-family: var(--font-sans); font-size: 13px; color: var(--ink-muted); white-space: nowrap; }
 td .sub { display: block; }
 .tag { display: inline-block; margin-left: 6px; padding: 0 6px; border: 1px solid var(--rule-2); border-radius: 4px; font-size: 11px; font-weight: 600; color: var(--ink-muted); vertical-align: middle; white-space: nowrap; }
 .empty { padding: 16px; color: var(--ink-muted); }
@@ -214,7 +217,9 @@ footer { font-size: 13px; color: var(--ink-muted); }
   <div class="view" id="v-routing" hidden>
     <section class="card" aria-labelledby="rl-h"><div class="head"><h2 id="rl-h">Routing and escalation</h2><span id="rt-state"></span></div><p class="sub" id="rt-legend"></p><div id="rt-off"></div></section>
     <section aria-labelledby="ld-h"><div class="head"><h2 id="ld-h">Ladder by process</h2><span class="note" id="rt-since"></span></div><div class="tbox" id="ladder"></div></section>
+    <section aria-labelledby="rn-h"><div class="head"><h2 id="rn-h">Routing notes</h2><span class="note">Breaches and odd starts are counted apart, never as escalations</span></div><div class="tbox" id="rt-notes"></div></section>
     <section aria-labelledby="el-h"><div class="head"><h2 id="el-h">Escalation log</h2><span class="note">The last 50 climbs up a tier</span></div><div class="tbox" id="esc-log"></div></section>
+    <section aria-labelledby="ra-h"><div class="head"><h2 id="ra-h">Recent helper agents</h2><span class="note">The last 20 tagged agents, with why each ran on its tier</span></div><div class="tbox" id="rt-agents"></div></section>
     <div class="g2">
       <section class="card" aria-labelledby="dv-h"><div class="head"><h2 id="dv-h">Declared versus recorded</h2></div><div id="consistency"></div></section>
       <section class="card" aria-labelledby="sh-h"><div class="head"><h2 id="sh-h">Review shadow audit</h2><span id="sh-pill"></span></div><div id="shadow"></div></section>
@@ -299,6 +304,7 @@ const fmtMoney = (v) => {
   return `${m[1]}$${(cents / 100n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')}.${(cents % 100n).toString().padStart(2, '0')}`;
 };
 const num = (n) => (n === null || n === undefined ? '—' : Number(n).toLocaleString('en'));
+const na = (text) => h('span', { class: 'na' }, text);
 const pctText = (n) => (n === null || n === undefined ? 'Unavailable' : `${n}%`);
 const SVG = 'http://www.w3.org/2000/svg';
 function icon(kind) {
@@ -427,11 +433,14 @@ function render(r) {
     : h('p', { class: 'empty' }, `Unavailable: ${rt.error ?? 'the routing policy in devlog/control-tower.json could not be read'}.`),
     h('p', { class: 'sub', style: 'padding: 10px 12px' }, led.length ? `Sessions led by each model: ${led.map(([m, n]) => `${m.replace('claude-', '')} ${n}`).join(', ')}.` : 'No session has been priced yet.'));
   const UNREC = 'Unavailable (not recorded)';
-  fill('pc-note', rt.since ? `Recorded since ${day(rt.since)}; ${num(rt.agentsBefore)} helper agents before that: ${UNREC.toLowerCase()}` : UNREC);
+  fill('pc-note', [rt.since ? `Helper-agent records begin ${day(rt.since)}; ${num(rt.agentsBefore)} helper agents have no record of their own (model and tokens unavailable, not recorded). ` : `${UNREC}. `,
+    'These rows are priced from the transcripts, so they can differ from Spend, which uses Claude Code\'s own checkpoints.']);
+  // The main session's and the earlier sessions' rows have no helper-agent count to give: not applicable, not missing.
+  const noAgents = (x) => x.process === 'main session' || String(x.process).startsWith('sessions before recording');
+  const cell = (v, show, notApplicable) => h('td', { class: 'num' }, v === null ? na(notApplicable ? 'Not applicable' : UNREC) : show(v));
   fill('proc-cost', table(['Process', 'Model', { t: 'Helper agents', cls: 'num' }, { t: 'Tokens', cls: 'num' }, { t: 'Median per agent', cls: 'num' }, { t: 'Cost', cls: 'num' }],
     (r.processCost ?? []).map((x) => h('tr', null, h('td', null, x.process), h('td', null, String(x.model ?? '').replace('claude-', '')),
-      h('td', { class: 'num' }, x.agents === null ? UNREC : num(x.agents)), h('td', { class: 'num' }, x.tokens === null ? UNREC : num(x.tokens)),
-      h('td', { class: 'num' }, x.medianTokens === null ? UNREC : num(x.medianTokens)), h('td', { class: 'num' }, x.cost === null ? UNREC : fmtMoney(x.cost.usd)))), UNREC));
+      cell(x.agents, num, noAgents(x)), cell(x.tokens, num, false), cell(x.medianTokens, num, noAgents(x)), cell(x.cost === null ? null : x.cost.usd, fmtMoney, false))), UNREC));
   fill('registry', table(['Model', 'Tier', { t: 'Sessions', cls: 'num' }, { t: 'Output tokens', cls: 'num' }, { t: 'Cache read', cls: 'num' }, { t: 'Cost', cls: 'num' }, { t: 'Per session', cls: 'num' }, { t: 'Tool failures', cls: 'num' }, { t: 'Tests passing', cls: 'num' }],
     r.registry.map((m) => h('tr', null, h('td', null, m.model), h('td', null, m.tier), h('td', { class: 'num' }, num(m.sessions)), h('td', { class: 'num' }, num(m.output)), h('td', { class: 'num' }, num(m.cacheRead)), h('td', { class: 'num' }, fmtMoney(m.cost.usd)), h('td', { class: 'num' }, fmtMoney(m.costPerSession.usd)), h('td', { class: 'num' }, pctText(m.toolFailureRate)), h('td', { class: 'num' }, pctText(m.testPassRate))))));
 
@@ -527,8 +536,8 @@ function routingView(r) {
   const tiers = (p) => (p.tokensByTier === null ? UNREC : ['high', 'mid', 'low', 'other', 'unknown'].filter((k) => p.tokensByTier[k]).map((k) => `${k} ${num(p.tokensByTier[k])}`).join(', ') || 'No tokens');
   fill('ladder', table(['Process', 'Floor', 'Ceiling', dh('Items', 'num'), dh('Finished at floor', 'num'), dh('Escalation from floor'), dh('Top triggers'), { t: 'Tokens by tier' }],
     rt.processes.map((p) => h('tr', null, h('td', null, p.label), h('td', null, tierName(p.floor)), h('td', null, tierName(p.ceiling)),
-      h('td', { class: 'num' }, p.items === null ? UNREC : num(p.items)),
-      h('td', { class: 'num' }, p.finishedAtFloor === null ? UNREC : `${p.finishedAtFloor.n} of ${p.finishedAtFloor.of}`),
+      h('td', { class: 'num' }, p.items === null ? na(UNREC) : num(p.items)),
+      h('td', { class: 'num' }, p.finishedAtFloor ? `${p.finishedAtFloor.n} of ${p.finishedAtFloor.of}` : na(p.recorded ? 'None finished yet' : UNREC)),
       h('td', null, escalationPill(p.escalation)), h('td', null, trig(p)), h('td', null, tiers(p)))),
     rt.error ? `Unavailable: ${rt.error}` : 'Unavailable (not recorded)'));
   const SUPPORT = { recorded: ['good', 'Recorded'], declared: ['warn', 'Declared only'], none: ['none', 'No record'] };
@@ -538,11 +547,29 @@ function routingView(r) {
       h('td', null, x.trigger ? String(x.trigger).replace(/_/g, ' ') : 'Not declared'), h('td', null, pill(...(SUPPORT[x.support] ?? SUPPORT.none))))),
     'No climb recorded yet.'));
   const c = rt.consistency;
+  // Counts that need a tag (or an agent's record) are unavailable while no agent is tagged; the untagged and
+  // no-metadata counts are recorded facts either way and always shown.
+  const tagDep = rt.state === 'off';
   fill('consistency', c ? [
     h('p', { class: 'sub' }, 'What the session declared, set against what Claude Code recorded.'),
-    ...[['Agents tagged', c.tagged], ['Agents without a tag', c.untagged], ['Climbs with no trigger declared', c.climbsWithoutTrigger], ['Triggers declared with no climb', c.triggersWithoutClimb], ['Triggers the record does not support', c.unsupported], ['Tags naming a task not on the board', c.unknownTasks], ['Agents with no Claude Code metadata', c.noMetadata]]
-      .map(([k, v]) => h('div', { class: 'check' }, h('span', null, k), h('span', { class: 'mono' }, rt.state === 'off' ? '—' : num(v)))),
+    ...[['Agents tagged', c.tagged, true], ['Agents without a tag', c.untagged, false], ['Climbs with no trigger declared', c.climbsWithoutTrigger, true], ['Triggers declared with no climb', c.triggersWithoutClimb, true], ['Triggers the record does not support', c.unsupported, true], ['Tags naming a task not on the board', c.unknownTasks, true], ['Agents with no Claude Code metadata', c.noMetadata, false], ['Started with no Claude Code record', c.startedNoRecord, false]]
+      .map(([k, v, dep]) => h('div', { class: 'check' }, h('span', null, k), h('span', { class: 'mono' }, dep && tagDep ? '—' : num(v)))),
   ] : h('p', { class: 'sub' }, 'Unavailable: the routing configuration could not be read.'));
+  // Figures the ladder does not have a column for: the policy breaches and odd starts, the first-pass review, the
+  // cost, and the weekly trend (the weeks recording has covered; earlier weeks are unknown, not empty).
+  const weeks = (p) => (p.weeks === null ? na(UNREC) : p.weeks.length ? p.weeks.map((w) => `${w.week}: ${w.escalated} of ${w.items}`).join('; ') : 'No week yet');
+  fill('rt-notes', table(['Process', { t: 'Above ceiling', cls: 'num' }, { t: 'Below floor', cls: 'num' }, { t: 'Started above floor', cls: 'num' }, { t: 'Entered by escalation', cls: 'num' }, dh('First-pass review', 'num'), { t: 'Cost', cls: 'num' }, 'Weekly escalations (of items from the floor)'],
+    rt.processes.map((p) => {
+      const count = (v) => h('td', { class: 'num' }, v === null ? na(UNREC) : num(v));
+      return h('tr', null, h('td', null, p.label), count(p.aboveCeiling), count(p.startedBelow), count(p.startedAbove), count(p.enteredByEscalation),
+        h('td', { class: 'num' }, p.firstPass ? `${p.firstPass.n} of ${p.firstPass.of}` : na(UNREC)),
+        h('td', { class: 'num' }, p.cost ? fmtMoney(p.cost.usd) : na(UNREC)), h('td', null, weeks(p)));
+    }), rt.error ? `Unavailable: ${rt.error}` : UNREC));
+  const REASON = { floor: 'At the floor', below_floor: 'Below the floor', undeclared: 'Above the floor, no trigger declared' };
+  const reasonText = (a) => (a.reason === null ? 'Model not rated' : a.reason.startsWith('escalation:') ? `Escalation: ${a.reason.slice(11).replace(/_/g, ' ')}` : (REASON[a.reason] ?? a.reason));
+  fill('rt-agents', table(['Started', dh('Process'), dh('Task'), { t: 'Round', cls: 'num' }, 'Model', 'Tier reason'],
+    (rt.agents ?? []).slice(0, 20).map((a) => h('tr', null, h('td', { class: 'mono' }, when(a.first)), h('td', null, a.process), h('td', { class: 'mono' }, a.task), h('td', { class: 'num' }, String(a.round)),
+      h('td', null, `${String(a.model ?? '').replace('claude-', '')} (${a.tier ?? 'unrated'})`), h('td', null, reasonText(a)))), 'No tagged helper agent recorded yet.'));
   const sh = rt.shadow;
   fill('sh-pill', sh.enabled ? pill('active', 'On') : pill('warn', 'Not started'));
   fill('shadow', sh.error ? h('p', null, `Unavailable: ${sh.error}`) : sh.enabled ? [

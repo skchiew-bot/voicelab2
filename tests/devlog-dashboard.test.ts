@@ -18,7 +18,7 @@ const money = (usd: string) => ({ usd });
 const proc = (process: string, label: string, floor: string, ceiling: string, laddered: boolean, extra: Record<string, unknown> = {}) => ({
   process, label, work: label, floor, ceiling, laddered, firstPass: null, recorded: false,
   escalation: laddered ? { state: 'unavailable', reason: 'not_recorded', escalated: null, window: null, need: 20, overPercent: 30 } : { state: 'not_laddered', escalated: null, window: null, need: null, overPercent: null },
-  cost: null, agents: null, items: null, startedAtFloor: null, startedAbove: null, startedBelow: null, aboveCeiling: null, escalatedItems: null,
+  cost: null, agents: null, items: null, startedAtFloor: null, startedAbove: null, startedBelow: null, enteredByEscalation: null, aboveCeiling: null, escalatedItems: null,
   finishedAtFloor: null, topTriggers: null, tokensByTier: null, weeks: null, ...extra,
 });
 
@@ -39,27 +39,32 @@ function fixedReport() {
     economics: {
       spend: money('1.00'), perDoneTask: null, cacheSaved: money('0'), cacheReadShare: 0, meteredSessions: 1, unattributed: money('0'),
       pricing: { source: 'test', asOf: '2026-10-11' }, stopLossAlerts: 0, wasteAlerts: 0, ledBy: { 'claude-sonnet-5-5': 1 },
-      routingSaving: { baseline: 'claude-opus-5-5', allBaseline: money('2.00'), actual: money('1.00'), saving: money('1.00'), share: 50, agents: { baseline: 'claude-opus-5-5', allBaseline: money('0.50'), actual: money('0.25'), saving: money('0.25'), share: 50, scope: 'helper agents' } },
+      routingSaving: { baseline: 'claude-opus-5-5', allBaseline: money('2.00'), actual: money('1.00'), saving: money('1.00'), share: 50, agents: { baseline: 'claude-opus-5-5', allBaseline: money('0.50'), actual: money('0.25'), saving: money('0.25'), share: 50, scope: 'helper agents only' } },
     },
     health: { overall: 'amber', checks, integrity: { state: 'green', checked: 0, pending: 0, changed: [], deleted: [], accepted: [] } },
     branches: { branches: [], error: null, defaultBranch: 'main', forksCount: 0, fetchedAt: null },
     routing: {
-      since: '2026-10-09T08:00:00.000Z', agentsBefore: 51, error: null, state: 'amber', triggers: [], agents: [], unrated: 0,
+      since: '2026-10-09T08:00:00.000Z', agentsBefore: 51, error: null, state: 'amber', triggers: [], unrated: 0,
+      agents: Array.from({ length: 25 }, (_, i) => ({ agentId: `a${i}`, session: 's1', process: 'build', task: `P3-${i}`, round: 1, model: 'claude-sonnet-5-5', tier: 'mid', reason: i === 0 ? 'escalation:suite_failed' : i === 1 ? 'undeclared' : i === 2 ? 'below_floor' : 'floor', trigger: null, first: `2026-10-10T${String(i % 24).padStart(2, '0')}:00:00.000Z` })),
       processes: [
         proc('plan', 'Plan', 'high', 'high', false),
-        proc('build', 'Build', 'mid', 'high', true, { recorded: true, items: 25, escalation: { state: 'amber', escalated: 7, window: 20, need: 20, overPercent: 30 }, finishedAtFloor: { n: 13, of: 20 }, topTriggers: [{ trigger: 'suite_failed', n: 4 }], tokensByTier: { high: 100, mid: 900, low: 0, other: 0, unknown: 0 } }),
+        proc('build', 'Build', 'mid', 'high', true, { recorded: true, items: 25, agents: 30, startedAtFloor: 20, startedAbove: 2, startedBelow: 1, enteredByEscalation: 1, aboveCeiling: 2, escalatedItems: 7, firstPass: { n: 8, of: 10 }, cost: money('0.50'), weeks: [{ week: '2026-W41', items: 4, escalated: 1 }, { week: '2026-W42', items: 6, escalated: 2 }], escalation: { state: 'amber', escalated: 7, window: 20, need: 20, overPercent: 30 }, finishedAtFloor: { n: 13, of: 20 }, topTriggers: [{ trigger: 'suite_failed', n: 4 }], tokensByTier: { high: 100, mid: 900, low: 0, other: 0, unknown: 0 } }),
+        // Recorded, but nothing has finished yet: "None finished yet", not the words for not recorded.
+        proc('fix', 'Fix', 'mid', 'high', true, { recorded: true, items: 1, agents: 1, finishedAtFloor: null, topTriggers: [], tokensByTier: { high: 0, mid: 10, low: 0, other: 0, unknown: 0 }, escalation: { state: 'collecting', escalated: 0, window: 0, need: 20, overPercent: 30 } }),
         // Nothing recorded yet: every figure null, which the page must not turn into 0.
         proc('check', 'Check', 'low', 'mid', true),
       ],
       log: [{ ts: '2026-10-10T09:30:00.000Z', task: 'P3-B', process: 'build', round: 2, fromModel: 'claude-sonnet-5-5', toModel: 'claude-opus-5-5', fromTier: 'mid', toTier: 'high', trigger: 'suite_failed', support: 'recorded', session: 's1' },
         { ts: '2026-10-10T10:30:00.000Z', task: 'P3-C', process: 'build', round: 2, fromModel: 'claude-sonnet-5-5', toModel: 'claude-opus-5-5', fromTier: 'mid', toTier: 'high', trigger: null, support: 'none', session: 's1' }],
-      consistency: { climbsWithoutTrigger: 1, triggersWithoutClimb: 0, unsupported: 0, unknownTasks: 0, untagged: 2, tagged: 25, noMetadata: 0 },
+      consistency: { climbsWithoutTrigger: 1, triggersWithoutClimb: 0, unsupported: 0, startedNoRecord: 3, startedNoRecordStale: 1, unknownTasks: 0, untagged: 2, tagged: 25, noMetadata: 0 },
       shadow: { enabled: false, every: 5, error: null, sample: 0, agree: 0, misses: 0, falseAlarms: 0, due: 0, done: 0, tokens: 0 },
     },
     processCost: [
       { process: 'build', model: 'claude-sonnet-5-5', agents: 3, tokens: 1000, medianTokens: 300, cost: money('0.50') },
       { process: 'check', model: 'claude-haiku-5-5', agents: null, tokens: null, medianTokens: null, cost: null },
       { process: 'main session', model: 'claude-opus-5-5', agents: null, tokens: 5000, medianTokens: null, cost: money('2.00') },
+      { process: 'main session', model: 'claude-haiku-5-5', agents: null, tokens: null, medianTokens: null, cost: null },
+      { process: 'sessions before recording: main session and helper agents together', model: 'claude-opus-5-5', agents: null, tokens: 7000, medianTokens: null, cost: money('3.00') },
     ],
     throttle: {
       state: 'off', reason: 'No runner: nothing reads usage or starts items', error: null, thresholds: null,
@@ -98,12 +103,17 @@ describe.skipIf(!run)('dev Control Tower page', () => {
     const row = page.locator('#proc-cost tbody tr', { hasText: 'check' });
     expect(await row.locator('td').allTextContents()).toEqual(['check', 'haiku-5-5', UNREC, UNREC, UNREC, UNREC]);
     // The main session's remainder keeps its tokens; its absent agent figures are unavailable, not 0.
-    expect(await page.locator('#proc-cost tbody tr', { hasText: 'main session' }).locator('td').allTextContents()).toEqual(['main session', 'opus-5-5', UNREC, '5,000', UNREC, '$2.00']);
-    expect(await page.locator('#pc-note').textContent()).toBe(`Recorded since 2026-10-09; 51 helper agents before that: ${UNREC.toLowerCase()}`);
+    expect(await page.locator('#proc-cost tbody tr', { hasText: /^main sessionopus/ }).locator('td').allTextContents()).toEqual(['main session', 'opus-5-5', 'Not applicable', '5,000', 'Not applicable', '$2.00']);
+    // A main session whose remainder came out negative is unavailable (its tokens), though it has no agents to count.
+    expect(await page.locator('#proc-cost tbody tr', { hasText: /^main sessionhaiku/ }).locator('td').allTextContents()).toEqual(['main session', 'haiku-5-5', 'Not applicable', UNREC, 'Not applicable', UNREC]);
+    expect(await page.locator('#proc-cost tbody tr', { hasText: 'sessions before recording' }).locator('td').allTextContents()).toEqual(['sessions before recording: main session and helper agents together', 'opus-5-5', 'Not applicable', '7,000', 'Not applicable', '$3.00']);
+    expect(await page.locator('#pc-note').textContent()).toBe(`Helper-agent records begin 2026-10-09; 51 helper agents have no record of their own (model and tokens unavailable, not recorded). These rows are priced from the transcripts, so they can differ from Spend, which uses Claude Code's own checkpoints.`);
     // On the routing view, a process with nothing recorded shows the same words in its items and finished-at-floor cells.
     await page.goto(`file://${fixedPage}#routing`);
     const check = await page.locator('#ladder tbody tr', { hasText: 'Check' }).locator('td').allTextContents();
     expect(check.slice(3, 5)).toEqual([UNREC, UNREC]);
+    // Recorded but nothing finished: its own words, not the words for not recorded.
+    expect((await page.locator('#ladder tbody tr', { hasText: 'Fix' }).locator('td').allTextContents()).slice(3, 5)).toEqual(['1', 'None finished yet']);
     expect(errors).toEqual([]);
     await page.close();
   });
@@ -121,9 +131,59 @@ describe.skipIf(!run)('dev Control Tower page', () => {
     expect(await page.locator('#ladder tbody tr', { hasText: 'Build' }).locator('.pill').textContent()).toBe('Amber');
     expect(await page.locator('#ladder tbody tr', { hasText: 'Plan' }).locator('.pill').textContent()).toBe('Not laddered');
     expect(await page.locator('#ladder tbody tr', { hasText: 'Check' }).locator('.pill').textContent()).toBe('Unavailable');
-    expect(await page.locator('#ladder .pill svg').count()).toBe(3);
+    expect(await page.locator('#ladder .pill svg').count()).toBe(4);
     expect(await page.locator('#esc-log tbody tr .pill').allTextContents()).toEqual(['Recorded', 'No record']);
     expect(await page.locator('#esc-log tbody tr').nth(1).locator('td').nth(6).textContent()).toBe('Not declared');
+    expect(errors).toEqual([]);
+    await page.close();
+  });
+
+  it('shows the routing notes and the recent helper agents with why each ran on its tier', async () => {
+    const { page, errors } = await open(fixedPage, 1280, '#routing');
+    expect(await page.locator('#rt-notes thead th').allTextContents()).toEqual(['Process', 'Above ceiling', 'Below floor', 'Started above floor', 'Entered by escalation', 'First-pass reviewDeclared', 'Cost', 'Weekly escalations (of items from the floor)']);
+    expect(await page.locator('#rt-notes tbody tr', { hasText: 'Build' }).locator('td').allTextContents()).toEqual(['Build', '2', '1', '2', '1', '8 of 10', '$0.50', '2026-W41: 1 of 4; 2026-W42: 2 of 6']);
+    // A process with nothing recorded has no counts: the words, never 0.
+    expect((await page.locator('#rt-notes tbody tr', { hasText: 'Check' }).locator('td').allTextContents()).slice(1, 6)).toEqual([UNREC, UNREC, UNREC, UNREC, UNREC]);
+    // The last 20 of the 25 agents, newest first, each with its reason.
+    const rows = await page.locator('#rt-agents tbody tr').evaluateAll((trs) => trs.map((tr) => [...tr.querySelectorAll('td')].map((td) => td.textContent)));
+    expect(rows).toHaveLength(20);
+    expect(rows[0]).toEqual(['2026-10-10 00:00 UTC', 'build', 'P3-0', '1', 'sonnet-5-5 (mid)', 'Escalation: suite failed']);
+    expect(rows[1]?.[5]).toBe('Above the floor, no trigger declared');
+    expect(rows[2]?.[5]).toBe('Below the floor');
+    expect(rows[3]?.[5]).toBe('At the floor');
+    expect(errors).toEqual([]);
+    await page.close();
+  });
+
+  it('shows the counts that need no tag even while no agent is tagged, and a dash only for those that do', async () => {
+    const off = fixedReport();
+    off.routing.state = 'off';
+    off.routing.consistency = { climbsWithoutTrigger: 0, triggersWithoutClimb: 0, unsupported: 0, startedNoRecord: 3, startedNoRecordStale: 0, unknownTasks: 0, untagged: 4, tagged: 0, noMetadata: 2 };
+    const file = await buildPage(off, 'off.html');
+    const { page, errors } = await open(file, 1280, '#routing');
+    const lines = Object.fromEntries((await page.locator('#consistency .check').allTextContents()).map((t) => [t.replace(/[\d—]+$/, ''), t.match(/[\d—]+$/)?.[0]]));
+    expect(lines).toEqual({
+      'Agents tagged': '—', 'Agents without a tag': '4', 'Climbs with no trigger declared': '—', 'Triggers declared with no climb': '—', 'Triggers the record does not support': '—',
+      'Tags naming a task not on the board': '—', 'Agents with no Claude Code metadata': '2', 'Started with no Claude Code record': '3',
+    });
+    expect(errors).toEqual([]);
+    await page.close();
+  });
+
+  it('writes the ladder\'s headers in one font, and the words in a number column in the normal font on one line at 375 pixels', async () => {
+    const { page, errors } = await open(fixedPage, 375, '#routing');
+    const fonts = await page.locator('#ladder thead th').evaluateAll((ths) => ths.map((t) => getComputedStyle(t).fontFamily));
+    expect(new Set(fonts).size).toBe(1);
+    const words = page.locator('#ladder td.num .na').first();
+    expect(await words.textContent()).toBe(UNREC);
+    expect(await words.evaluate((e) => getComputedStyle(e).fontFamily)).toContain('Source Sans');
+    expect(await words.evaluate((e) => e.getBoundingClientRect().height)).toBeLessThan(24); // one line
+    const num = page.locator('#ladder td.num:not(:has(.na))').first();
+    expect(await num.evaluate((e) => getComputedStyle(e).fontFamily)).toContain('IBM Plex Mono');
+    await page.goto(`file://${fixedPage}#cost`);
+    const cost = page.locator('#proc-cost td.num .na').first();
+    expect(await cost.evaluate((e) => getComputedStyle(e).fontFamily)).toContain('Source Sans');
+    expect(await cost.evaluate((e) => e.getBoundingClientRect().height)).toBeLessThan(24);
     expect(errors).toEqual([]);
     await page.close();
   });
@@ -150,7 +210,7 @@ describe.skipIf(!run)('dev Control Tower page', () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
     // Every table sits inside a .tbox, which scrolls on its own, and no box is wider than the screen.
     const tables = await page.locator('#v-routing table').evaluateAll((ts) => ts.map((t) => !!t.closest('.tbox')));
-    expect(tables.length).toBe(2);
+    expect(tables.length).toBe(4); // the ladder, the routing notes, the escalation log and the recent helper agents
     expect(tables.every(Boolean)).toBe(true);
     const widest = await page.locator('#v-routing .tbox, #v-routing .card, #v-routing section').evaluateAll((els) => Math.max(...els.map((e) => e.getBoundingClientRect().right)));
     expect(widest).toBeLessThanOrEqual(375);

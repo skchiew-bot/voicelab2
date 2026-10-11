@@ -163,7 +163,7 @@ Format, checked by `tests/devlog.test.ts`:
 
 ### L-014: When a request could mean two things, ask which
 - **Seen:** 2 times. "Control Tower" names both the product's operations console (`BUILD_PLAN.md`) and the owner's dashboard for monitoring development. A request for the second was built as the first (session on 2026-10-09). The dev Control Tower was then designed without asking whether a reference existed; the owner already had one in `skchiew-bot/d3ngineering` (session on 2026-10-10).
-- **Rule:** If a term has two meanings in this repo, or a request could fit either, ask before building. Before designing something new for the owner, ask whether they already have a design or an example to follow. "Control Tower" alone means the product console; the development monitor is the "dev Control Tower" (`/control-tower`).
+- **Rule:** If a term has two meanings in this repo, or a request could fit either, ask before building. Before designing something new for the owner, ask whether they already have a design or an example to follow. "Control Tower" alone means the product console; the development monitor is the "dev Control Tower" (`/control-tower`). The one exception is the owner's: a request to show or refresh the Control Tower means the dev one, without asking.
 - **Guards:**
   - `CLAUDE.md` › "dev Control Tower"
 

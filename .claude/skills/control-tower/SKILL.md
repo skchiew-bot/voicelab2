@@ -6,7 +6,7 @@ argument-hint: "[dashboard | lesson <what happened> | check]"
 
 # Dev Control Tower
 
-This is the owner's view of the **development** of Voice Lab. It is not the product's Control Tower (the operations console in `BUILD_PLAN.md`, `admin/src/ControlTower.tsx`). If a request could mean either, ask (lesson L-014).
+This is the owner's view of the **development** of Voice Lab. It is not the product's Control Tower (the operations console in `BUILD_PLAN.md`, `admin/src/ControlTower.tsx`). A request to show or refresh the Control Tower ("show control tower") means this dashboard, by the owner's decision of 2026-10-11; for any other request that could mean either, ask (lesson L-014).
 
 Pieces:
 - `.claude/hooks/devlog.mjs`, wired in `.claude/settings.json`: logs each session's actions and failed actions to `devlog/.spool/`, which git ignores. It records the tool, a scrubbed file path or command description, and for a failure only a category (such as `exit 1` or `denied`), never content, prompts, error text, numbers or tokens.

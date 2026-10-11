@@ -149,11 +149,11 @@ export function ControlTower() {
             <h2>Funding</h2>
             {t.funding.length === 0 ? <p className="muted">No funding recorded yet.</p> : (
               <table>
-                <thead><tr><th>Provider</th><th>Recorded balance</th></tr></thead>
+                <thead><tr><th>Provider</th><th>Balance (our estimate)</th></tr></thead>
                 <tbody>{t.funding.map((f) => <tr key={`${f.provider_id}-${f.currency}`}><td>{f.provider}</td><td>{fmtDecimal(f.balance)} {f.currency}</td></tr>)}</tbody>
               </table>
             )}
-            <p className="muted">Balances are what staff recorded; calls are not deducted from them. Days of funding left are worked out further down.</p>
+            <p className="muted">Balances are what staff recorded, less what each costed call cost by our own rates; they are not read back from the providers. Days of funding left are worked out further down.</p>
           </section>
 
           <section className="card" aria-label="Cost and margin">

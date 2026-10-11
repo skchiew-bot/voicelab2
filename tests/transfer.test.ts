@@ -125,8 +125,13 @@ afterAll(async () => { await env?.teardown(); });
 /** A new charging version for the Twilio provider, in force from now, with this concurrency ceiling. */
 let rateClock = Date.parse('2026-01-01T00:00:00Z');
 const LEG = { component: 'telephony_leg', unit: 'per_minute', currency: 'USD' };
+/** The speech relay's own rates (minutes and characters): free here, so these calls are costed by their phone legs alone. */
+const FREE_RELAY = [
+  { component: 'other', unit: 'per_minute', rate: '0', currency: 'USD', direction: 'any', billingLine: 'relay' },
+  { component: 'tts', unit: 'per_1k_characters', rate: '0', currency: 'USD', direction: 'any', billingLine: 'relay' },
+];
 async function rates(ceiling: number, components: Record<string, string>[] = [
-  { ...LEG, rate: '0.0085', direction: 'inbound' }, { ...LEG, rate: '0.0140', direction: 'outbound' },
+  { ...LEG, rate: '0.0085', direction: 'inbound' }, { ...LEG, rate: '0.0140', direction: 'outbound' }, ...FREE_RELAY,
 ]) {
   // Each version is a moment later than the last (and never in the future), so the newest is the one in force.
   rateClock = Math.min(Date.now() - 1000, Math.max(rateClock + 1000, Date.now() - 60_000));
@@ -415,21 +420,28 @@ describe('a live caller passed to a person', () => {
     };
     const costRow = async (callId: string) => (await env.pool.query('SELECT cost_status, cost_error FROM calls WHERE id = $1', [callId])).rows[0];
     try {
-      // A relay charge per minute and a per-call fee that apply to any direction: the agent leg pays neither.
+      // A relay charge per minute and per character, and a per-call charge for any direction: the agent leg pays none.
       await rates(1000, [
         { ...LEG, rate: '0.0085', direction: 'inbound' }, { ...LEG, rate: '0.0140', direction: 'outbound' },
-        { component: 'other', unit: 'per_minute', rate: '0.0700', currency: 'USD', direction: 'any', billingLine: 'speech_relay' },
+        { component: 'other', unit: 'per_minute', rate: '0.0700', currency: 'USD', direction: 'any', billingLine: 'relay' },
+        { component: 'tts', unit: 'per_1k_characters', rate: '0.30', currency: 'USD', direction: 'any', billingLine: 'relay' },
+        { component: 'platform', unit: 'per_minute', rate: '0.0010', currency: 'USD', direction: 'any', billingLine: 'fee' },
       ]);
       const a = await putThrough({ DialCallDuration: '61' });
-      expect((await env.pool.query(
-        `SELECT l.leg, l.component, l.amount_usd FROM call_cost_lines l JOIN call_costs k ON k.id = l.call_cost_id WHERE k.call_id = $1 ORDER BY l.leg DESC, l.component DESC`, [a])).rows)
-        .toEqual([
-          { leg: 'caller', component: 'telephony_leg', amount_usd: '0.01700000' },
-          { leg: 'caller', component: 'other', amount_usd: '0.14000000' },
-          { leg: 'agent', component: 'telephony_leg', amount_usd: '0.02800000' },
-        ]);
+      const costed = (await env.pool.query(
+        `SELECT l.leg, l.component, l.billing_line, l.amount_usd FROM call_cost_lines l JOIN call_costs k ON k.id = l.call_cost_id WHERE k.call_id = $1 ORDER BY l.leg DESC, l.billing_line, l.component DESC`, [a])).rows;
+      // the caller's leg pays its phone line, the per-call charge (2 minutes at 0.0010) and the relay (minutes and characters)
+      expect(costed.filter((l) => l.leg === 'caller' && l.billing_line !== 'relay')).toEqual([
+        { leg: 'caller', component: 'platform', billing_line: 'fee', amount_usd: '0.00200000' },
+        { leg: 'caller', component: 'telephony_leg', billing_line: 'main', amount_usd: '0.01700000' },
+      ]);
+      expect(costed.filter((l) => l.billing_line === 'relay').map((l) => [l.leg, l.component])).toEqual([['caller', 'tts'], ['caller', 'other']]);
+      expect(costed.filter((l) => l.leg === 'agent')).toEqual([{ leg: 'agent', component: 'telephony_leg', billing_line: 'main', amount_usd: '0.02800000' }]);
+      // Twilio prices the relay as its own item, so the call is checked by its two legs alone: 90 + 61 seconds, and
+      // 0.0170 + 0.0020 + 0.0280 = 0.0470 USD. Were the relay's lines counted, this would show a variance.
+      expect((await must(post(`/internal/calls/${a}/reconcile`, { source: 'manual', reportedSeconds: 151, reportedCost: '0.0470' }))).json().outcome).toBe('matched');
       // Only an inbound rate: the agent leg cannot be priced, so the call is refused a cost, never recorded with the leg free.
-      await rates(1000, [{ ...LEG, rate: '0.0085', direction: 'inbound' }]);
+      await rates(1000, [{ ...LEG, rate: '0.0085', direction: 'inbound' }, ...FREE_RELAY]);
       const b = await putThrough({ DialCallDuration: '61' });
       expect(await costRow(b)).toMatchObject({ cost_status: 'failed', cost_error: expect.stringContaining('no outbound telephony rate') });
       expect((await env.pool.query('SELECT count(*)::int AS n FROM call_costs WHERE call_id = $1', [b])).rows[0].n).toBe(0);
@@ -445,7 +457,7 @@ describe('a live caller passed to a person', () => {
   it('costs the agent leg in the one cost record of the call, exactly, with credits only for the time of the caller', async () => {
     const lines = async (callId: string) => (await env.pool.query(
       `SELECT l.leg, l.billed_seconds, l.amount_usd FROM call_cost_lines l JOIN call_costs k ON k.id = l.call_cost_id
-        WHERE k.call_id = $1 AND k.status = 'estimated' ORDER BY l.leg DESC, l.id`, [callId])).rows;
+        WHERE k.call_id = $1 AND k.status = 'estimated' AND l.billing_line <> 'relay' ORDER BY l.leg DESC, l.id`, [callId])).rows;
     const head = async (callId: string) => (await env.pool.query(`SELECT total_usd, credits_drawn FROM call_costs WHERE call_id = $1 AND status = 'estimated'`, [callId])).rows;
     const end = (callSid: string, seconds: string) => twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: callSid, CallStatus: 'completed', CallDuration: seconds, Direction: 'inbound', From: CUSTOMER, To: OUR });
 
@@ -469,7 +481,7 @@ describe('a live caller passed to a person', () => {
     expect(rec.json().outcome).toBe('matched');
     const reconciled = (await env.pool.query(
       `SELECT k.total_usd, array_agg(l.leg ORDER BY l.leg DESC) AS legs FROM call_costs k JOIN call_cost_lines l ON l.call_cost_id = k.id
-        WHERE k.call_id = $1 AND k.status = 'reconciled' GROUP BY k.id`, [a.callId])).rows;
+        WHERE k.call_id = $1 AND k.status = 'reconciled' AND l.billing_line <> 'relay' GROUP BY k.id`, [a.callId])).rows;
     expect(reconciled).toEqual([{ total_usd: '0.04500000', legs: ['caller', 'agent'] }]);
 
     // No one picked up: a leg that never connected costs nothing, so only the caller's leg is priced.

@@ -117,6 +117,7 @@ const EXEMPT: Record<string, 'asks its own' | 'approval' | 'people' | 'record' |
   'POST /internal/calls/outbound': 'work',
   'POST /internal/reconcile/run': 'work',
   'POST /internal/calls/:callId/cost/retry': 'work',
+  'POST /internal/calls/cost/retry-failed': 'work',
 };
 const auditCount = async () => (await env.pool.query('SELECT count(*)::int AS n FROM audit_log')).rows[0].n as number;
 

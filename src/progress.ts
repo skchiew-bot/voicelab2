@@ -69,11 +69,11 @@ export const PHASES: PhaseProgress[] = [
       { text: 'A blind listening check confirms there is no drop in caller experience (the Customer Experience Council signs off).', state: 'not_met', proof: 'none',
         note: 'Needs people listening to real stitched calls. No audio plays on a call yet, so there is nothing to listen to.' },
       { text: 'The DID-lock rule has been verified against failure history.', state: 'partly', proof: 'tests',
-        note: 'The rule is tested against seeded failure history: a failed DID is never used again for that contact, the next provider is used when the cheap one is locked out, and a dial is refused without contacting a provider when nothing is left. There is no real failure history yet, and failures are recorded by an operator or the API, not detected from carrier signals.' },
+        note: 'The rule is tested against seeded failure history: a failed DID is never used again for that contact, the next provider is used when the cheap one is locked out, and a dial is refused without contacting a provider when nothing is left. There is no real failure history yet. Failures are recorded by an operator or the API, and now also from the carrier: an outbound dial a provider reports ended with SIP 607 (unwanted) or 608 (rejected by call analytics) locks its DID for that contact by itself (owner\'s decision, 2026-10-11), if the dial never connected and the code came on the call\'s own leg; a decline, busy or no answer locks nothing, and a lock that cannot be written is a Control Tower alert until a person locks it by hand. Tested against fakes only; Twilio\'s SipResponseCode is assumed, not checked against a live call.' },
     ], open: [
       'Recordings and live speech are sent to a call through Twilio\'s speech relay (recordings by a signed, short-lived link), but only to a fake relay so far, so the seams between them are still unheard',
       "A call's cost record now carries the characters the relay synthesised, priced; the stitching saving on the Stitching screen is still worked out from runs, not from cost records",
-      'DID failures are not detected automatically from provider or carrier events',
+      'DID failures are detected only from the SIP code that ends a dial (607 and 608, from Telnyx\'s sip_hangup_cause and Twilio\'s SipResponseCode, the latter assumed); a number marked as spam by a carrier\'s app without a SIP rejection, or a contact who keeps declining, is not detected',
       'A workflow records how an outbound call turned out at the end it finishes at, tested only against fakes; it does not yet capture a callback time asked for on the call',
     ],
   },

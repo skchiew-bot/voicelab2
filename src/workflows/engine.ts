@@ -19,7 +19,7 @@ export interface RunState {
   status: 'running' | 'awaiting_reply' | 'ended';
   outcome?: string;
   error?: string;
-  awaiting?: { node: string; captureAs: string; intents?: Record<string, string[]>; sensitive?: boolean };
+  awaiting?: { node: string; captureAs: string; intents?: Record<string, string[]>; sensitive?: boolean; model?: boolean };
   /** Variables to wipe when the call ends: never recorded, never kept longer than the call. */
   sensitive: string[];
   /** Steps taken over the whole call, and integration calls made: both capped so a loop cannot run up cost. */
@@ -61,6 +61,26 @@ export interface SpeakerResult {
   text: string; model?: string; reasoning?: string; policy?: string; inputTokens?: number; outputTokens?: number; confidence?: number;
 }
 
+/**
+ * A model that reads a reply the phrase rules could not: none matched ("unknown"), or several did ("ambiguous"). It is
+ * given the words with any number taken out, and the intents it may choose from with their example phrases; never a
+ * variable of the call, and never a sensitive answer. `intent` null means it could not tell either.
+ */
+export interface InterpretRequest { reply: string; intents: Record<string, string[]>; language?: string; signal: AbortSignal }
+export interface InterpretResult { intent: string | null; confidence: number; reason?: string; inputTokens: number; outputTokens: number }
+export interface Interpreter { tier: 'haiku' | 'sonnet' | 'opus'; model: string; interpret(q: InterpretRequest): Promise<InterpretResult> }
+/** The configured interpreter, the one a tier up for a low-confidence answer, and the confidence an answer needs to be taken. */
+export interface ReplyReader { primary: Interpreter; escalate?: Interpreter; minConfidence: number; timeoutMs: number }
+/** Below this a model's reading of a reply is not taken: it is asked a tier up if one is configured, and otherwise the rules' answer stands. */
+export const INTERPRET_MIN_CONFIDENCE = 0.7;
+/**
+ * How long one model may take to read a reply. Two at most (one a tier up) fit well inside the time the voice link gives a
+ * turn before it falls back, and the caller hears the wait line after five seconds.
+ */
+export const INTERPRET_TIMEOUT_MS = 6_000;
+/** The most of a reply a model is shown. */
+const INTERPRET_MAX_CHARS = 500;
+
 export interface IntegrationCall { method: 'GET' | 'POST'; path: string; body?: Json }
 export interface Deps {
   /** The workflow definitions this call is pinned to, by name. */
@@ -68,6 +88,8 @@ export interface Deps {
   integrations?: { call(name: string, req: IntegrationCall): Promise<Json> };
   /** Pre-recorded audio to play where the words match. Without one every line is spoken live (the unstitched baseline). */
   recordings?: RecordingIndex;
+  /** Reads a reply the phrase rules could not. Without one, such a reply stays "unknown" or "ambiguous". */
+  interpreter?: ReplyReader;
   /** Writes a dynamic node's line. Without one, a dynamic node speaks its fallback text. */
   speaker?: { generate(node: SpeakNode, vars: Vars, lang: string | undefined, context?: SpeakContext): Promise<string | SpeakerResult> };
   /** What the client's bot may know, ranked against a question for a voice call. Given to the model that writes a line. */
@@ -265,12 +287,68 @@ export async function start(workflow: string, vars: Vars, deps: Deps): Promise<{
   return { state, records };
 }
 
+/**
+ * Ask a model what a reply means, a tier up when the first answer is not good enough to take. Each answer is kept, taken
+ * or not, with its model, tier and tokens, so every model call is in the audit trail and the call's cost (L-026).
+ * An answer is taken only if it is confident enough and names one of the intents offered; a confident "cannot tell"
+ * is taken too, and leaves the rules' answer as it was.
+ */
+async function readByModel(reply: string, intents: Record<string, string[]>, language: string | undefined, r: ReplyReader): Promise<{ intent: string | null; attempts: Json[] }> {
+  const attempts: Json[] = [];
+  const ask = async (m: Interpreter, escalatedFrom?: string): Promise<{ taken: boolean; intent: string | null }> => {
+    // Tokens are unknown (null) until the model reports them: a call that failed or timed out may still have used some.
+    const rec: Record<string, Json> = { model: m.model, tier: m.tier, inputTokens: null, outputTokens: null };
+    if (escalatedFrom) rec.escalatedFrom = escalatedFrom;
+    attempts.push(rec);
+    let a: InterpretResult;
+    const stop = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<'late'>((res) => { timer = setTimeout(() => { stop.abort(); res('late'); }, r.timeoutMs); });
+    try {
+      const got = await Promise.race([m.interpret({ reply: reply.slice(0, INTERPRET_MAX_CHARS), intents, ...(language ? { language } : {}), signal: stop.signal }), late]);
+      if (got === 'late') {
+        rec.decision = 'rejected'; rec.reason = `The model did not answer within ${r.timeoutMs / 1000} s, so its tokens are not known.`;
+        return { taken: false, intent: null };
+      }
+      a = got;
+    } catch {
+      rec.decision = 'rejected'; rec.reason = 'The model gave no answer (it failed), so its tokens are not known.';
+      return { taken: false, intent: null };
+    } finally { clearTimeout(timer); }
+    rec.inputTokens = Number.isSafeInteger(a.inputTokens) && a.inputTokens >= 0 ? a.inputTokens : null;
+    rec.outputTokens = Number.isSafeInteger(a.outputTokens) && a.outputTokens >= 0 ? a.outputTokens : null;
+    const confident = typeof a.confidence === 'number' && a.confidence >= 0 && a.confidence <= 1;
+    if (confident) rec.confidence = a.confidence;
+    if (a.reason) rec.why = redactNumbers(String(a.reason)).slice(0, 500);
+    const named = a.intent === null ? null : String(a.intent);
+    if (named !== null) rec.intent = redactNumbers(named).slice(0, 100);
+    if (!confident) { rec.decision = 'rejected'; rec.reason = 'The model gave no usable confidence.'; return { taken: false, intent: null }; }
+    if (named !== null && !own(intents, named)) { rec.decision = 'rejected'; rec.reason = 'The model named an intent that was not offered.'; return { taken: false, intent: null }; }
+    if (a.confidence < r.minConfidence) {
+      rec.decision = 'rejected'; rec.reason = `The model's confidence (${a.confidence}) was below ${r.minConfidence}.`;
+      return { taken: false, intent: null };
+    }
+    rec.decision = 'proceeded';
+    rec.reason = named === null ? 'The model could not tell either, so the reply stays as the rules read it.' : `The model read the reply as "${named}".`;
+    return { taken: true, intent: named };
+  };
+  const first = await ask(r.primary);
+  if (first.taken || !r.escalate) return { intent: first.intent, attempts };
+  const second = await ask(r.escalate, r.primary.tier);
+  return { intent: second.intent, attempts };
+}
+
 /** The caller said something: keep it, work out what they meant, and carry on. */
 export async function reply(state: RunState, text: string, deps: Deps): Promise<{ state: RunState; records: StepRecord[] }> {
   if (state.status !== 'awaiting_reply' || !state.awaiting) throw new Error('This call is not waiting for a reply.');
   const next: RunState = structuredClone(state);
   const records = stampedRecords(deps);
-  const { node, captureAs, intents, sensitive } = next.awaiting!;
+  const { node, captureAs, intents, model } = next.awaiting!;
+  // Sensitive if the question says so, or if the workflow (or a workflow that handed the call over) marked the variable so.
+  const sensitive = next.awaiting!.sensitive === true || next.sensitive.includes(captureAs);
+  // Only an answer the question itself marks sensitive is forgotten once it has routed the call; one the workflow marks is
+  // held sealed until the call ends, so a later node can still route on it (it is never recorded or given to a model either way).
+  const forget = next.awaiting!.sensitive === true;
   // What was said can contain a number; it is kept without it. A sensitive answer is not recorded at all.
   const heard = sensitive ? text : redactNumbers(text);
   setVar(next, captureAs, heard);
@@ -278,9 +356,19 @@ export async function reply(state: RunState, text: string, deps: Deps): Promise<
   const payload: Record<string, Json> = { text: sensitive ? '[hidden]' : heard };
   if (intents) {
     const d = interpretDetail(text, intents);
-    setVar(next, `${captureAs}_intent`, d.intent); payload.intent = d.intent;
+    let intent = d.intent;
     // The words that decided it, unless the answer is sensitive (then nothing of it is recorded).
     if (!sensitive) payload.matched = d.matched.map((m) => `${m.intent}: ${m.phrase}`);
+    // Rules first. Only a reply they could not read goes to a model, and never a sensitive one.
+    if ((intent === 'unknown' || intent === 'ambiguous') && model === true && !sensitive && deps.interpreter) {
+      const candidates = intent === 'ambiguous' ? [...new Set(d.matched.map((m) => m.intent))] : Object.keys(intents);
+      const langVar = own(next.vars, 'lang') && !next.sensitive.includes('lang') ? next.vars.lang : undefined;
+      const lang = typeof langVar === 'string' ? langVar : undefined;
+      const read = await readByModel(heard, Object.fromEntries(candidates.map((k) => [k, intents[k]!])), lang, deps.interpreter);
+      payload.interpreted = read.attempts;
+      if (read.intent) { payload.rules = intent; intent = read.intent; }
+    }
+    setVar(next, `${captureAs}_intent`, intent); payload.intent = intent;
   }
   // Read the turn (kind, topic, sentiment) unless the answer is sensitive, in which case nothing of it is looked at or kept.
   let decision: ReturnType<typeof observeTurn> = { escalate: false };
@@ -297,7 +385,7 @@ export async function reply(state: RunState, text: string, deps: Deps): Promise<
   if (decision.escalate) {
     next.escalation = { trigger: decision.trigger, detail: decision.detail, node };
     records.push({ type: 'escalate', workflow: next.workflow, node, payload: { trigger: decision.trigger, detail: decision.detail, recoveries: next.journey!.recoveries, sentiment: analysis!.sentiment } });
-    if (sensitive) { delete next.vars[captureAs]; delete next.vars[`${captureAs}_intent`]; }
+    if (forget) { delete next.vars[captureAs]; delete next.vars[`${captureAs}_intent`]; }
     endWithHuman(next, records, node, `Escalated: ${decision.detail}`);
     return { state: next, records };
   }
@@ -309,7 +397,7 @@ export async function reply(state: RunState, text: string, deps: Deps): Promise<
   if (rerouted) records.push({ type: 'reroute', workflow: next.workflow, node, payload: { to: rerouted.to, kind: analysis!.kind, topic: analysis!.topic } });
   next.node = rerouted ? rerouted.to : goFrom(next, n, node, records);
   // A sensitive answer has done its job once the route is chosen: it is forgotten now, not at the end of the call.
-  if (sensitive) { delete next.vars[captureAs]; delete next.vars[`${captureAs}_intent`]; }
+  if (forget) { delete next.vars[captureAs]; delete next.vars[`${captureAs}_intent`]; }
   if (next.node === null) leave(next, records, 'completed', deps);
   await advance(next, deps, records);
   return { state: next, records };
@@ -410,7 +498,7 @@ async function advance(state: RunState, deps: Deps, out: StepRecord[]): Promise<
         }, speech: { lang: lang ?? 'en', segments: plan.segments } });
         if (node.listen) {
           state.status = 'awaiting_reply';
-          state.awaiting = { node: id, captureAs: node.listen.captureAs, intents: node.listen.intents, sensitive: node.listen.sensitive };
+          state.awaiting = { node: id, captureAs: node.listen.captureAs, intents: node.listen.intents, sensitive: node.listen.sensitive, ...(node.listen.model ? { model: true } : {}) };
           return;
         }
         state.node = goFrom(state, node, id, out);

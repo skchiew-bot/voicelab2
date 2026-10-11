@@ -6,7 +6,7 @@ import { lineAmount, quantityFor, type Unit } from '../billing.js';
 import { fromScaled, mulDiv, SCALE } from '../money.js';
 import { decryptSecrets, encryptSecrets } from '../secrets.js';
 import { canonicalTimeZone, CONTACT_OUTCOMES, own, validTimeZone, type ContactOutcome, type Json, type WorkflowDefinition } from '../workflows/definition.js';
-import { PhoneInVariable, reply as engineReply, start as engineStart, type Deps, type RunState, type StepRecord } from '../workflows/engine.js';
+import { INTERPRET_MIN_CONFIDENCE, INTERPRET_TIMEOUT_MS, PhoneInVariable, reply as engineReply, start as engineStart, type Deps, type Interpreter, type ReplyReader, type RunState, type StepRecord } from '../workflows/engine.js';
 import { callIntegration, type HttpDeps } from '../workflows/integrations.js';
 import { referencesOf } from '../workflows/refs.js';
 import { chargingAt } from './charging.js';
@@ -14,7 +14,7 @@ import { perUsd } from './costs.js';
 import { evaluateScenario, gateProblems, MAX_REPLIES, MAX_SCENARIOS, type Scenario, type ScenarioResult } from '../workflows/simulate.js';
 import { audit } from './audit.js';
 import { recordWorkflowOutcome } from './outbound.js';
-import { recordStepDecisions } from './ai-decisions.js';
+import { modelFor, recordStepDecisions } from './ai-decisions.js';
 import { caseVariables, recordPromiseFromCall } from './cases.js';
 import { publishedArticles } from './knowledge.js';
 import { policyGuard } from './policy.js';
@@ -26,7 +26,24 @@ import type { Segment } from '../workflows/stitch.js';
 import { ticketForEscalation } from './tickets.js';
 import { getWorkflow, liveVersionId, type Environment } from './workflows.js';
 
-export interface RunDeps { pool: pg.Pool; key: Buffer; integrationHttp?: HttpDeps; speaker?: Deps['speaker'] }
+export interface RunDeps {
+  pool: pg.Pool; key: Buffer; integrationHttp?: HttpDeps; speaker?: Deps['speaker'];
+  /** Models that read a reply the phrase rules cannot, by tier; the task `interpret_reply` in the model configuration picks one. None by default. */
+  interpreters?: Partial<Record<Interpreter['tier'], Interpreter>>;
+}
+
+/**
+ * The reply reader the configuration asks for: the tier set for `interpret_reply`, and the tier it escalates to. A task with
+ * no configuration, a tier with no model connected, or a connected model other than the one configured, reads replies by
+ * rules only, so the configuration and the audit trail never name different models.
+ */
+async function replyReader(c: pg.PoolClient, d: RunDeps): Promise<ReplyReader | undefined> {
+  if (!d.interpreters) return undefined;
+  const cfg = await modelFor(c, 'interpret_reply');
+  const primary = cfg ? d.interpreters[cfg.tier] : undefined;
+  if (!cfg || !primary || primary.model !== cfg.modelId) return undefined;
+  return { primary, escalate: cfg.escalateTo ? d.interpreters[cfg.escalateTo] : undefined, minConfidence: INTERPRET_MIN_CONFIDENCE, timeoutMs: INTERPRET_TIMEOUT_MS };
+}
 export type RunKind = 'simulation' | 'test' | 'live';
 
 const asInternal = <T>(d: RunDeps, fn: (c: pg.PoolClient) => Promise<T>) => withActor(d.pool, { kind: 'internal' }, fn);
@@ -245,9 +262,10 @@ export async function replyRunSpoken(d: RunDeps, runId: string, text: string, ex
         WHERE id = $1 AND status = 'awaiting_reply' AND state_version = $2`, [runId, run.state_version]);
     if (claim.rowCount === 0) throw new AppError(409, 'This call moved on while your reply was arriving. Nothing was changed.');
     const defs = await loadPinned(c, run.pins);
-    return { run, defs, integrations: await integrationsFor(c, run.tenant_id, d.key, run.environment, d.integrationHttp), recordings: await recordingIndex(c, run.tenant_id), journey: await getJourneyConfig(c, run.tenant_id), promoted: await activePromotions(c, run.tenant_id), articles: await publishedArticles(c, run.tenant_id), policy: await policyGuard(c, run.tenant_id) };
+    return { run, defs, integrations: await integrationsFor(c, run.tenant_id, d.key, run.environment, d.integrationHttp), recordings: await recordingIndex(c, run.tenant_id), journey: await getJourneyConfig(c, run.tenant_id), promoted: await activePromotions(c, run.tenant_id), articles: await publishedArticles(c, run.tenant_id), policy: await policyGuard(c, run.tenant_id), interpreter: await replyReader(c, d) };
   });
-  const deps: Deps = { load: (n) => ctx.defs[n], integrations: ctx.integrations, speaker: d.speaker, recordings: ctx.recordings, journey: ctx.journey, promoted: ctx.promoted, policy: ctx.policy, knowledge: (q, lang) => rank(ctx.articles, q, { language: lang, channel: 'voice', limit: 3 }) };
+  // The model, if any, is asked here: after the turn is claimed and with no database connection held (L-040).
+  const deps: Deps = { load: (n) => ctx.defs[n], integrations: ctx.integrations, speaker: d.speaker, interpreter: ctx.interpreter, recordings: ctx.recordings, journey: ctx.journey, promoted: ctx.promoted, policy: ctx.policy, knowledge: (q, lang) => rank(ctx.articles, q, { language: lang, channel: 'voice', limit: 3 }) };
   let out: { state: RunState; records: StepRecord[] };
   try { out = await engineReply(unseal(ctx.run.state as RunState, ctx.run.sealed, d.key, runId), text, deps); }
   catch (err) {

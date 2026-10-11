@@ -30,7 +30,7 @@ export function fakeProviderApi() {
   return { ...state, state, fetch: fetchFn };
 }
 
-export async function setupDb(opts: { integrationHttp?: import('../src/workflows/integrations.js').HttpDeps; judges?: import('../src/store/qa.js').QaDeps['judges']; learning?: import('../src/app.js').Deps['learning']; cases?: import('../src/app.js').Deps['cases']; mailer?: import('../src/app.js').Deps['mailer']; productionDeployers?: string[] } = {}) {
+export async function setupDb(opts: { integrationHttp?: import('../src/workflows/integrations.js').HttpDeps; interpreters?: import('../src/app.js').Deps['interpreters']; judges?: import('../src/store/qa.js').QaDeps['judges']; learning?: import('../src/app.js').Deps['learning']; cases?: import('../src/app.js').Deps['cases']; mailer?: import('../src/app.js').Deps['mailer']; productionDeployers?: string[] } = {}) {
   const name = `voicelab_test_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
   const admin = new pg.Client({ connectionString: ADMIN_URL });
   await admin.connect();
@@ -54,7 +54,7 @@ export async function setupDb(opts: { integrationHttp?: import('../src/workflows
     PRODUCTION_DEPLOYERS: opts.productionDeployers ?? ['staff@daythree.test'],
   };
   const provider = fakeProviderApi();
-  const app = buildApp(pool, config, { fetch: provider.fetch, integrationHttp: opts.integrationHttp, judges: opts.judges, learning: opts.learning, cases: opts.cases, mailer: opts.mailer });
+  const app = buildApp(pool, config, { fetch: provider.fetch, integrationHttp: opts.integrationHttp, interpreters: opts.interpreters, judges: opts.judges, learning: opts.learning, cases: opts.cases, mailer: opts.mailer });
 
   const staff = await withActor(pool, { kind: 'internal' }, (c) =>
     createUser(c, null, { tenantId: null, email: 'staff@daythree.test', role: 'internal_admin' }));

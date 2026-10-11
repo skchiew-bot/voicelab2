@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { UNKNOWN_TOKENS } from './usage.js';
 import { jobProblems } from '../scheduler.js';
 import { fromScaled, toScaled } from '../money.js';
 import { decryptSecrets } from '../secrets.js';
@@ -54,6 +55,9 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
          OR (status = 'in_progress' AND started_at < now() - interval '6 hours')`)).rows[0].n as number;
   const unpriced = (await c.query(
     `SELECT count(*)::int AS n FROM calls WHERE ended_at IS NOT NULL AND cost_status = 'pending' AND ended_at < now() - interval '15 minutes'`)).rows[0].n as number;
+  // Costed in the last week without some model tokens (a model call failed or timed out): their cost is below what was used.
+  const tokensUnknown = (await c.query(
+    `SELECT count(*)::int AS n FROM calls WHERE cost_status IN ('recorded', 'reconciled', 'variance', 'unchecked') AND ended_at > now() - interval '7 days' AND ${UNKNOWN_TOKENS} > 0`)).rows[0].n as number;
   const blocked24h = (await c.query(`SELECT count(*)::int AS n FROM calls WHERE status = 'blocked' AND started_at > now() - interval '24 hours'`)).rows[0].n as number;
 
   const funding = (await c.query(
@@ -89,6 +93,7 @@ export async function controlTower(c: pg.PoolClient, key: Buffer, ctx: { publicB
   if (telephony.length > 0 && registries === 0) add('medium', 'no_dnc', 'No do-not-call position is declared for any country, so outbound calls are blocked everywhere.', '#/compliance');
   if (stuck > 0) add('high', 'calls_stuck', `${stuck} call${stuck === 1 ? '' : 's'} ${stuck === 1 ? 'has' : 'have'} not moved for a long time. Provider events are probably not arriving: check the public address and the webhook settings.`, '#/calls');
   if (unpriced > 0) add('medium', 'cost_pending', `${unpriced} finished call${unpriced === 1 ? ' has' : 's have'} not been priced.`, '#/calls');
+  if (tokensUnknown > 0) add('low', 'cost_tokens_unknown', `${tokensUnknown} call${tokensUnknown === 1 ? ' was' : 's were'} costed in the last week without some model tokens: a model failed or timed out, so what it used is not known and its cost is left out.`, '#/calls');
   if (problems.failed > 0) add('high', 'cost_failed', `${problems.failed} call${problems.failed === 1 ? '' : 's'} could not be priced.`, '#/calls');
   // Scheduled jobs: one overdue means no server is running jobs (or every one is stuck), so nothing sweeps.
   // Each job is its own alert (scoped by name), so a second job going wrong is a new alert and a new email.

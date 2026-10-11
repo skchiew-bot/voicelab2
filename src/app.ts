@@ -18,10 +18,10 @@ import { addCreditEntry, addFundingEntry, creditSummary, fundingBalances } from 
 import { addFxRate, addRateCard, campaignCosts, getCallCost, listFxRates, listRateCards, recordCallCost } from './store/costs.js';
 import { addNumbers, contactHash, contactKeyFrom, declareRegistry, dncKeyFrom, gateOutbound, normalizeE164, listRegistries, preDialCheck, removeNumber } from './store/dnc.js';
 import { addNumber, callKnown, callQueued, costCall, getCall, hangUpCalls, listCalls, listNumbers, loadProvider, credentials, placeOutboundCall, processWebhook, relayTarget, setNumberWorkflow, type CallDeps } from './store/calls.js';
-import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, type RelayDeps, type RelaySession } from './store/relay.js';
+import { closeRelay, failed as relayFailed, mediaLinkValid, onRelayMessage, openRelay, relayCallToken, standbyCheck, STANDBY_POLL_MS, WAIT_LINE_MS, waitLine, type RelayDeps, type RelaySession } from './store/relay.js';
 import { recordingAudio } from './store/recordings.js';
 import { parseRelay, relaySettings, twimlRelay, type RelayOutbound } from './telephony/relay.js';
-import { accept, afterDial, afterRelay, transferUrl, twimlHangup, twimlHoldingThenHangup, whisper } from './store/transfer.js';
+import { accept, afterDial, afterRelay, settleAgentLeg, transferUrl, twimlHangup, twimlHoldingThenHangup, whisper } from './store/transfer.js';
 import { DEFAULT_FALLBACK } from './resilience/fallback.js';
 import { registerJourneyRoutes } from './routes/journey.js';
 import { registerAppointmentRoutes } from './routes/appointments.js';
@@ -590,11 +590,16 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
     return withActor(pool, s.actor, (c) => getCall(c, callId));
   });
-  // Re-price a call whose cost could not be recorded, e.g. after adding the missing FX rate.
+  // Re-price a call whose cost could not be recorded, e.g. after adding the missing FX rate. A call whose agent leg was
+  // never reported by Twilio can be settled here with that leg's duration, taken from the provider's own records.
   app.post('/internal/calls/:callId/cost/retry', async (req) => {
     const s = await internal(req);
     const { callId } = z.object({ callId: z.string().uuid() }).parse(req.params);
-    const outcome = await withActor(pool, s.actor, (c) => costCall(c, s.userId, callId));
+    const b = z.object({ agentLegSeconds: z.number().int().min(0).max(86_400).optional() }).strict().parse(req.body ?? {});
+    const outcome = await withActor(pool, s.actor, async (c) => {
+      if (b.agentLegSeconds !== undefined) await settleAgentLeg(c, s.userId, callId, b.agentLegSeconds);
+      return costCall(c, s.userId, callId);
+    });
     return { cost_status: outcome };
   });
 
@@ -706,6 +711,14 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
           }).catch(fallBack);
         }, STANDBY_POLL_MS);
       };
+      // Still nothing to say a few seconds after opening: the caller hears the client's short wait line, once.
+      let waitTimer: NodeJS.Timeout | undefined;
+      const armWait = () => {
+        if (closed) return;
+        waitTimer = setTimeout(() => {
+          queue = queue.then(async () => { if (session && !closed) send(await waitLine(relayDeps, session)); }).catch(fallBack);
+        }, WAIT_LINE_MS);
+      };
       socket.on('message', (data: Buffer) => {
         const m = parseRelay(data.toString('utf8'));
         if (!m) return;
@@ -722,7 +735,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
             send(r.send);
             if (!session) socket.close(1008, 'Unknown call');
             // Standing by, or carried on from a call another connection was serving: look again until there is something to say.
-            else if (!session.ended && r.send.length === 0) armStandby();
+            else if (!session.ended && r.send.length === 0) { armStandby(); armWait(); }
             return;
           }
           if (session) send(await onRelayMessage(relayDeps, session, m, askedAt));
@@ -731,7 +744,7 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
       socket.on('close', () => {
         closed = true;
         if (session) session.closed = true;
-        clearTimeout(setupTimer); clearTimeout(standbyTimer);
+        clearTimeout(setupTimer); clearTimeout(standbyTimer); clearTimeout(waitTimer);
         queue = queue.then(() => (session ? closeRelay(relayDeps, session) : undefined)).catch(() => undefined);
       });
     });

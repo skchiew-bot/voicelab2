@@ -7,7 +7,7 @@ import { migrate } from '../src/migrate.js';
 import { createUser } from '../src/store/tenants.js';
 
 // Server connection used to create a throwaway database per test file.
-const ADMIN_URL = process.env.TEST_ADMIN_DATABASE_URL ?? 'postgres://voicelab:voicelab@localhost:5432/postgres';
+export const ADMIN_URL = process.env.TEST_ADMIN_DATABASE_URL ?? 'postgres://voicelab:voicelab@localhost:5432/postgres';
 
 /**
  * Stands in for the providers' APIs: no test touches the real ones. By default every
@@ -73,11 +73,20 @@ export async function setupDb(opts: { integrationHttp?: import('../src/workflows
 }
 
 /**
- * Drop a test database. FORCE ends its other sessions, but the test role may not end one the server itself runs there
- * (an autovacuum worker): "permission denied to terminate process". Such a worker finishes in moments, so try again;
- * any other error is real and thrown at once.
+ * Drop a test database. Its pool has been ended, but the server may still be closing those connections, and FORCE
+ * would kill them mid-close: each sends back an error nothing listens for any more, an uncaught exception that fails
+ * a run whose tests all passed. So first wait, briefly, for the database's own connections to close. FORCE then ends
+ * only what is left, but the test role may not end one the server itself runs there (an autovacuum worker):
+ * "permission denied to terminate process". Such a worker finishes in moments, so try again; any other error is
+ * real and thrown at once (lesson L-038).
  */
 export async function dropDatabase(a: { query(sql: string): Promise<unknown> }, name: string, waitMs = 250, attempts = 40) {
+  if (!/^\w+$/.test(name)) throw new Error(`Not a test database name: ${name}`);
+  for (let i = 0; i < 100; i++) { // up to about 2 seconds; FORCE deals with anything still there after that
+    const open = await a.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = '${name}' AND backend_type = 'client backend'`) as { rows?: { n?: number }[] } | undefined;
+    if (!((open?.rows?.[0]?.n ?? 0) > 0)) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
   for (let attempt = 1; ; attempt++) {
     try { await a.query(`DROP DATABASE ${name} WITH (FORCE)`); return attempt; }
     catch (err) {

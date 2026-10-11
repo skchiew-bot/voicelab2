@@ -74,6 +74,10 @@ async function lockAsActiveAdmin(c: pg.PoolClient, actorId: string, what: string
 export async function disableUser(c: pg.PoolClient, actorId: string, userId: string) {
   if (actorId === userId) throw new AppError(409, 'You cannot disable yourself. Ask another admin.');
   await lockAsActiveAdmin(c, actorId, 'disable a user');
+  // A client's user is also managed by the client's own admins (migration 021), under one lock per client: take it too,
+  // before the user's row, in the order the client's own path takes them (lesson L-030).
+  const tenantId = (await c.query('SELECT tenant_id FROM users WHERE id = $1', [userId])).rows[0]?.tenant_id as string | null | undefined;
+  if (tenantId) await c.query("SELECT pg_advisory_xact_lock(hashtext('client-users:' || $1))", [tenantId]);
   const target = (await c.query('SELECT id, email, role, tenant_id, disabled_at FROM users WHERE id = $1 FOR UPDATE', [userId])).rows[0];
   if (!target) throw new AppError(404, 'No such user.');
   if (target.disabled_at) throw new AppError(409, 'This user is already disabled.');
@@ -110,7 +114,7 @@ export async function bootstrapAdmin(c: pg.PoolClient, email: string) {
   const address = email.trim().toLowerCase();
   // Two installers at once: the second waits here and then finds the first one's admin.
   await c.query("SELECT pg_advisory_xact_lock(hashtext('users:manage'))");
-  const found = (await c.query('SELECT id, email, role, disabled_at FROM users WHERE lower(email) = $1', [address])).rows[0];
+  const found = (await c.query('SELECT id, email, role, disabled_at FROM users WHERE tenant_id IS NULL AND lower(email) = $1', [address])).rows[0];
   if (found) return { created: false as const, email: found.email as string, role: found.role as Role, disabled: Boolean(found.disabled_at) };
   return { created: true as const, ...(await createUser(c, null, { tenantId: null, email: address, role: 'internal_admin' })) };
 }

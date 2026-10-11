@@ -38,6 +38,7 @@ import { controlTowerPanels } from './store/panels.js';
 import { listDeliveries, listSubscriptions, sendTest, subscribe, subscriptionSchema, sweepAlerts, unsubscribe } from './store/alerts.js';
 import { actionSchema, controlState, runAction } from './store/control-actions.js';
 import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
+import { clientAddUser, clientCalls, clientDisableUser, clientSummary, clientUsers } from './store/portal.js';
 import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
 import { countsOf, createScheduler, drain, listJobs, runJobNow, updateJob, type Job } from './scheduler.js';
 import { sweepFaults } from './store/call-end.js';
@@ -55,6 +56,7 @@ import { ACTIVE, approveAdmin, createProject, createTenant, createUser, disableU
 interface Session { userId: string; email: string; role: Role; actor: Actor }
 
 const adminDist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'admin', 'dist');
+const portalDist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'portal', 'dist');
 
 // At most what the database columns hold (10 digits before the point, 8 after), so a huge value is a clear 400, not a crash.
 const money = z.string().regex(/^-?\d{1,10}(\.\d{1,8})?$/, 'Use a decimal number as text, e.g. "12.50" (up to 10 digits before the point and 8 after).');
@@ -766,15 +768,52 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   });
 
   // --------------------------------------------------- client portal
-  app.get('/client/credits', async (req) => {
+  // Everything here runs as the voicelab_client role, scoped to the signed-in user's own client (see store/portal.ts).
+  async function clientSession(req: FastifyRequest) {
     const s = await authenticate(req);
     if (s.actor.kind !== 'client') throw new AppError(403, 'Client access only.');
+    return s as Session & { actor: { kind: 'client'; tenantId: string } };
+  }
+  async function clientAdmin(req: FastifyRequest) {
+    const s = await clientSession(req);
+    if (s.role !== 'tenant_admin') throw new AppError(403, "Only your organisation's admins can manage users.");
+    return s;
+  }
+  app.get('/client/me', async (req) => {
+    const s = await clientSession(req);
+    const tenant = await withActor(pool, s.actor, async (c) => (await c.query('SELECT name FROM client_tenant')).rows[0]?.name as string);
+    return { email: s.email, role: s.role, client: tenant };
+  });
+  app.get('/client/credits', async (req) => {
+    const s = await clientSession(req);
     return withActor(pool, s.actor, (c) => creditSummary(c));
   });
   app.get('/client/projects', async (req) => {
-    const s = await authenticate(req);
-    if (s.actor.kind !== 'client') throw new AppError(403, 'Client access only.');
+    const s = await clientSession(req);
     return withActor(pool, s.actor, listProjects);
+  });
+  app.get('/client/summary', async (req) => {
+    const s = await clientSession(req);
+    return withActor(pool, s.actor, clientSummary);
+  });
+  app.get('/client/calls', async (req) => {
+    const s = await clientSession(req);
+    const q = z.object({ limit: z.coerce.number().int().min(1).max(200).optional(), before: z.string().uuid().optional(), projectId: z.string().uuid().optional() }).parse(req.query);
+    return withActor(pool, s.actor, (c) => clientCalls(c, q));
+  });
+  app.get('/client/users', async (req) => {
+    const s = await clientAdmin(req);
+    return withActor(pool, s.actor, clientUsers);
+  });
+  app.post('/client/users', async (req, reply) => {
+    const s = await clientAdmin(req);
+    const b = z.object({ email: z.string().trim().email(), role: z.enum(['tenant_admin', 'tenant_user']) }).parse(req.body);
+    return reply.status(201).send(await withActor(pool, s.actor, (c) => clientAddUser(c, s.userId, b.email, b.role)));
+  });
+  app.post('/client/users/:id/disable', async (req) => {
+    const s = await clientAdmin(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    return withActor(pool, s.actor, (c) => clientDisableUser(c, s.userId, id));
   });
 
   // ------------------------------------------------------- admin UI
@@ -782,6 +821,11 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   if (existsSync(adminDist)) {
     app.register(fastifyStatic, { root: adminDist, prefix: '/admin/' });
     app.get('/admin', (_req, reply) => reply.redirect('/admin/'));
+  }
+  // The client portal: a separate app with its own sign-in, built with `npm run build:portal`.
+  if (existsSync(portalDist)) {
+    app.register(fastifyStatic, { root: portalDist, prefix: '/portal/', decorateReply: false });
+    app.get('/portal', (_req, reply) => reply.redirect('/portal/'));
   }
 
   return app;

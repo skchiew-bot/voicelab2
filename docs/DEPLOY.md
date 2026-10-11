@@ -24,7 +24,7 @@ Sources: [AWS Malaysia region launch](https://aws.amazon.com/blogs/aws/now-open-
 ## What runs where (AWS, `ap-southeast-5`)
 
 - **App**: the repository's `Dockerfile` image, pushed to ECR, run as an ECS Fargate service (two tasks, in two
-  availability zones). It serves the API, the webhooks and the console at `/admin/`.
+  availability zones). It serves the API, the webhooks, the console at `/admin/` and the client portal at `/portal/`.
 - **Database**: RDS for PostgreSQL 16, Multi-AZ, encrypted, automated backups kept in the region. The app connects as
   the owner role; per-request roles (`voicelab_internal`, `voicelab_client`) are created by the first migration.
 - **Public address**: an Application Load Balancer with an ACM certificate for a domain you own (for example

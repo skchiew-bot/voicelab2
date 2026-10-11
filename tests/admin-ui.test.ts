@@ -182,7 +182,9 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(page.getByRole('alert')).toContainText('rejected these credentials');
     env.provider.state.respond = () => new Response(JSON.stringify({ status: 'active' }), { status: 200 });
 
-    // Capabilities are editable.
+    // Capabilities are editable, once a reason is given.
+    await expect(page.getByLabel('stt support')).toBeDisabled();
+    await field(page, 'Why \\(needed before changing one\\)').fill('Checked against the provider docs.');
     await page.getByLabel('stt support').selectOption('composable');
     await expect(page.getByLabel('stt support')).toHaveValue('composable');
     await page.reload();
@@ -193,6 +195,7 @@ describe.skipIf(!run)('admin UI', () => {
       const f = page.getByRole('form', { name: 'Add charging version' });
       await field(f, 'Effective from').fill(from);
       await field(f, 'Rate').fill(rate);
+      await field(f, 'Why the rates are changing').fill('The provider changed its prices.');
       await f.getByRole('button', { name: 'Save new version' }).click();
     };
     await addVersion('2026-01-01T00:00', '0.0140');
@@ -327,6 +330,8 @@ describe.skipIf(!run)('admin UI', () => {
     }
     await page.reload();
     await expect(answering.locator('option')).toHaveText(['Test message only', 'answer_flow']);
+    await expect(answering).toBeDisabled();                                      // a reason first
+    await field(page, 'Why \\(needed before changing the workflow').fill('This line goes live today.');
     await answering.selectOption({ label: 'answer_flow' });
     await expect.poll(async () => (await env.call(env.staffToken, 'GET', '/internal/dids')).json().find((x: { e164: string }) => x.e164 === '+60312340000').inbound_workflow_id).toBe(made.workflow.id);
     await expect(answering).toHaveValue(made.workflow.id);
@@ -386,7 +391,7 @@ describe.skipIf(!run)('admin UI', () => {
       return id;
     };
     // The provider needs rates for the priced call.
-    await env.call(st, 'POST', `/internal/providers/${prov}/charging`, {
+    await env.call(st, 'POST', `/internal/providers/${prov}/charging`, { reason: 'Set up for this test.', 
       effectiveFrom: '2025-06-01T00:00:00Z', billingIncrementSeconds: 60,
       components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.0140', currency: 'USD' }],
     });
@@ -611,16 +616,20 @@ describe.skipIf(!run)('admin UI', () => {
     await field(levels, 'Provider').selectOption({ label: 'ui-voice' });
     await field(levels, 'Warn below').fill('50');
     await field(levels, 'Critical below').fill('10');
+    await expect(levels.getByRole('button', { name: 'Save levels' })).toBeDisabled();      // nothing is saved without a reason
+    await field(levels, 'Why').fill('Warn us before the balance runs out.');
     await levels.getByRole('button', { name: 'Save levels' }).click();
     await expect(page.getByLabel('Funding').getByRole('row', { name: /^ui-voice 40 USD Running low 50 10$/ })).toBeVisible();
 
     await field(levels, 'Warn below').fill('50');                           // a critical level above the warning level is refused
     await field(levels, 'Critical below').fill('60');
+    await field(levels, 'Why').fill('Trying a higher critical level.');
     await levels.getByRole('button', { name: 'Save levels' }).click();
     await expect(levels.getByRole('alert')).toContainText('critical level must not be above');
 
     const rules = page.getByLabel('Failover rules');
     await field(rules, 'Errors before failing over').fill('5');
+    await field(rules, 'Why').fill('Fewer false failovers.');
     await rules.getByRole('button', { name: 'Save rules' }).click();
     await expect(field(rules, 'Errors before failing over')).toHaveAttribute('placeholder', '5');
     await page.close();
@@ -719,6 +728,7 @@ describe.skipIf(!run)('admin UI', () => {
     // quality: criteria, then a batch
     await page.goto(`${base}#/qa`);
     await field(page, 'Client$').selectOption({ label: 'Journey UI Co' });
+    await field(page, 'Why').fill('The first quality checks.');
     await page.getByRole('button', { name: 'Save criteria' }).click();
     await expect(page.getByRole('region', { name: 'Criteria', exact: true })).toContainText('Every workflow · version 1');
     await page.getByRole('button', { name: 'Score finished calls' }).click();
@@ -842,7 +852,7 @@ describe.skipIf(!run)('admin UI', () => {
     const call = (m: 'POST' | 'PUT', u: string, b: unknown) => env.call(env.staffToken, m, u, b);
     const tenant = (await call('POST', '/internal/tenants', { name: 'Diary UI Co' })).json().id as string;
     const diary = (await call('POST', `/internal/tenants/${tenant}/diaries`, { name: 'Aminah', kind: 'individual', officerRef: 'officer-aminah', timeZone: 'Asia/Kuala_Lumpur' })).json().id as string;
-    await call('PUT', `/internal/diaries/${diary}/hours`, { hours: [0, 1, 2, 3, 4, 5, 6].map((dow) => ({ dow, starts: '09:00', ends: '17:00' })) });
+    await call('PUT', `/internal/diaries/${diary}/hours`, { reason: 'Set up for this test.', hours: [0, 1, 2, 3, 4, 5, 6].map((dow) => ({ dow, starts: '09:00', ends: '17:00' })) });
     const date = new Date(Date.now() + 4 * 86_400_000).toISOString().slice(0, 10);
     const book = async (hhmm: string, ref: string) => (await call('POST', `/internal/tenants/${tenant}/appointments`, { diaryId: diary, contactRef: ref, kind: 'field_visit', visitAddress: '12 Jalan Ampang', travelMinutes: 15, startsAt: localToInstant(date, hhmm, 'Asia/Kuala_Lumpur').toISOString(), durationMinutes: 45 })).json();
     await book('09:00', 'cust-first'); await book('10:00', 'cust-second');
@@ -895,9 +905,11 @@ describe.skipIf(!run)('admin UI', () => {
     const policy = page.getByLabel('Policy', { exact: true });
     await expect(policy).toContainText('No policy is in force');
     await policy.getByLabel(/^Approval levels/).fill('Owner');
+    await policy.getByLabel(/^Reason for the new levels/).fill('Compliance must see every policy.');
     await policy.getByRole('button', { name: 'Save levels' }).click();
     await expect(page.getByRole('alert').first()).toBeVisible();                                                 // one level is refused
     await policy.getByLabel(/^Approval levels/).fill('Policy owner, Compliance');
+    await policy.getByLabel(/^Reason for the new levels/).fill('Compliance must see every policy.');
     await policy.getByRole('button', { name: 'Save levels' }).click();
     await expect(policy).toContainText('Policy owner → Compliance');
     await policy.getByLabel(/^Why/).fill('The first policy.');
@@ -1123,6 +1135,8 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(field(form, 'Client')).toHaveValue('');                      // chosen each time, never from the menu (L-036)
     await field(form, 'Client').selectOption({ label: 'Agent Phone Co' });
     await field(form, 'Agent phone').fill('+65 6123 4567');
+    await expect(form.getByRole('button', { name: 'Save agent phone' })).toBeDisabled();  // nothing is saved without a reason
+    await field(form, 'Why').fill('Their team takes calls from today.');
     await form.getByRole('button', { name: 'Save agent phone' }).click();
     await expect(form.getByRole('alert')).toContainText('Malaysian number (+60)');
     await field(form, 'Agent phone').fill('+60 3-8765 4321');
@@ -1141,6 +1155,7 @@ describe.skipIf(!run)('admin UI', () => {
     await row.getByRole('button', { name: 'Edit' }).click();                  // editing fills the form from the row
     await expect(field(form, 'Client')).toHaveValue(t.json().id);
     await field(form, 'Whisper').check();
+    await field(form, 'Why').fill('Voicemail was taking calls.');
     await form.getByRole('button', { name: 'Save agent phone' }).click();
     await expect(row).toContainText('On, press 1 to take');
 
@@ -1153,11 +1168,15 @@ describe.skipIf(!run)('admin UI', () => {
     await expect(seen).toContainText('read-only access');
     await expect(seen.getByLabel('Set an agent phone')).toHaveCount(0);
     await expect(seen.getByRole('button')).toHaveCount(0);
-    expect((await env.call(v.json().token, 'PUT', `/internal/tenants/${t.json().id}/transfer`, { agentNumber: '+60312345678' })).statusCode).toBe(403);
+    expect((await env.call(v.json().token, 'PUT', `/internal/tenants/${t.json().id}/transfer`, { reason: 'Set up for this test.', agentNumber: '+60312345678' })).statusCode).toBe(403);
 
-    page.once('dialog', (d) => d.accept());
+    page.once('dialog', (d) => d.accept('The client closed this line.'));
     await row.getByRole('button', { name: 'Remove' }).click();
     await expect(card.getByRole('row').filter({ hasText: 'Agent Phone Co' })).toHaveCount(0);
+    const log = (await env.call(st, 'GET', '/internal/change-log?category=providers')).json().entries as { action: string; why: string | null }[];
+    expect(log.filter((e) => e.action.startsWith('transfer.')).slice(0, 3).map((e) => [e.action, e.why])).toEqual([
+      ['transfer.clear', 'The client closed this line.'], ['transfer.set', 'Voicemail was taking calls.'], ['transfer.set', 'Their team takes calls from today.'],
+    ]);
     expect((await env.call(st, 'GET', `/internal/tenants/${t.json().id}/transfer`)).json()).toBeNull();
     await viewer.close(); await page.close();
   }, 60_000);

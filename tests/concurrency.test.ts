@@ -58,7 +58,7 @@ beforeAll(async () => {
   telnyxId = (await must(post('/internal/providers', { adapterKey: 'telnyx', name: 'tx', params: { apiKey: 'KEY', webhookUrl: `${BASE}/h`, connectionId: 'c1', webhookPublicKey: 'AAAA' } }))).json().id;
   voiceId = (await must(post('/internal/providers', { adapterKey: 'elevenlabs', name: 'el', params: { apiKey: 'k' } }))).json().id;
   void voiceId;
-  const rates = (id: string, rate: string, limit: number, burst: number) => post(`/internal/providers/${id}/charging`, {
+  const rates = (id: string, rate: string, limit: number, burst: number) => post(`/internal/providers/${id}/charging`, { reason: 'Set up for this test.', 
     effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, concurrencyLimit: limit, burstPremiumMultiplier: burst,
     components: [{ component: 'telephony_leg', unit: 'per_minute', rate, currency: 'USD' }],
   });
@@ -127,7 +127,7 @@ describe('concurrency ceilings: never over the limit, no burst charge', () => {
   it('takes a call beyond the ceiling only for a client that agreed to the premium, and says so in its cost', async () => {
     await clearActive();
     const t = await freshTenant('Premium Co', [[telnyxId, '+60300000031']]);
-    await must(put(`/internal/tenants/${t}/entitlement`, { inboundChannels: 5, overburstMultiplier: '1.5' }));
+    await must(put(`/internal/tenants/${t}/entitlement`, { reason: 'Set up for this test.', inboundChannels: 5, overburstMultiplier: '1.5' }));
     const ids: string[] = [];
     for (let i = 0; i < 3; i++) ids.push((await must(dial(t, { providerId: telnyxId }))).json().callId);
     expect(await Promise.all(ids.map(async (id) => (await row(id)).burst))).toEqual([false, false, true]);   // the third is over Telnyx's ceiling of 2
@@ -209,7 +209,7 @@ describe('inbound entitlement and the waiting queue', () => {
 
   it('serves calls up to the client\'s channels, queues the next, plays it a hold message and does not hang up on it', async () => {
     await clearActive();
-    await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1, extraChannels: 1 }));
+    await must(put(`/internal/tenants/${tenant}/entitlement`, { reason: 'Set up for this test.', inboundChannels: 1, extraChannels: 1 }));
     for (const id of ['in1', 'in2']) { expect((await send(ev('initiated', id))).actions[0]).toMatchObject({ action: 'answer' }); await send(ev('answered', id)); }
     const third = await send(ev('initiated', 'in3'));
     expect(third.actions[0]).toMatchObject({ action: 'answer' });              // answered, to be held
@@ -256,7 +256,7 @@ describe('inbound entitlement and the waiting queue', () => {
 
   it('takes a call beyond the channels at the agreed premium instead of queueing it, when the client has agreed one', async () => {
     await clearActive();
-    await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1, overburstMultiplier: '2' }));
+    await must(put(`/internal/tenants/${tenant}/entitlement`, { reason: 'Set up for this test.', inboundChannels: 1, overburstMultiplier: '2' }));
     await send(ev('initiated', 'in11')); await send(ev('answered', 'in11'));
     await send(ev('initiated', 'in12'));
     expect(await status('in12')).toMatchObject({ status: 'ringing', credit_multiplier: '2.000' });
@@ -275,7 +275,7 @@ describe('inbound entitlement and the waiting queue', () => {
 describe('extra channels are charged to credits once a month', () => {
   it('charges once per month, however often it is asked, and a different month charges again', async () => {
     const t = (await must(post('/internal/tenants', { name: 'Channels Co' }))).json().id;
-    await must(put(`/internal/tenants/${t}/entitlement`, { inboundChannels: 2, extraChannels: 3, extraChannelCredits: '2.5' }));
+    await must(put(`/internal/tenants/${t}/entitlement`, { reason: 'Set up for this test.', inboundChannels: 2, extraChannels: 3, extraChannelCredits: '2.5' }));
     const balance = async () => Number((await env.pool.query(`SELECT coalesce(sum(credits), 0) AS b FROM credit_entries WHERE tenant_id = $1`, [t])).rows[0].b);
     const first = (await must(post(`/internal/tenants/${t}/channel-charges`, { month: '2026-07' }))).json();
     expect(first).toEqual({ charged: true, extraChannels: 3, credits: '7.5000' });
@@ -297,7 +297,7 @@ describe('funding-health monitor', () => {
     const level = async () => (await get('/internal/funding/status')).json().find((f: { providerId: string }) => f.providerId === p).level;
     const alerts = async () => (await get('/internal/control-tower')).json().alerts.filter((a: { code: string; message: string }) => a.message.startsWith('oa-monitor')).map((a: { code: string }) => a.code);
     expect(await level()).toBe('ok');
-    await must(put(`/internal/providers/${p}/funding-thresholds`, { currency: 'usd', warnBelow: '50', criticalBelow: '10' }));
+    await must(put(`/internal/providers/${p}/funding-thresholds`, { reason: 'Set up for this test.', currency: 'usd', warnBelow: '50', criticalBelow: '10' }));
     expect(await level()).toBe('ok');
     await must(post(`/internal/providers/${p}/funding`, { kind: 'usage', amount: '-60', currency: 'USD' }));    // 40
     expect(await level()).toBe('warn');
@@ -309,7 +309,7 @@ describe('funding-health monitor', () => {
     await must(post(`/internal/providers/${p}/funding`, { kind: 'usage', amount: '-5', currency: 'USD' }));     // 0
     expect(await level()).toBe('empty');
     expect((await env.pool.query('SELECT state FROM provider_health WHERE provider_id = $1', [p])).rows[0].state).toBe('unfunded');
-    expect((await put(`/internal/providers/${p}/funding-thresholds`, { currency: 'USD', warnBelow: '5', criticalBelow: '10' })).statusCode).toBe(400);
+    expect((await put(`/internal/providers/${p}/funding-thresholds`, { reason: 'Set up for this test.', currency: 'USD', warnBelow: '5', criticalBelow: '10' })).statusCode).toBe(400);
   });
 });
 
@@ -329,7 +329,7 @@ describe('found in review: queued callers', () => {
     tenant = await freshTenant('Queue Review Co', [[telnyxId, OUR]]);
     deps = { pool: env.pool, key: key(), dncKey: dncKeyFrom(key()), http: env.provider.fetch, baseUrl: BASE };
     telnyx = await withActor(env.pool, { kind: 'internal' }, (c) => loadProvider(c, telnyxId));
-    await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1 }));
+    await must(put(`/internal/tenants/${tenant}/entitlement`, { reason: 'Set up for this test.', inboundChannels: 1 }));
   });
 
   it('costs the provider time of a caller who gave up in the queue, and draws no credits for it', async () => {
@@ -395,11 +395,11 @@ describe('found in review: queued callers', () => {
     await send(ev('initiated', 'p1')); await send(ev('answered', 'p1'));
     await send(ev('initiated', 'p2'));
     expect((await callRow('p2')).status).toBe('queued');
-    await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1, overburstMultiplier: '1.5' }));
+    await must(put(`/internal/tenants/${tenant}/entitlement`, { reason: 'Set up for this test.', inboundChannels: 1, overburstMultiplier: '1.5' }));
     const promoted = await withActor(env.pool, { kind: 'internal' }, (c) => promoteQueued(c, tenant));
     expect(promoted).toBe((await callRow('p2')).id);
     expect(await callRow('p2')).toMatchObject({ status: 'in_progress', credit_multiplier: '1.500' });
-    await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1 }));
+    await must(put(`/internal/tenants/${tenant}/entitlement`, { reason: 'Set up for this test.', inboundChannels: 1 }));
     await clearActive();
   });
 
@@ -438,7 +438,7 @@ describe('found in review: telephony retry', () => {
     // every provider full, client agreed to a premium: the call goes out as burst. Telnyx then refuses it, and Twilio has no room
     // either, so the premium call is not moved to a provider where it would be inside a ceiling.
     failTelnyx = false; await clearActive();
-    await must(put(`/internal/tenants/${t}/entitlement`, { inboundChannels: 1, overburstMultiplier: '1.5' }));
+    await must(put(`/internal/tenants/${t}/entitlement`, { reason: 'Set up for this test.', inboundChannels: 1, overburstMultiplier: '1.5' }));
     for (let i = 0; i < 5; i++) await must(dial(t));
     failTelnyx = true; env.provider.calls.length = 0;
     const over = await dial(t);

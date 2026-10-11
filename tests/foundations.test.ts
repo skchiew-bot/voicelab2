@@ -26,6 +26,7 @@ async function makeProvider(name: string) {
 }
 
 const charging = (effectiveFrom: string, rate: string) => ({
+  reason: 'Set up for this test.',
   effectiveFrom,
   billingIncrementSeconds: 6,
   components: [{ component: 'telephony_leg', unit: 'per_minute', rate, currency: 'USD' }],
@@ -60,7 +61,7 @@ describe('exit criterion 1: add a provider through the API without a code change
 
   it('lets an operator reclassify a capability', async () => {
     const p = await makeProvider('twilio-cap');
-    const res = await env.call(env.staffToken, 'PUT', `/internal/providers/${p.id}/capabilities/stt`, {
+    const res = await env.call(env.staffToken, 'PUT', `/internal/providers/${p.id}/capabilities/stt`, { reason: 'Set up for this test.', 
       support: 'composable', notes: 'built from recording + voice provider',
     });
     expect(res.statusCode).toBe(200);

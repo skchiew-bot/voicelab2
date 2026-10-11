@@ -115,9 +115,9 @@ async function slowFlow() {
 /** A call answered with the slow workflow (starting at its question, or at its model-written line). */
 async function slowCall(start: 'ask' | 'think' = 'ask') {
   await slowFlow();
-  await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: slowIds[start] }));
+  await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: slowIds[start] }));
   const c = await ring();
-  await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+  await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
   return c;
 }
 /** A model that writes "Thank you." once released, and says what it cost. */
@@ -194,14 +194,14 @@ describe('a live call through the speech relay', () => {
     const before = await ring();
     expect(before.twiml).toContain('<Say>');                                                   // no workflow yet
     expect(before.twiml).not.toContain('ConversationRelay');
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const call = await ring();
     expect(call.twiml).toContain(`<ConversationRelay url="wss://voicelab.test/relay/twilio/${twilioId}" language="en-GB" ttsProvider="ElevenLabs"`);
     expect(call.twiml).toContain(`<Parameter name="callId" value="${call.callId}"/><Parameter name="token" value="${relayCallToken(parseKey(env.config.VOICELAB_SECRET_KEY), call.callId)}"/>`);
   });
 
   it('will not let a number answer with another client\'s workflow, and only an admin sets it', async () => {
-    const r = await put(`/internal/numbers/${numberId}/workflow`, { workflowId: otherWf });
+    const r = await put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: otherWf });
     expect(r.statusCode).toBe(400); expect(r.json().error).toContain('does not belong to this client');
     expect((await env.pool.query('SELECT inbound_workflow_id FROM phone_numbers WHERE id = $1', [numberId])).rows[0].inbound_workflow_id).toBe(wfId);
     const d = await post('/internal/calls/outbound', { tenantId, country: 'MY', to: CUSTOMER, providerId: twilioId, workflowId: otherWf });
@@ -283,7 +283,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('starts the workflow once, says its first lines once, and fails nobody when five connections for one call arrive at the same moment', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const { callSid, callId } = await ring();
     const d = relayDeps();
     const opened = await Promise.all(Array.from({ length: 5 }, () => openRelay(d, twilioId, setup(callSid, callId))));
@@ -308,7 +308,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('does not hang the server when more calls are answered at once than it has database connections', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const calls = []; for (let i = 0; i < 14; i++) calls.push(await ring());
     const d = relayDeps();
     const all = Promise.all(calls.map((c) => openRelay(d, twilioId, setup(c.callSid, c.callId))));
@@ -318,7 +318,7 @@ describe('a live call through the speech relay', () => {
   }, 30_000);
 
   it('keeps serving the call on a new connection when the old one closes after it', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const { callSid, callId } = await ring();
     const old = await connect();
     old.send(setup(callSid, callId)); await old.until(2);
@@ -333,7 +333,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('falls back, once, when a reply was left half-applied by a server that stopped', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const { callSid, callId } = await ring();
     const line = await connect();
     line.send(setup(callSid, callId)); await line.until(2);
@@ -360,7 +360,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('falls back, without starting anything, when the connection that was starting the call died before it began', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const { callSid, callId } = await ring();
     await env.pool.query(`UPDATE calls SET relay_owner = gen_random_uuid(), relay_claimed_at = now() - make_interval(secs => $2) WHERE id = $1`, [callId, STARTING_GRACE_MS / 1000 + 5]);
     const o = await openRelay(relayDeps(), twilioId, setup(callSid, callId));
@@ -370,7 +370,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('does not leave a standing-by connection silent when the one starting the call dies, and a late start then writes nothing', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const { callSid, callId } = await ring();
     await env.pool.query(`UPDATE calls SET relay_owner = gen_random_uuid(), relay_claimed_at = now() WHERE id = $1`, [callId]);   // another connection is starting it
     const d = relayDeps();
@@ -388,7 +388,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('lets a standing-by connection take the call over once the run exists: it says the last lines again, recordings included, and does not apply words said before the caller heard them', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const d = relayDeps();
     for (const how of ['timer', 'answer'] as const) {
       const { callSid, callId } = await ring();
@@ -420,7 +420,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('gives the caller the fallback, not silence, when the connection starting the call drops and its start then lands and is abandoned', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const { callSid, callId } = await ring();
     // Hold the start part-way: it reads the client's recordings, which nothing else on this path does.
     const hold = await env.pool.connect();
@@ -444,7 +444,7 @@ describe('a live call through the speech relay', () => {
   }, 20_000);
 
   it('gives the fallback to a connection that takes over or resumes a run that broke or was abandoned', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const d = relayDeps();
     for (const how of ['standby error', 'standby abandoned', 'resume abandoned', 'resume error'] as const) {
       const { callSid, callId } = await ring();
@@ -467,7 +467,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('does not take words that arrived before the first question was asked as its answer', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const { callSid, callId } = await ring();
     const line = await connect();
     line.send(setup(callSid, callId)); line.send(prompt('no'));                                 // "no" was said over the greeting
@@ -480,7 +480,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('a connection standing by looks again within seconds, stops looking once closed, and never takes the call over after', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     // Looks again within seconds: it takes the call over and says the last lines once the run exists.
     {
       const { callSid, callId } = await ring();
@@ -514,7 +514,7 @@ describe('a live call through the speech relay', () => {
   }, 30_000);
 
   it('a connection that takes over a call that finished meanwhile says its closing lines before the end', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const d = relayDeps();
     for (const how of ['standby', 'catch up'] as const) {
       const { callSid, callId } = await ring();
@@ -528,7 +528,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('a reconnect that arrives while a reply is being applied says the next question once it lands, without the caller speaking first', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const { callSid, callId } = await ring();
     const a = await connect();
     a.send(setup(callSid, callId)); await a.until(2);
@@ -548,7 +548,7 @@ describe('a live call through the speech relay', () => {
   }, 20_000);
 
   it('a connection standing by falls back, never goes silent, when its look fails outright', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const { callSid, callId } = await ring();
     await someoneStarting(callId);
     const b = await connect();
@@ -617,7 +617,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('says a short wait line once to a caller left waiting on a standing-by line, and the holding line still follows when the call cannot carry on', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const waitEvents = async (callId: string) => (await env.pool.query(`SELECT payload FROM call_events WHERE call_id = $1 AND type = 'relay.wait_line'`, [callId])).rows;
     // The start died with its server: the caller hears the wait line after a few seconds, once, then the holding line.
     {
@@ -638,7 +638,7 @@ describe('a live call through the speech relay', () => {
       b.ws.close(); await b.closed; await settle();
     }
     // A client's own wait line; the start then lands, and the caller hears the call's lines after it, the wait line not again.
-    await must(put(`/internal/tenants/${tenantId}/fallback`, { holdingMessage: DEFAULT_FALLBACK.holdingMessage, offerCallback: true, humanTransfer: false, voicemail: false, waitMessage: 'Sekejap ya.' }));
+    await must(put(`/internal/tenants/${tenantId}/fallback`, { reason: 'Set up for this test.', holdingMessage: DEFAULT_FALLBACK.holdingMessage, offerCallback: true, humanTransfer: false, voicemail: false, waitMessage: 'Sekejap ya.' }));
     try {
       const { callSid, callId } = await ring();
       await someoneStarting(callId);
@@ -655,17 +655,17 @@ describe('a live call through the speech relay', () => {
       expect(await callbacks(callId)).toBe(0);
       b.ws.close(); await b.closed; await settle();
     } finally {
-      await must(put(`/internal/tenants/${tenantId}/fallback`, { holdingMessage: DEFAULT_FALLBACK.holdingMessage, offerCallback: true, humanTransfer: false, voicemail: false }));
+      await must(put(`/internal/tenants/${tenantId}/fallback`, { reason: 'Set up for this test.', holdingMessage: DEFAULT_FALLBACK.holdingMessage, offerCallback: true, humanTransfer: false, voicemail: false }));
     }
     // A wait line must be a short line of words.
     for (const waitMessage of ['', '   ', 'x'.repeat(201)]) {
-      const r = await put(`/internal/tenants/${tenantId}/fallback`, { holdingMessage: 'Sorry.', offerCallback: true, humanTransfer: false, voicemail: false, waitMessage });
+      const r = await put(`/internal/tenants/${tenantId}/fallback`, { reason: 'Set up for this test.', holdingMessage: 'Sorry.', offerCallback: true, humanTransfer: false, voicemail: false, waitMessage });
       expect(r.statusCode, JSON.stringify(waitMessage)).toBe(400);
     }
   }, 40_000);
 
   it('says the wait line to a reconnected caller whose answer is still being applied, but never to one who has heard the question, or after it', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     // a starts the call and says its question; then its reply is under way when the line drops, and b reconnects.
     const one = await ring();
     const a = await connect();
@@ -696,7 +696,7 @@ describe('a live call through the speech relay', () => {
   }, 30_000);
 
   it('looks again before the wait line, so a caller who could hear the question hears it instead, and the line is said once', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const d = relayDeps();
     const { callSid, callId } = await ring();
     await someoneStarting(callId);
@@ -721,7 +721,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('never says the wait line after a question this line said, even when the answer to it is then still being applied', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const d = relayDeps();
     const { callSid, callId } = await ring();
     await someoneStarting(callId);
@@ -752,9 +752,9 @@ describe('a live call through the speech relay', () => {
       look: { type: 'api', integration: 'billing', path: '/x', transitions: [{ to: 'done' }] }, done: { type: 'end', outcome: 'ok' } } };
     // It passes its simulation, where the client's system is stood in for; on the live call that system is not connected.
     const brokenId = await liveWorkflow(tenantId, 'broken_flow', broken, { replies: [], outcome: 'ok', integrations: { billing: { ok: true } } });
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: brokenId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: brokenId }));
     const { callSid, callId } = await ring();
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const line = await connect();
     line.send(setup(callSid, callId));
     const got = await line.until(2);

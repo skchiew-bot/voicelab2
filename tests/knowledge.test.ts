@@ -98,9 +98,9 @@ const rules = (extra: object[] = [], phrase = 'legal action') => [
 
 describe('policy', () => {
   it('needs at least two approval levels before anything can be proposed, and a usable set of rules', async () => {
-    expect((await A.put(`/internal/tenants/${tenantId}/policy/levels`, { levels: ['Owner'] })).statusCode).toBe(400);
+    expect((await A.put(`/internal/tenants/${tenantId}/policy/levels`, { reason: 'Set up for this test.', levels: ['Owner'] })).statusCode).toBe(400);
     expect((await A.post(`/internal/tenants/${tenantId}/policy/proposals`, { rules: rules(), summary: 'First policy.' })).statusCode).toBe(409);
-    await must(A.put(`/internal/tenants/${tenantId}/policy/levels`, { levels: ['Policy owner', 'Compliance'] }));
+    await must(A.put(`/internal/tenants/${tenantId}/policy/levels`, { reason: 'Set up for this test.', levels: ['Policy owner', 'Compliance'] }));
     const bad = await A.post(`/internal/tenants/${tenantId}/policy/proposals`, { rules: [{ id: 'x', kind: 'action', action: 'a', effect: 'allow', when: { var: 'v', op: 'telepathy' } }], summary: 's' });
     expect(bad.statusCode).toBe(400); expect(bad.json().error).toContain('not a known operator');
   });
@@ -227,7 +227,7 @@ describe('what a review found', () => {
     const p = (await must(propose(rules([{ id: 'x', kind: 'action', action: 'x', effect: 'allow' }], 'court'), 'Wrong.'))).json();
     expect(p.version).toBe('3.0');                                                                      // the refused and withdrawn numbers are not held
     await must(B.post(`/internal/policy-versions/${p.id}/decision`, { decision: 'approved' }));
-    expect((await A.put(`${pol()}/levels`, { levels: ['One', 'Two', 'Three'] })).statusCode).toBe(409);   // the levels cannot move under a waiting proposal
+    expect((await A.put(`${pol()}/levels`, { reason: 'Set up for this test.', levels: ['One', 'Two', 'Three'] })).statusCode).toBe(409);   // the levels cannot move under a waiting proposal
     expect((await B.post(`/internal/policy-versions/${p.id}/withdraw`, { note: '' })).statusCode).toBe(400);
     expect((await must(B.post(`/internal/policy-versions/${p.id}/withdraw`, { note: 'Found a mistake.' }))).json().status).toBe('withdrawn');
     expect((await B.post(`/internal/policy-versions/${p.id}/withdraw`, { note: 'again' })).statusCode).toBe(409);
@@ -235,13 +235,13 @@ describe('what a review found', () => {
   });
 
   it('keeps the levels a proposal was made under, even when they are changed after it is settled', async () => {
-    await must(A.put(`${pol()}/levels`, { levels: ['One', 'Two', 'Three'] }));
+    await must(A.put(`${pol()}/levels`, { reason: 'Set up for this test.', levels: ['One', 'Two', 'Three'] }));
     const p = (await must(propose(rules([{ id: 'y', kind: 'action', action: 'y', effect: 'allow' }], 'court'), 'Three levels.'))).json();
     expect(p.progress.map((l: { name: string }) => l.name)).toEqual(['One', 'Two', 'Three']);
     await must(as(tokenB).post(`/internal/policy-versions/${p.id}/decision`, { decision: 'approved' })); await must(as(tokenC).post(`/internal/policy-versions/${p.id}/decision`, { decision: 'approved' }));
     expect((await as(tokenD).post(`/internal/policy-versions/${p.id}/activate`)).statusCode).toBe(409);   // two of three is not enough
     await must(as(tokenB).post(`/internal/policy-versions/${p.id}/withdraw`, { note: 'Done with this.' }));
-    await must(A.put(`${pol()}/levels`, { levels: ['Policy owner', 'Compliance'] }));
+    await must(A.put(`${pol()}/levels`, { reason: 'Set up for this test.', levels: ['Policy owner', 'Compliance'] }));
     expect((await A.get(`/internal/policy-versions/${p.id}`)).json().progress).toHaveLength(3);
   });
 
@@ -289,7 +289,7 @@ describe('requests that arrive together', () => {
     const mk = async (email: string) => (await withActor(env.pool, { kind: 'internal' }, (c) => createUser(c, null, { tenantId: null, email, role: 'internal_admin' }))).token;
     const [p1, p2, p3] = [await mk('race-1@daythree.test'), await mk('race-2@daythree.test'), await mk('race-3@daythree.test')];
     const t = (await must(A.post('/internal/tenants', { name: 'Race Co' }))).json().id as string;
-    await must(A.put(`/internal/tenants/${t}/policy/levels`, { levels: ['One', 'Two'] }));
+    await must(A.put(`/internal/tenants/${t}/policy/levels`, { reason: 'Set up for this test.', levels: ['One', 'Two'] }));
     const prop = (await must(A.post(`/internal/tenants/${t}/policy/proposals`, { rules: [{ id: 'r', kind: 'must_not_say', phrases: ['we will sue'] }], summary: 'Race test.' }))).json();
     const res = await Promise.all([p1, p2, p3].map((tok) => as(tok).post(`/internal/policy-versions/${prop.id}/decision`, { decision: 'approved' })));
     expect(res.map((r) => r.statusCode).sort()).toEqual([200, 200, 409]);                       // two levels, two approvals; the third finds it settled

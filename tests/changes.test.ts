@@ -35,7 +35,7 @@ beforeAll(async () => {
   tokenB = await mk('b@daythree.test'); tokenC = await mk('c@daythree.test'); tokenD = await mk('d@daythree.test');
   tenantId = (await must(A.post('/internal/tenants', { name: 'Change Co' }))).json().id;
   voiceId = (await must(A.post('/internal/providers', { adapterKey: 'elevenlabs', name: 'el', params: { apiKey: 'k' } }))).json().id;
-  await must(A.post(`/internal/providers/${voiceId}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'tts', unit: 'per_1k_characters', rate: '0.30', currency: 'USD' }] }));
+  await must(A.post(`/internal/providers/${voiceId}/charging`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [{ component: 'tts', unit: 'per_1k_characters', rate: '0.30', currency: 'USD' }] }));
   const c = (await must(A.post(`/internal/tenants/${tenantId}/workflows`, { name: 'change_flow', definition: def('Hello {{name}}, can you pay this week?') }))).json();
   wfId = c.workflow.id; v1 = c.version.id;
   await must(A.post(`/internal/workflows/${wfId}/deploy`, { versionId: v1, environment: 'staging' }));
@@ -101,7 +101,7 @@ describe('approval, level by level', () => {
   });
 
   it('goes through every configured level in order, each by a different person, and keeps the history', async () => {
-    await must(A.put(`/internal/tenants/${tenantId}/approval-policy`, { levels: ['Team lead', 'Finance', 'Director'] }));
+    await must(A.put(`/internal/tenants/${tenantId}/approval-policy`, { reason: 'Set up for this test.', levels: ['Team lead', 'Finance', 'Director'] }));
     expect((await A.get(`/internal/tenants/${tenantId}/approval-policy`)).json()).toEqual([{ name: 'Team lead' }, { name: 'Finance' }, { name: 'Director' }]);
     const ch = (await must(propose(v3))).json();
     expect(ch.progress.map((p: { name: string }) => p.name)).toEqual(['Team lead', 'Finance', 'Director']);
@@ -127,7 +127,7 @@ describe('approval, level by level', () => {
     expect(rej.status).toBe('rejected');
     expect((await as(tokenD).post(`/internal/changes/${ch.id}/decision`, { decision: 'approved' })).statusCode).toBe(409);
     expect((await A.post(`/internal/changes/${ch.id}/apply`)).statusCode).toBe(409);
-    await must(A.put(`/internal/tenants/${tenantId}/approval-policy`, { levels: ['Approver'] }));
+    await must(A.put(`/internal/tenants/${tenantId}/approval-policy`, { reason: 'Set up for this test.', levels: ['Approver'] }));
   });
 
   it('does not put an approved change live past a gate: production still needs its simulation', async () => {

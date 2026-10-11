@@ -341,7 +341,7 @@ describe('numbers that do not fit', () => {
 
 describe('a rate version that would charge a call twice', () => {
   let day = 0; // each version must start later than the one before it
-  const version = (components: object[]) => env.call(env.staffToken, 'POST', `/internal/providers/${telnyxId}/charging`, {
+  const version = (components: object[]) => env.call(env.staffToken, 'POST', `/internal/providers/${telnyxId}/charging`, { reason: 'Set up for this test.', 
     effectiveFrom: new Date(Date.UTC(2040, 0, 1) + 86_400_000 * ++day).toISOString(), billingIncrementSeconds: 1, components,
   });
   const line = (direction: string, billingLine = 'main') => ({ component: 'telephony_leg', unit: 'per_minute', rate: '0.01', currency: 'USD', billingLine, direction });

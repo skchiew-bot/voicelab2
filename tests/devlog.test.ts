@@ -138,6 +138,167 @@ describe('activity hook', () => {
   };
   const lines = (dir: string) => spooled(dir).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
+  // Helper agents in Claude Code's real shape: <session>/subagents/agent-<id>.jsonl and agent-<id>.meta.json beside it (lesson L-016).
+  // Ids are built at run time: 'a' + 16 hex characters, which the scrubber reads as a long mixed run.
+  const REAL_ID = fake('a', '00b3df238', 'a57b79d');
+  const OTHER_ID = fake('a', '7c1e4409f', '2d6b83a');
+  const agentLine = (id: string, msg: string, model: string, ts: string, usage: Record<string, unknown>) => JSON.stringify({ type: 'assistant', agentId: id, timestamp: ts, requestId: `req_${msg}`, message: { id: msg, model, usage } });
+  const agentSession = (dir: string, agents: { id: string; lines?: string[]; meta?: unknown; rawMeta?: string }[]) => {
+    const tp = transcript(dir, [{ id: 'main1', model: 'claude-opus-5-5', ts: '2026-10-10T00:00:00Z', usage: U(10, 20) }]);
+    const sub = path.join(path.dirname(tp), path.basename(tp, '.jsonl'), 'subagents');
+    mkdirSync(sub, { recursive: true });
+    for (const a of agents) {
+      if (a.lines) writeFileSync(path.join(sub, `agent-${a.id}.jsonl`), a.lines.join('\n') + '\n');
+      if (a.rawMeta !== undefined) writeFileSync(path.join(sub, `agent-${a.id}.meta.json`), a.rawMeta);
+      else if (a.meta !== undefined) writeFileSync(path.join(sub, `agent-${a.id}.meta.json`), JSON.stringify(a.meta));
+    }
+    return { tp, sub };
+  };
+  const stop = (dir: string, tp: string, event = 'Stop') => run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: event, session_id: 'ag', transcript_path: tp }));
+  const runsOf = (dir: string) => spoolLines(dir).filter((l) => l.event === 'AgentRun');
+
+  it('records a helper agent\'s id in Claude Code\'s real shape, so its start and end pair up', async () => {
+    const dir = freshDir();
+    expect(REAL_ID).toMatch(/^a[0-9a-f]{16}$/);
+    hook(dir, { hook_event_name: 'SubagentStart', session_id: 's1', agent_type: 'general-purpose', agent_id: REAL_ID });
+    hook(dir, { hook_event_name: 'SubagentStop', session_id: 's1', agent_type: 'general-purpose', agent_id: REAL_ID });
+    hook(dir, { hook_event_name: 'SubagentStart', session_id: 's1', agent_type: 'general-purpose', agent_id: 'bob@example.test' });
+    hook(dir, { hook_event_name: 'SubagentStart', session_id: 's1', agent_type: 'general-purpose', agent_id: 'x'.repeat(41) });
+    const [start, end, email, long] = lines(dir);
+    expect(start).toMatchObject({ event: 'SubagentStart', agentId: REAL_ID });
+    expect(end).toMatchObject({ event: 'SubagentStop', agentId: REAL_ID });
+    expect('agentId' in email).toBe(false); // not plainly an id: left out, never a lookalike
+    expect('agentId' in long).toBe(false);
+    // And it survives the flush, which is what reaches git.
+    const { clean } = await import(path.join(root, 'scripts/devlog-flush.mjs'));
+    expect(clean(start)).toMatchObject({ event: 'SubagentStart', agentId: REAL_ID });
+    expect(clean(end)).toMatchObject({ event: 'SubagentStop', agentId: REAL_ID });
+  });
+
+  it('records each helper agent\'s model and tokens from Claude Code\'s own transcripts, and its process only from a tag written when it started', () => {
+    const { dir } = makeRepo();
+    const description = 'Build the thing for bob@example.test with TWILIO_AUTH_TOKEN=abc';
+    const { tp } = agentSession(dir, [
+      {
+        id: REAL_ID, meta: { agentType: 'general-purpose', description: `[build T-1 esc:suite_failed] ${description}`, model: 'opus', spawnDepth: 1 },
+        lines: [
+          agentLine(REAL_ID, 'am1', 'claude-sonnet-5-5', '2026-10-10T00:10:00Z', U(100, 200)),
+          agentLine(REAL_ID, 'am1', 'claude-sonnet-5-5', '2026-10-10T00:10:00Z', U(100, 200)), // a second content block of the same message
+          agentLine(REAL_ID, 'am2', 'claude-sonnet-5-5', '2026-10-10T00:20:00Z', U(50, 25, 1000)),
+        ],
+      },
+      { id: OTHER_ID, lines: [agentLine(OTHER_ID, 'bm1', 'claude-haiku-5-5', '2026-10-10T00:30:00Z', U(7, 3))] }, // no metadata at all
+    ]);
+    expect(stop(dir, tp).status).toBe(0);
+    const [a, b] = runsOf(dir);
+    expect(a).toMatchObject({ event: 'AgentRun', agentId: REAL_ID, agentType: 'general-purpose', requested: 'opus', process: 'build', task: 'T-1', trigger: 'suite_failed', first: '2026-10-10T00:10:00.000Z', last: '2026-10-10T00:20:00.000Z' });
+    // The model is the one that served the messages, never the one asked for; each message counted once.
+    expect(Object.keys(a.tokens)).toEqual(['claude-sonnet-5-5']);
+    expect(a.tokens['claude-sonnet-5-5']).toMatchObject({ messages: 2, input: 150, output: 225, cacheRead: 1000 });
+    expect(b).toMatchObject({ agentId: OTHER_ID, requested: null });
+    expect(b.process).toBeUndefined();
+    expect(b.task).toBeUndefined();
+    expect(Object.keys(b.tokens)).toEqual(['claude-haiku-5-5']);
+    for (const s of ['bob', 'example', 'TWILIO', 'Build the thing']) expect(spooled(dir)).not.toContain(s); // the description is never stored
+    // The session's own figures count each message once, helper agents' included.
+    const usage = spoolLines(dir).find((l) => l.event === 'Usage');
+    expect(usage.tokens['claude-sonnet-5-5']).toMatchObject({ messages: 2, input: 150, output: 225 });
+    expect(usage.tokens['claude-haiku-5-5']).toMatchObject({ messages: 1, input: 7 });
+    expect(usage.tokens['claude-opus-5-5']).toMatchObject({ messages: 1, input: 10, output: 20 });
+  });
+
+  it('never records a helper agent\'s description, only a tag in the exact form, and a malformed tag as no process', async () => {
+    const mod = await import(HOOK);
+    const mail = fake('ali', '@', 'example.test');
+    const cases: [string, unknown][] = [
+      ['[build T-1] do it', { process: 'build', task: 'T-1' }],
+      ['[review T-1] check', { process: 'review', task: 'T-1' }],
+      ['[security-review DCT-12.a] x', { process: 'security-review', task: 'DCT-12.a' }],
+      ['[fix T-1 esc:review_failed]', { process: 'fix', task: 'T-1', trigger: 'review_failed' }],
+      ['[review T-1 shadow] second opinion', { process: 'review', task: 'T-1', shadow: true }],
+      ['[Build T-1]', null], // case-sensitive
+      ['[build]', null], // no task
+      ['[deploy T-1]', null], // not a process
+      ['[security-review T-1 shadow]', null], // shadow only with review
+      ['[build T-1 esc:other]', null], // not a trigger
+      ['[build T-1 shadow]', null],
+      ['[build T-1x', null], // not a whole bracket
+      ['[build T-1]x', null], // text running on from the bracket
+      ['do [build T-1]', null], // only at the start
+      [mail, null],
+      ['Build the dialler for Ali bin Abu', null],
+    ];
+    for (const [text, want] of cases) expect(mod.parseTag(text), text).toEqual(want);
+    expect(mod.parseTag(undefined)).toBeNull();
+    expect(mod.parseTag({ toString: () => '[build T-1]' })).toBeNull();
+    expect(mod.PROCESSES).toEqual(['plan', 'review', 'security-review', 'build', 'fix', 'check']);
+    expect(mod.TRIGGERS).toEqual(['review_failed', 'suite_failed', 'builder_blocked', 'deny_path_touched']);
+
+    // End to end: a malformed tag leaves the agent with no process, and none of the description reaches the spool.
+    const { dir } = makeRepo();
+    const { tp } = agentSession(dir, [
+      { id: REAL_ID, meta: { agentType: 'general-purpose', description: `[build T-1 esc:other] ${mail}` }, lines: [agentLine(REAL_ID, 'am1', 'claude-sonnet-5-5', '2026-10-10T00:10:00Z', U(1, 1))] },
+      { id: OTHER_ID, meta: { agentType: 'general-purpose', description: `Mail ${mail} about Ali bin Abu` }, lines: [agentLine(OTHER_ID, 'bm1', 'claude-sonnet-5-5', '2026-10-10T00:11:00Z', U(1, 1))] },
+    ]);
+    stop(dir, tp);
+    const runs = runsOf(dir);
+    expect(runs).toHaveLength(2);
+    for (const r of runs) { expect(r.process).toBeUndefined(); expect(r.task).toBeUndefined(); expect(r.trigger).toBeUndefined(); }
+    for (const s of ['ali', 'Ali', 'example', 'Mail', 'esc:other']) expect(spooled(dir)).not.toContain(s);
+  });
+
+  it('writes a helper agent\'s record again only when it changed, so many stops do not grow the log', () => {
+    const { dir } = makeRepo();
+    const first = agentLine(REAL_ID, 'am1', 'claude-sonnet-5-5', '2026-10-10T00:10:00Z', U(5, 5));
+    const { tp, sub } = agentSession(dir, [{ id: REAL_ID, meta: { description: '[check T-2]' }, lines: [first] }]);
+    stop(dir, tp); stop(dir, tp); stop(dir, tp, 'SessionEnd');
+    expect(runsOf(dir)).toHaveLength(1);
+    // New work by the agent is a new record, and the one after that changes nothing again.
+    writeFileSync(path.join(sub, `agent-${REAL_ID}.jsonl`), [first, agentLine(REAL_ID, 'am2', 'claude-sonnet-5-5', '2026-10-10T00:15:00Z', U(5, 5))].join('\n') + '\n');
+    stop(dir, tp); stop(dir, tp);
+    const runs = runsOf(dir);
+    expect(runs).toHaveLength(2);
+    expect(runs.map((r) => r.tokens['claude-sonnet-5-5'].messages)).toEqual([1, 2]);
+    expect(runs[1]).toMatchObject({ process: 'check', task: 'T-2', last: '2026-10-10T00:15:00.000Z' });
+    // The record follows the Usage line of its own stop.
+    const order = spoolLines(dir).map((l) => l.event).filter((e) => e === 'Usage' || e === 'AgentRun');
+    expect(order.slice(0, 2)).toEqual(['Usage', 'AgentRun']);
+  });
+
+  it('keeps a session\'s own totals as they were: helper agents\' tokens are a breakdown, not an addition', () => {
+    const { dir } = makeRepo();
+    const { tp } = agentSession(dir, [
+      { id: REAL_ID, lines: [agentLine(REAL_ID, 'am1', 'claude-opus-5-5', '2026-10-10T00:10:00Z', U(100, 1000))] },
+      { id: OTHER_ID, lines: [agentLine(OTHER_ID, 'bm1', 'claude-opus-5-5', '2026-10-10T00:20:00Z', U(200, 2000))] },
+    ]);
+    stop(dir, tp);
+    const usage = spoolLines(dir).find((l) => l.event === 'Usage');
+    // Worked out by hand: main 10 in / 20 out, agents 100/1000 and 200/2000 in the same model, each message once.
+    expect(usage.tokens['claude-opus-5-5']).toMatchObject({ messages: 3, input: 310, output: 3020 });
+    const parts = runsOf(dir).map((r) => r.tokens['claude-opus-5-5']);
+    expect(parts.map((t) => [t.input, t.output])).toEqual([[100, 1000], [200, 2000]]);
+    // No checkpoint, so the transcript prices it: 310 in at 4 and 3020 out at 20 per million.
+    expect(usage.costBasis).toBe('transcript-only');
+    expect(usage.costUSD).toBe('0.06164000');
+  });
+
+  it('records the rest when one helper agent\'s files cannot be read', () => {
+    const { dir } = makeRepo();
+    const THIRD = fake('a', '5d90c1e7b', '3f2a604');
+    const { tp, sub } = agentSession(dir, [
+      { id: REAL_ID, rawMeta: '{ not json', lines: [agentLine(REAL_ID, 'am1', 'claude-sonnet-5-5', '2026-10-10T00:10:00Z', U(1, 1))] }, // metadata unreadable
+      { id: THIRD, meta: { description: '[fix T-3]' }, lines: [agentLine(THIRD, 'cm1', 'claude-sonnet-5-5', '2026-10-10T00:12:00Z', U(2, 2))] },
+    ]);
+    mkdirSync(path.join(sub, `agent-${OTHER_ID}.jsonl`)); // a transcript that cannot be read as a file
+    mkdirSync(path.join(sub, `agent-${OTHER_ID}.meta.json`)); // and metadata that is not a file
+    expect(stop(dir, tp).status).toBe(0);
+    expect(spoolLines(dir).filter((l) => l.event === 'Usage')).toHaveLength(1);
+    const runs = runsOf(dir);
+    expect(runs.map((r) => r.agentId).sort()).toEqual([REAL_ID, THIRD].sort());
+    expect(runs.find((r) => r.agentId === REAL_ID).process).toBeUndefined(); // no metadata, no process
+    expect(runs.find((r) => r.agentId === THIRD)).toMatchObject({ process: 'fix', task: 'T-3' });
+  });
+
   it('writes to the spool, which git ignores, so the working tree stays clean', () => {
     const dir = freshDir();
     hook(dir, { hook_event_name: 'PostToolUse', session_id: 's1', tool_name: 'Bash', tool_input: { description: 'Run tests' } });
@@ -552,6 +713,36 @@ describe('flushing the log for a commit', () => {
     writeFileSync(spool, readFileSync(spool, 'utf8') + JSON.stringify({ ts: '2026-10-10T00:00:02Z', session: 'session_01X', event: 'UserPromptSubmit' }) + '\n');
     runFlush(dir);
     expect(out()).toHaveLength(2); // a new file, so two branches never edit the same one
+  });
+
+  it('keeps only known fields of a helper agent\'s record and an outcome when flushing, and drops one with no id or required field', () => {
+    const dir = freshDir();
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    const id = fake('a', '00b3df238', 'a57b79d');
+    const base = { ts: '2026-10-10T00:00:00Z', session: 'session_01X' };
+    const tokens = { 'claude-sonnet-5-5': { messages: 2, input: 5, output: 6, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, costUSD: '0.00000100', extra: 1 } };
+    const rows = [
+      { ...base, event: 'AgentRun', agentId: id, agentType: 'general-purpose', requested: 'opus', process: 'build', task: 'T-1', trigger: 'suite_failed', shadow: true, first: '2026-10-10T00:01:00+08:00', last: '2026-10-10T00:02:00Z', tokens, sig: '2|x', description: 'free text' },
+      { ...base, event: 'AgentRun', agentId: id, requested: 'gpt', process: 'deploy', task: 'not a task!', trigger: 'other', shadow: 'yes', first: 'soon', tokens: {} },
+      { ...base, event: 'AgentRun', agentType: 'general-purpose', process: 'build' }, // no id
+      { ...base, event: 'AgentRun', agentId: '[redacted]', process: 'build' }, // not an id
+      { ...base, event: 'Outcome', task: 'T-1', process: 'review', result: 'failed', agent: id, shadowOf: id, round: 2, note: 'free text' },
+      { ...base, event: 'Outcome', task: 'T-1', process: 'review', result: 'passed', round: 100 },
+      { ...base, event: 'Outcome', task: 'T-1', process: 'deploy', result: 'passed' }, // not a process
+      { ...base, event: 'Outcome', task: 'T-1', process: 'review', result: 'maybe' }, // not a result
+      { ...base, event: 'Outcome', process: 'review', result: 'passed' }, // no task
+    ];
+    writeFileSync(path.join(dir, 'devlog/.spool/s1.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    expect(runFlush(dir).status).toBe(0);
+    const out = readdirSync(path.join(dir, 'devlog/activity'));
+    const got = readFileSync(path.join(dir, 'devlog/activity', out[0]!), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const t = { 'claude-sonnet-5-5': { messages: 2, input: 5, output: 6, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, costUSD: '0.00000100' } };
+    expect(got).toEqual([
+      { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'AgentRun', agentId: id, agentType: 'general-purpose', requested: 'opus', process: 'build', task: 'T-1', trigger: 'suite_failed', shadow: true, first: '2026-10-09T16:01:00.000Z', last: '2026-10-10T00:02:00.000Z', tokens: t },
+      { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'AgentRun', agentId: id, tokens: {} },
+      { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'Outcome', task: 'T-1', process: 'review', result: 'failed', agent: id, shadowOf: id, round: 2 },
+      { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'Outcome', task: 'T-1', process: 'review', result: 'passed' },
+    ]);
   });
 });
 

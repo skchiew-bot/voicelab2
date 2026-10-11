@@ -120,6 +120,32 @@ export function decimalAtLeast(a, b) {
   return BigInt(af.padEnd(n, '0') || '0') >= BigInt(bf.padEnd(n, '0') || '0');
 }
 
+/** The processes a helper agent can declare in its tag, and the reasons it can give for starting above its floor. */
+export const PROCESSES = ['plan', 'review', 'security-review', 'build', 'fix', 'check'];
+export const TRIGGERS = ['review_failed', 'suite_failed', 'builder_blocked', 'deny_path_touched'];
+
+/** A helper agent's id as Claude Code writes it. Anything else is left out, never scrubbed into a lookalike. */
+export const isAgentId = (v) => typeof v === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(v);
+
+const TAG = /^\[(plan|review|security-review|build|fix|check) ([A-Za-z][\w.-]{0,39})(?: (esc:(review_failed|suite_failed|builder_blocked|deny_path_touched)|shadow))?\](?:\s|$)/;
+
+/**
+ * What a session declares about a helper agent, by a tag at the start of the Agent description:
+ * `[build T-1]`, `[build T-1 esc:suite_failed]`, `[review T-1 shadow]`. Whole-bracket match only,
+ * case-sensitive; anything else is no tag. Only the three fields come out: the description itself
+ * is free text and is never stored.
+ */
+export function parseTag(description) {
+  const m = TAG.exec(typeof description === 'string' ? description : '');
+  if (!m) return null;
+  const [, process, task, extra, trigger] = m;
+  if (extra === 'shadow' && process !== 'review') return null;
+  const out = { process, task };
+  if (trigger) out.trigger = trigger;
+  if (extra === 'shadow') out.shadow = true;
+  return out;
+}
+
 const emptyTokens = () => ({ messages: 0, input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 });
 
 /** Every transcript file of a session: the same file name in any project folder, plus subagents. */
@@ -140,6 +166,18 @@ function sessionFiles(transcriptPath) {
   return { mains: [...mains], subs };
 }
 
+/** A helper agent's metadata from the file beside its transcript. A missing or unreadable file is no metadata (lesson L-006). */
+function agentMeta(transcriptFile) {
+  const out = { agentType: undefined, requested: null, tag: null };
+  try {
+    const m = JSON.parse(readFileSync(transcriptFile.replace(/\.jsonl$/, '.meta.json'), 'utf8'));
+    if (typeof m?.agentType === 'string') out.agentType = scrub(m.agentType, 60);
+    if (['opus', 'sonnet', 'haiku', 'inherit'].includes(m?.model)) out.requested = m.model;
+    out.tag = parseTag(m?.description);
+  } catch { /* no metadata */ }
+  return out;
+}
+
 /**
  * Tokens per model for a session, from all its transcripts and its subagents' transcripts.
  * - Claude Code writes one line per content block, all with the same message id and usage, and a
@@ -154,12 +192,16 @@ function sessionFiles(transcriptPath) {
  *   (`since`). Checkpoints without a `startTime` (older versions) count as one run.
  */
 export function tokenUsage(transcriptPath) {
-  const all = {}; const since = {};
-  if (!transcriptPath) return { all, since, runs: [] };
+  const all = {}; const since = {}; const agents = new Map();
+  if (!transcriptPath) return { all, since, runs: [], agents };
   const { mains, subs } = sessionFiles(transcriptPath);
   const seen = new Set(); const messages = []; const runs = new Map();
   for (const f of [...mains, ...subs]) {
     let text; try { text = readFileSync(f, 'utf8'); } catch { continue; }
+    // A helper agent's own file: its id is the file stem, its metadata a sibling file Claude Code
+    // writes (undocumented, checked against real files 2026-10-11, lesson L-016). Always optional.
+    const stem = subs.includes(f) ? /^agent-([A-Za-z0-9_-]{1,40})\.jsonl$/.exec(path.basename(f))?.[1] : undefined;
+    const meta = stem ? agentMeta(f) : null;
     let lastTs = null;
     for (const raw of text.split('\n')) {
       if (raw.includes('"cost-state"')) {
@@ -179,7 +221,7 @@ export function tokenUsage(transcriptPath) {
       const id = m.id ?? e.requestId ?? e.uuid;
       if (seen.has(id)) continue;
       seen.add(id);
-      messages.push({ model: m.model, u, ts: e.timestamp ?? '' });
+      messages.push({ model: m.model, u, ts: e.timestamp ?? '', agent: stem, meta });
     }
   }
   const add = (bucket, { model, u }) => {
@@ -197,12 +239,24 @@ export function tokenUsage(transcriptPath) {
   const runOf = (t) => ordered.filter((r) => r.start === 'unknown' || r.start <= t).at(-1) ?? null;
   for (const msg of messages) {
     add(all, msg);
+    if (msg.agent) {
+      // A breakdown of the session's own figures, never an addition to them.
+      const a = agents.get(msg.agent) ?? { tokens: {}, first: null, last: null, ...msg.meta };
+      agents.set(msg.agent, a);
+      add(a.tokens, msg);
+      const at = new Date(msg.ts).getTime();
+      if (Number.isFinite(at)) {
+        const iso = new Date(at).toISOString();
+        if (!a.first || iso < a.first) a.first = iso;
+        if (!a.last || iso > a.last) a.last = iso;
+      }
+    }
     const t = new Date(msg.ts).getTime();
     if (!Number.isFinite(t)) continue; // no timestamp: it cannot be placed in a run, so it is not priced
     const run = runOf(t);
     if (ordered.length && (!run || !run.at || t > new Date(run.at).getTime())) add(since, msg);
   }
-  return { all, since, runs: ordered };
+  return { all, since, runs: ordered, agents };
 }
 
 // Exact money in 1e-8 USD units, as in src/money.ts (lesson L-004).
@@ -331,6 +385,7 @@ function main() {
   const event = ev.hook_event_name;
   const line = { ts: new Date().toISOString(), ...sessionIds(ev.session_id), event };
   let context = '';
+  const agentRuns = [];
 
   if (event === 'SessionStart') {
     line.source = ev.source;
@@ -389,7 +444,7 @@ function main() {
     if (!line.ok) line.failure = failureKind(ev.tool_name, ev.error, ev.is_interrupt);
   } else if (event === 'Stop' || event === 'SessionEnd') {
     if (event === 'SessionEnd') line.reason = scrub(ev.reason, 40);
-    const { all, since, runs } = tokenUsage(ev.transcript_path);
+    const { all, since, runs, agents } = tokenUsage(ev.transcript_path);
     if (Object.keys(all).length === 0 && runs.length === 0 && event === 'Stop') return 0; // nothing to record yet
     if (event === 'SessionEnd') appendLine({ ts: line.ts, session: line.session, event: 'SessionEnd', reason: line.reason });
     const pricing = readConfig().pricing;
@@ -418,9 +473,26 @@ function main() {
       line.costBasis = 'transcript-only'; // background calls not included
     }
     if (unpriced.size) line.unpriced = [...unpriced]; // shown on the dashboard instead of a guessed price
+    // One record per helper agent, written only when it has new messages since this spool's last one for it.
+    // A breakdown of the session's figures above, which stay as they were.
+    const last = new Map();
+    for (const e of history(spoolFile(line.session))) if (e.event === 'AgentRun') last.set(e.agentId, e.sig);
+    for (const [agentId, a] of agents) {
+      const messages = Object.values(a.tokens).reduce((n, t) => n + t.messages, 0);
+      const sig = `${messages}|${a.last}`;
+      if (last.get(agentId) === sig) continue;
+      priceAll(a.tokens);
+      agentRuns.push({
+        ts: line.ts, session: line.session, event: 'AgentRun', agentId, agentType: a.agentType, requested: a.requested,
+        process: a.tag?.process, task: a.tag?.task, trigger: a.tag?.trigger, shadow: a.tag?.shadow,
+        first: a.first ?? undefined, last: a.last ?? undefined, tokens: a.tokens, sig,
+      });
+    }
   } else if (event === 'SubagentStart' || event === 'SubagentStop') {
     line.agentType = scrub(ev.agent_type ?? 'unknown', 60);
-    line.agentId = scrub(ev.agent_id ?? '', 40);
+    // A harness id ('a' + 16 hex in Claude Code's real shape), not content: kept exactly when it is
+    // plainly an id, else left out. Scrubbing it turned every real id into [redacted] (lesson L-016).
+    if (isAgentId(ev.agent_id)) line.agentId = ev.agent_id;
   } else if (event === 'UserPromptSubmit') {
     // Counts turns only. The prompt itself is not recorded: it can hold anything the owner pasted.
     // A cost stop-loss raised at the end of the last turn reached only the owner; tell Claude now.
@@ -435,6 +507,7 @@ function main() {
   const file = spoolFile(line.session);
   const past = history(file);
   appendLine(line);
+  for (const r of agentRuns) appendLine(r);
   const alerts = checks(past, line, readConfig());
   for (const a of alerts) appendLine({ ts: line.ts, session: line.session, event: 'Alert', kind: a.kind, rule: a.rule, key: a.key });
   if (context) process.stdout.write(context);

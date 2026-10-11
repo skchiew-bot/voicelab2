@@ -8,16 +8,18 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { failureKind, scrub } from '../.claude/hooks/devlog.mjs';
+import { PROCESSES, TRIGGERS, failureKind, isTaskId, scrub } from '../.claude/hooks/devlog.mjs';
 
 const EVENTS = new Set(['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
-  'Usage', 'Alert', 'SubagentStart', 'SubagentStop', 'Task', 'Incident', 'Decision']);
+  'Usage', 'Alert', 'SubagentStart', 'SubagentStop', 'AgentRun', 'Outcome', 'Task', 'Incident', 'Decision']);
 const KINDS = new Set(['test', 'typecheck', 'build', 'push', 'commit', 'integrate', 'install', 'other']);
 const TASK_STATUSES = new Set(['planned', 'in_progress', 'testing', 'review', 'blocked', 'done', 'abandoned']);
 const INCIDENT_TYPES = new Set(['agent_regression', 'test_failure', 'review_finding', 'process', 'scope', 'security', 'stop_loss', 'other']);
 
+const REQUESTED = new Set(['opus', 'sonnet', 'haiku', 'inherit']);
+const isoTime = (v) => { const d = typeof v === 'string' ? new Date(v) : null; return d && !Number.isNaN(d.getTime()) ? d.toISOString() : undefined; };
 const id = (v) => (typeof v === 'string' && /^[\w-]{1,80}$/.test(v) ? v : undefined);
-const taskId = (v) => (typeof v === 'string' && /^[A-Za-z][\w.-]{0,39}$/.test(v) ? v : undefined);
+const taskId = (v) => (isTaskId(v) ? v : undefined);
 const decimal = (v) => (typeof v === 'string' && /^\d{1,12}\.\d{1,8}$/.test(v) ? v : undefined);
 const nat = (v, max = Number.MAX_SAFE_INTEGER) => (Number.isInteger(v) && v >= 0 && v <= max ? v : undefined);
 const text = (v, max) => (typeof v === 'string' ? scrub(v, max) : undefined);
@@ -108,6 +110,30 @@ export function clean(raw) {
   if (raw.event === 'SubagentStart' || raw.event === 'SubagentStop') {
     set('agentType', text(raw.agentType, 60));
     set('agentId', id(raw.agentId));
+  }
+  if (raw.event === 'AgentRun') {
+    // What Claude Code recorded about a helper agent (model, tokens, times) and what its session declared
+    // (process, task, trigger): the declared parts only in their fixed forms, never any free text.
+    if (!id(raw.agentId)) return null;
+    out.agentId = raw.agentId;
+    set('agentType', text(raw.agentType, 60));
+    if (REQUESTED.has(raw.requested)) out.requested = raw.requested;
+    if (PROCESSES.includes(raw.process)) out.process = raw.process;
+    set('task', taskId(raw.task));
+    if (TRIGGERS.includes(raw.trigger)) out.trigger = raw.trigger;
+    // A shadow run is a second opinion on a review: no other process carries the flag.
+    if (raw.shadow === true && raw.process === 'review') out.shadow = true;
+    set('first', isoTime(raw.first));
+    set('last', isoTime(raw.last));
+    set('tokens', tokensOf(raw.tokens));
+  }
+  if (raw.event === 'Outcome') {
+    // A review verdict the session declared with the task CLI.
+    if (!taskId(raw.task) || !PROCESSES.includes(raw.process) || !['passed', 'failed'].includes(raw.result)) return null;
+    out.task = raw.task; out.process = raw.process; out.result = raw.result;
+    set('agent', id(raw.agent));
+    if (raw.process === 'review') set('shadowOf', id(raw.shadowOf)); // only a review can shadow another
+    set('round', nat(raw.round, 99));
   }
   if (raw.event === 'Task') {
     if (!taskId(raw.id) || !['start', 'update', 'done'].includes(raw.action)) return null;

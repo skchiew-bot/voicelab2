@@ -138,6 +138,173 @@ describe('activity hook', () => {
   };
   const lines = (dir: string) => spooled(dir).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
+  // Helper agents in Claude Code's real shape: <session>/subagents/agent-<id>.jsonl and agent-<id>.meta.json beside it (lesson L-016).
+  // Ids are built at run time: 'a' + 16 hex characters, which the scrubber reads as a long mixed run.
+  const REAL_ID = fake('a', '00b3df238', 'a57b79d');
+  const OTHER_ID = fake('a', '7c1e4409f', '2d6b83a');
+  const agentLine = (id: string, msg: string, model: string, ts: string, usage: Record<string, unknown>) => JSON.stringify({ type: 'assistant', agentId: id, timestamp: ts, requestId: `req_${msg}`, message: { id: msg, model, usage } });
+  const agentSession = (dir: string, agents: { id: string; lines?: string[]; meta?: unknown; rawMeta?: string }[]) => {
+    const tp = transcript(dir, [{ id: 'main1', model: 'claude-opus-5-5', ts: '2026-10-10T00:00:00Z', usage: U(10, 20) }]);
+    const sub = path.join(path.dirname(tp), path.basename(tp, '.jsonl'), 'subagents');
+    mkdirSync(sub, { recursive: true });
+    for (const a of agents) {
+      if (a.lines) writeFileSync(path.join(sub, `agent-${a.id}.jsonl`), a.lines.join('\n') + '\n');
+      if (a.rawMeta !== undefined) writeFileSync(path.join(sub, `agent-${a.id}.meta.json`), a.rawMeta);
+      else if (a.meta !== undefined) writeFileSync(path.join(sub, `agent-${a.id}.meta.json`), JSON.stringify(a.meta));
+    }
+    return { tp, sub };
+  };
+  const stop = (dir: string, tp: string, event = 'Stop') => run(dir, '.claude/hooks/devlog.mjs', [], JSON.stringify({ hook_event_name: event, session_id: 'ag', transcript_path: tp }));
+  const runsOf = (dir: string) => spoolLines(dir).filter((l) => l.event === 'AgentRun');
+
+  it('records a helper agent\'s id in Claude Code\'s real shape, so its start and end pair up', async () => {
+    const dir = freshDir();
+    expect(REAL_ID).toMatch(/^a[0-9a-f]{16}$/);
+    hook(dir, { hook_event_name: 'SubagentStart', session_id: 's1', agent_type: 'general-purpose', agent_id: REAL_ID });
+    hook(dir, { hook_event_name: 'SubagentStop', session_id: 's1', agent_type: 'general-purpose', agent_id: REAL_ID });
+    hook(dir, { hook_event_name: 'SubagentStart', session_id: 's1', agent_type: 'general-purpose', agent_id: 'bob@example.test' });
+    hook(dir, { hook_event_name: 'SubagentStart', session_id: 's1', agent_type: 'general-purpose', agent_id: 'x'.repeat(41) });
+    const [start, end, email, long] = lines(dir);
+    expect(start).toMatchObject({ event: 'SubagentStart', agentId: REAL_ID });
+    expect(end).toMatchObject({ event: 'SubagentStop', agentId: REAL_ID });
+    expect('agentId' in email).toBe(false); // not plainly an id: left out, never a lookalike
+    expect('agentId' in long).toBe(false);
+    // And it survives the flush, which is what reaches git.
+    const { clean } = await import(path.join(root, 'scripts/devlog-flush.mjs'));
+    expect(clean(start)).toMatchObject({ event: 'SubagentStart', agentId: REAL_ID });
+    expect(clean(end)).toMatchObject({ event: 'SubagentStop', agentId: REAL_ID });
+  });
+
+  it('records each helper agent\'s model and tokens from Claude Code\'s own transcripts, and its process only from a tag written when it started', () => {
+    const { dir } = makeRepo();
+    const description = 'Build the thing for bob@example.test with TWILIO_AUTH_TOKEN=abc';
+    const { tp } = agentSession(dir, [
+      {
+        id: REAL_ID, meta: { agentType: 'general-purpose', description: `[build T-1 esc:suite_failed] ${description}`, model: 'opus', spawnDepth: 1 },
+        lines: [
+          agentLine(REAL_ID, 'am1', 'claude-sonnet-5-5', '2026-10-10T00:10:00Z', U(100, 200)),
+          agentLine(REAL_ID, 'am1', 'claude-sonnet-5-5', '2026-10-10T00:10:00Z', U(100, 200)), // a second content block of the same message
+          agentLine(REAL_ID, 'am2', 'claude-sonnet-5-5', '2026-10-10T00:20:00Z', U(50, 25, 1000)),
+        ],
+      },
+      { id: OTHER_ID, lines: [agentLine(OTHER_ID, 'bm1', 'claude-haiku-5-5', '2026-10-10T00:30:00Z', U(7, 3))] }, // no metadata at all
+    ]);
+    expect(stop(dir, tp).status).toBe(0);
+    const [a, b] = runsOf(dir);
+    expect(a).toMatchObject({ event: 'AgentRun', agentId: REAL_ID, agentType: 'general-purpose', requested: 'opus', process: 'build', task: 'T-1', trigger: 'suite_failed', first: '2026-10-10T00:10:00.000Z', last: '2026-10-10T00:20:00.000Z' });
+    // The model is the one that served the messages, never the one asked for; each message counted once.
+    expect(Object.keys(a.tokens)).toEqual(['claude-sonnet-5-5']);
+    expect(a.tokens['claude-sonnet-5-5']).toMatchObject({ messages: 2, input: 150, output: 225, cacheRead: 1000 });
+    expect(b).toMatchObject({ agentId: OTHER_ID, requested: null });
+    expect(b.process).toBeUndefined();
+    expect(b.task).toBeUndefined();
+    expect(Object.keys(b.tokens)).toEqual(['claude-haiku-5-5']);
+    for (const s of ['bob', 'example', 'TWILIO', 'Build the thing']) expect(spooled(dir)).not.toContain(s); // the description is never stored
+    // The session's own figures count each message once, helper agents' included.
+    const usage = spoolLines(dir).find((l) => l.event === 'Usage');
+    expect(usage.tokens['claude-sonnet-5-5']).toMatchObject({ messages: 2, input: 150, output: 225 });
+    expect(usage.tokens['claude-haiku-5-5']).toMatchObject({ messages: 1, input: 7 });
+    expect(usage.tokens['claude-opus-5-5']).toMatchObject({ messages: 1, input: 10, output: 20 });
+  });
+
+  it('never records a helper agent\'s description, only a tag in the exact form, and a malformed tag as no process', async () => {
+    const mod = await import(HOOK);
+    const mail = fake('ali', '@', 'example.test');
+    const cases: [string, unknown][] = [
+      ['[build T-1] do it', { process: 'build', task: 'T-1' }],
+      ['[review T-1] check', { process: 'review', task: 'T-1' }],
+      ['[security-review DCT-12.a] x', { process: 'security-review', task: 'DCT-12.a' }],
+      ['[fix T-1 esc:review_failed]', { process: 'fix', task: 'T-1', trigger: 'review_failed' }],
+      ['[review T-1 shadow] second opinion', { process: 'review', task: 'T-1', shadow: true }],
+      ['[Build T-1]', null], // case-sensitive
+      ['[build]', null], // no task
+      ['[deploy T-1]', null], // not a process
+      ['[security-review T-1 shadow]', null], // shadow only with review
+      ['[build T-1 esc:other]', null], // not a trigger
+      ['[build T-1 shadow]', null],
+      ['[build T-1x', null], // not a whole bracket
+      ['[build T-1]x', null], // text running on from the bracket
+      ['do [build T-1]', null], // only at the start
+      [mail, null],
+      ['Build the dialler for Ali bin Abu', null],
+      // The task id is the one free-form part: an id scrubbing would change, or one with a number's worth of digits, is no tag.
+      [`[fix ${fake('p', '60123456789')}] x`, null],
+      [`[build ${fake('T-', '1234567')}]`, null],
+      [`[build ${fake('a', 'b'.repeat(20), '1')}]`, null],
+      [`[build ${fake('x'.repeat(40))}]`, null],
+      [`[fix T-123456 esc:suite_failed]`, { process: 'fix', task: 'T-123456', trigger: 'suite_failed' }], // six digits stay
+    ];
+    for (const [text, want] of cases) expect(mod.parseTag(text), text).toEqual(want);
+    expect(mod.parseTag(undefined)).toBeNull();
+    expect(mod.parseTag({ toString: () => '[build T-1]' })).toBeNull();
+    expect(mod.PROCESSES).toEqual(['plan', 'review', 'security-review', 'build', 'fix', 'check']);
+    expect(mod.TRIGGERS).toEqual(['review_failed', 'suite_failed', 'builder_blocked', 'deny_path_touched']);
+
+    // End to end: a malformed tag leaves the agent with no process, and none of the description reaches the spool.
+    const { dir } = makeRepo();
+    const { tp } = agentSession(dir, [
+      { id: REAL_ID, meta: { agentType: 'general-purpose', description: `[build T-1 esc:other] ${mail}` }, lines: [agentLine(REAL_ID, 'am1', 'claude-sonnet-5-5', '2026-10-10T00:10:00Z', U(1, 1))] },
+      { id: OTHER_ID, meta: { agentType: 'general-purpose', description: `Mail ${mail} about Ali bin Abu` }, lines: [agentLine(OTHER_ID, 'bm1', 'claude-sonnet-5-5', '2026-10-10T00:11:00Z', U(1, 1))] },
+    ]);
+    stop(dir, tp);
+    const runs = runsOf(dir);
+    expect(runs).toHaveLength(2);
+    for (const r of runs) { expect(r.process).toBeUndefined(); expect(r.task).toBeUndefined(); expect(r.trigger).toBeUndefined(); }
+    for (const s of ['ali', 'Ali', 'example', 'Mail', 'esc:other']) expect(spooled(dir)).not.toContain(s);
+  });
+
+  it('writes a helper agent\'s record again only when it changed, so many stops do not grow the log', () => {
+    const { dir } = makeRepo();
+    const first = agentLine(REAL_ID, 'am1', 'claude-sonnet-5-5', '2026-10-10T00:10:00Z', U(5, 5));
+    const { tp, sub } = agentSession(dir, [{ id: REAL_ID, meta: { description: '[check T-2]' }, lines: [first] }]);
+    stop(dir, tp); stop(dir, tp); stop(dir, tp, 'SessionEnd');
+    expect(runsOf(dir)).toHaveLength(1);
+    // New work by the agent is a new record, and the one after that changes nothing again.
+    writeFileSync(path.join(sub, `agent-${REAL_ID}.jsonl`), [first, agentLine(REAL_ID, 'am2', 'claude-sonnet-5-5', '2026-10-10T00:15:00Z', U(5, 5))].join('\n') + '\n');
+    stop(dir, tp); stop(dir, tp);
+    const runs = runsOf(dir);
+    expect(runs).toHaveLength(2);
+    expect(runs.map((r) => r.tokens['claude-sonnet-5-5'].messages)).toEqual([1, 2]);
+    expect(runs[1]).toMatchObject({ process: 'check', task: 'T-2', last: '2026-10-10T00:15:00.000Z' });
+    // The record follows the Usage line of its own stop.
+    const order = spoolLines(dir).map((l) => l.event).filter((e) => e === 'Usage' || e === 'AgentRun');
+    expect(order.slice(0, 2)).toEqual(['Usage', 'AgentRun']);
+  });
+
+  it('keeps a session\'s own totals as they were: helper agents\' tokens are a breakdown, not an addition', () => {
+    const { dir } = makeRepo();
+    const { tp } = agentSession(dir, [
+      { id: REAL_ID, lines: [agentLine(REAL_ID, 'am1', 'claude-opus-5-5', '2026-10-10T00:10:00Z', U(100, 1000))] },
+      { id: OTHER_ID, lines: [agentLine(OTHER_ID, 'bm1', 'claude-opus-5-5', '2026-10-10T00:20:00Z', U(200, 2000))] },
+    ]);
+    stop(dir, tp);
+    const usage = spoolLines(dir).find((l) => l.event === 'Usage');
+    // Worked out by hand: main 10 in / 20 out, agents 100/1000 and 200/2000 in the same model, each message once.
+    expect(usage.tokens['claude-opus-5-5']).toMatchObject({ messages: 3, input: 310, output: 3020 });
+    const parts = runsOf(dir).map((r) => r.tokens['claude-opus-5-5']);
+    expect(parts.map((t) => [t.input, t.output])).toEqual([[100, 1000], [200, 2000]]);
+    // No checkpoint, so the transcript prices it: 310 in at 4 and 3020 out at 20 per million.
+    expect(usage.costBasis).toBe('transcript-only');
+    expect(usage.costUSD).toBe('0.06164000');
+  });
+
+  it('records the rest when one helper agent\'s files cannot be read', () => {
+    const { dir } = makeRepo();
+    const THIRD = fake('a', '5d90c1e7b', '3f2a604');
+    const { tp, sub } = agentSession(dir, [
+      { id: REAL_ID, rawMeta: '{ not json', lines: [agentLine(REAL_ID, 'am1', 'claude-sonnet-5-5', '2026-10-10T00:10:00Z', U(1, 1))] }, // metadata unreadable
+      { id: THIRD, meta: { description: '[fix T-3]' }, lines: [agentLine(THIRD, 'cm1', 'claude-sonnet-5-5', '2026-10-10T00:12:00Z', U(2, 2))] },
+    ]);
+    mkdirSync(path.join(sub, `agent-${OTHER_ID}.jsonl`)); // a transcript that cannot be read as a file
+    mkdirSync(path.join(sub, `agent-${OTHER_ID}.meta.json`)); // and metadata that is not a file
+    expect(stop(dir, tp).status).toBe(0);
+    expect(spoolLines(dir).filter((l) => l.event === 'Usage')).toHaveLength(1);
+    const runs = runsOf(dir);
+    expect(runs.map((r) => r.agentId).sort()).toEqual([REAL_ID, THIRD].sort());
+    expect(runs.find((r) => r.agentId === REAL_ID).process).toBeUndefined(); // no metadata, no process
+    expect(runs.find((r) => r.agentId === THIRD)).toMatchObject({ process: 'fix', task: 'T-3' });
+  });
+
   it('writes to the spool, which git ignores, so the working tree stays clean', () => {
     const dir = freshDir();
     hook(dir, { hook_event_name: 'PostToolUse', session_id: 's1', tool_name: 'Bash', tool_input: { description: 'Run tests' } });
@@ -553,6 +720,44 @@ describe('flushing the log for a commit', () => {
     runFlush(dir);
     expect(out()).toHaveLength(2); // a new file, so two branches never edit the same one
   });
+
+  it('keeps only known fields of a helper agent\'s record and an outcome when flushing, and drops one with no id or required field', () => {
+    const dir = freshDir();
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    const id = fake('a', '00b3df238', 'a57b79d');
+    const base = { ts: '2026-10-10T00:00:00Z', session: 'session_01X' };
+    const tokens = { 'claude-sonnet-5-5': { messages: 2, input: 5, output: 6, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, costUSD: '0.00000100', extra: 1 } };
+    const rows = [
+      { ...base, event: 'AgentRun', agentId: id, agentType: 'general-purpose', requested: 'opus', process: 'build', task: 'T-1', trigger: 'suite_failed', shadow: true, first: '2026-10-10T00:01:00+08:00', last: '2026-10-10T00:02:00Z', tokens, sig: '2|x', description: 'free text' },
+      { ...base, event: 'AgentRun', agentId: id, requested: 'gpt', process: 'deploy', task: 'not a task!', trigger: 'other', shadow: 'yes', first: 'soon', tokens: {} },
+      { ...base, event: 'AgentRun', agentId: id, process: 'build', task: fake('p', '60123456789'), tokens: {} }, // a task id that is a phone number's worth of digits
+      { ...base, event: 'Outcome', task: fake('p', '60123456789'), process: 'review', result: 'passed' },
+      { ...base, event: 'Task', action: 'start', id: fake('p', '60123456789'), title: 'x' },
+      { ...base, event: 'AgentRun', agentType: 'general-purpose', process: 'build' }, // no id
+      { ...base, event: 'AgentRun', agentId: '[redacted]', process: 'build' }, // not an id
+      { ...base, event: 'AgentRun', agentId: id, process: 'review', task: 'T-1', shadow: true, tokens: {} }, // a shadow review keeps its flag
+      { ...base, event: 'Outcome', task: 'T-1', process: 'build', result: 'failed', agent: id, shadowOf: id }, // only a review shadows another
+      { ...base, event: 'Outcome', task: 'T-1', process: 'review', result: 'failed', agent: id, shadowOf: id, round: 2, note: 'free text' },
+      { ...base, event: 'Outcome', task: 'T-1', process: 'review', result: 'passed', round: 100 },
+      { ...base, event: 'Outcome', task: 'T-1', process: 'deploy', result: 'passed' }, // not a process
+      { ...base, event: 'Outcome', task: 'T-1', process: 'review', result: 'maybe' }, // not a result
+      { ...base, event: 'Outcome', process: 'review', result: 'passed' }, // no task
+    ];
+    writeFileSync(path.join(dir, 'devlog/.spool/s1.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    expect(runFlush(dir).status).toBe(0);
+    const out = readdirSync(path.join(dir, 'devlog/activity'));
+    const got = readFileSync(path.join(dir, 'devlog/activity', out[0]!), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const t = { 'claude-sonnet-5-5': { messages: 2, input: 5, output: 6, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, costUSD: '0.00000100' } };
+    expect(got).toEqual([
+      { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'AgentRun', agentId: id, agentType: 'general-purpose', requested: 'opus', process: 'build', task: 'T-1', trigger: 'suite_failed', first: '2026-10-09T16:01:00.000Z', last: '2026-10-10T00:02:00.000Z', tokens: t }, // shadow dropped: it is a build
+      { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'AgentRun', agentId: id, tokens: {} },
+      { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'AgentRun', agentId: id, process: 'build', tokens: {} }, // its task id was dropped, the record kept
+      { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'AgentRun', agentId: id, process: 'review', task: 'T-1', shadow: true, tokens: {} },
+      { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'Outcome', task: 'T-1', process: 'build', result: 'failed', agent: id },
+      { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'Outcome', task: 'T-1', process: 'review', result: 'failed', agent: id, shadowOf: id, round: 2 },
+      { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'Outcome', task: 'T-1', process: 'review', result: 'passed' },
+    ]);
+  });
 });
 
 describe('dashboard report', () => {
@@ -588,7 +793,7 @@ describe('dashboard report', () => {
 /** A throwaway copy of the tooling in its own git repository, so reports run on known data. */
 function makeRepo(config?: (c: Record<string, any>) => void) {
   const dir = freshDir('repo');
-  for (const f of ['.claude/hooks/devlog.mjs', 'scripts/devlog-flush.mjs', 'scripts/devlog-report.mjs', 'scripts/devlog-task.mjs', 'scripts/devlog-secrets.mjs', 'devlog/lessons.md', 'devlog/dashboard.html']) {
+  for (const f of ['.claude/hooks/devlog.mjs', 'scripts/devlog-flush.mjs', 'scripts/devlog-report.mjs', 'scripts/devlog-task.mjs', 'scripts/devlog-secrets.mjs', 'scripts/devlog-throttle.mjs', 'devlog/lessons.md', 'devlog/dashboard.html']) {
     mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
     writeFileSync(path.join(dir, f), read(f));
   }
@@ -1313,4 +1518,519 @@ export const QUESTIONS = ['Not an open item', 'Nor this'];
     for (const token of ['--d3-purple: #5D3FD3', '--d3-red: #C8102E', '--ink-muted: #6B6C70', '"Source Sans 3"']) expect(template).toContain(token);
     expect(template).not.toMatch(/text-transform:\s*(uppercase|capitalize)/); // sentence case only
   });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Model routing by process (ADR-0014): what Claude Code recorded about each helper agent, what the session declared, and
+// the owner's escalation threshold. Timestamps are fixed, so nothing here depends on when the suite runs (lesson L-037).
+describe('routing and escalation', () => {
+  type Line = Record<string, unknown>;
+  const T0 = Date.parse('2026-10-05T00:00:00Z');
+  const iso = (min: number) => new Date(T0 + min * 60_000).toISOString();
+  const OPUS = 'claude-opus-5-5';
+  const SONNET = 'claude-sonnet-5-5';
+  const HAIKU = 'claude-haiku-5-5';
+  const tok = (output: number, input = 0, extra: Record<string, number> = {}) => ({ messages: 1, input, output, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, ...extra });
+  const task = (id: string, start: number, done?: number): Line[] => [
+    { ts: iso(start), event: 'Task', action: 'start', id, title: `Work ${id}`, status: 'in_progress' },
+    ...(done === undefined ? [] : [{ ts: iso(done), event: 'Task', action: 'done', id, status: 'done', progress: 100 }]),
+  ];
+  const agent = (agentId: string, process: string, taskId: string, model: string, min: number, extra: Line = {}): Line => ({
+    ts: iso(min + 2), event: 'AgentRun', agentId, agentType: 'general-purpose', requested: 'sonnet', process, task: taskId,
+    first: iso(min), last: iso(min + 1), tokens: { [model]: tok(1000) }, ...extra,
+  });
+  const outcome = (min: number, o: Line): Line => ({ ts: iso(min), event: 'Outcome', ...o });
+  const tool = (min: number, o: Line): Line => ({ ts: iso(min), event: 'PostToolUse', tool: 'Bash', target: 'Run tests', ...o });
+  const testRun = (min: number, ok: boolean, extra: Line = {}): Line => tool(min, { event: ok ? 'PostToolUse' : 'PostToolUseFailure', kind: 'test', ...(ok ? {} : { failure: 'exit 1' }), ...extra });
+  const seed = (dir: string, lines: Line[]) => {
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), lines.map((l) => JSON.stringify({ session: 'session_01A', ...l })).join('\n') + '\n');
+  };
+  const reportOf = (dir: string) => {
+    const out = path.join(dir, 'r.json');
+    const r = run(dir, 'scripts/devlog-report.mjs', ['--json', out]);
+    expect(r.status, r.stderr).toBe(0);
+    return JSON.parse(readFileSync(out, 'utf8'));
+  };
+  const row = (r: any, process: string) => r.routing.processes.find((p: { process: string }) => p.process === process);
+  const check = (r: any) => r.health.checks.find((c: { name: string }) => c.name === 'Routing');
+  const attention = (r: any) => r.attention.map((a: { text: string }) => a.text).join('\n');
+
+  it('counts an item as escalated only when a later agent of the same process ran above the floor it started at, by the model Claude Code recorded', () => {
+    const { dir } = makeRepo();
+    seed(dir, [
+      ...task('T-A', 0, 100), agent('a1', 'build', 'T-A', SONNET, 1), agent('a2', 'build', 'T-A', OPUS, 10, { trigger: 'suite_failed' }), testRun(5, false),
+      ...task('T-B', 0, 110), agent('b1', 'build', 'T-B', SONNET, 2),
+      // Started above the floor: counted apart, never as an escalation.
+      ...task('T-C', 0, 120), agent('c1', 'build', 'T-C', OPUS, 3, { requested: 'opus' }), agent('c2', 'build', 'T-C', OPUS, 12),
+      // Asked for opus the second time and was served sonnet: the record is the served model.
+      ...task('T-E', 0, 130), agent('e1', 'build', 'T-E', SONNET, 4), agent('e2', 'build', 'T-E', SONNET, 14, { requested: 'opus' }),
+    ]);
+    const r = reportOf(dir);
+    expect(row(r, 'build')).toMatchObject({
+      items: 4, startedAtFloor: 3, startedAbove: 1, startedBelow: 0, escalatedItems: 1, finishedAtFloor: { n: 2, of: 4 },
+      escalation: { state: 'collecting', escalated: 1, window: 3, need: 20 },
+    });
+    expect(r.routing.log).toEqual([expect.objectContaining({ task: 'T-A', round: 2, fromModel: SONNET, toModel: OPUS, fromTier: 'mid', toTier: 'high', trigger: 'suite_failed' })]);
+    expect(r.routing.log).toHaveLength(1);
+  }, REPO_TIMEOUT);
+
+  it('turns amber only past the owner\'s threshold over 20 finished items, and is collecting before that', () => {
+    // N finished items that started on Sonnet (the build floor); the listed ones then went to Opus.
+    const scenario = (total: number, climbed: number[]) => {
+      const { dir } = makeRepo();
+      seed(dir, Array.from({ length: total }, (_, i) => [
+        ...task(`T-${i}`, 0, 1000 + i), agent(`s${i}`, 'build', `T-${i}`, SONNET, 1 + i * 10),
+        ...(climbed.includes(i) ? [agent(`o${i}`, 'build', `T-${i}`, OPUS, 5 + i * 10, { trigger: 'suite_failed' })] : []),
+      ]).flat());
+      return reportOf(dir);
+    };
+    const six = scenario(20, [0, 1, 2, 3, 4, 5]); // 600 is not over 30% of 20 (600)
+    expect(row(six, 'build').escalation).toMatchObject({ state: 'green', escalated: 6, window: 20, need: 20, overPercent: 30 });
+    expect(check(six)).toMatchObject({ state: 'green' });
+    const seven = scenario(20, [0, 1, 2, 3, 4, 5, 6]); // 700 is over 600
+    expect(row(seven, 'build').escalation).toMatchObject({ state: 'amber', escalated: 7, window: 20 });
+    expect(check(seven)).toMatchObject({ state: 'amber' });
+    expect(seven.routing.state).toBe('amber');
+    expect(attention(seven)).toContain('Build: 7 of the last 20 items that started at or escalated from the floor climbed above it, over 30%: the floor may be too low; routing changes only on your decision.');
+    const few = scenario(19, [0, 1, 2, 3, 4, 5, 6]); // seven of 19 would be 36%, but 19 items is too few to judge
+    expect(row(few, 'build').escalation).toMatchObject({ state: 'collecting', escalated: 7, window: 19, need: 20 });
+    expect(check(few)).toMatchObject({ state: 'green' });
+    expect(check(few).detail).toContain('collecting 19 of 20');
+    expect(attention(few)).not.toContain('climbed above it');
+    // Only the last 20 finished items count: the oldest climbed, so the window holds six.
+    const older = scenario(21, [0, 1, 2, 3, 4, 5, 6]);
+    expect(row(older, 'build').escalation).toMatchObject({ state: 'green', escalated: 6, window: 20 });
+  }, 30_000);
+
+  it('shows a trigger as the session declared it, and says whether a record supports it', () => {
+    const { dir } = makeRepo();
+    // Each task has a window of its own, so one task's tool records never support another's trigger.
+    const climb = (id: string, base: number, trigger?: string) => [
+      ...task(id, base, base + 90), agent(`${id}-1`, 'build', id, SONNET, base + 1), agent(`${id}-2`, 'build', id, OPUS, base + 20, trigger ? { trigger } : {}),
+    ];
+    seed(dir, [
+      ...climb('T-S1', 0, 'suite_failed'), testRun(10, false),
+      ...climb('T-S2', 100, 'suite_failed'), testRun(110, false, { expectRed: true }), testRun(111, true), // a run expected to fail, and one that passed
+      ...climb('T-D1', 200, 'deny_path_touched'), tool(210, { tool: 'Edit', target: 'src/money.ts' }),
+      ...climb('T-D2', 300, 'deny_path_touched'), tool(310, { tool: 'Edit', target: 'src/other.ts' }),
+      ...climb('T-R', 400, 'review_failed'), outcome(410, { task: 'T-R', process: 'review', result: 'failed', round: 1 }),
+      ...climb('T-B', 500, 'builder_blocked'), outcome(510, { task: 'T-B', process: 'review', result: 'failed', round: 1 }), // a review does not block a builder
+      ...climb('T-N', 600),
+      ...task('T-X', 700, 790), agent('X-1', 'build', 'T-X', SONNET, 701), agent('X-2', 'build', 'T-X', SONNET, 720, { trigger: 'builder_blocked' }),
+    ]);
+    const r = reportOf(dir);
+    const log = new Map<string, any>(r.routing.log.map((c: { task: string }) => [c.task, c]));
+    expect([...log.keys()].sort()).toEqual(['T-B', 'T-D1', 'T-D2', 'T-N', 'T-R', 'T-S1', 'T-S2']);
+    expect(Object.fromEntries([...log].map(([t, c]) => [t, [c.trigger, c.support]]))).toEqual({
+      'T-S1': ['suite_failed', 'recorded'], 'T-S2': ['suite_failed', 'none'],
+      'T-D1': ['deny_path_touched', 'recorded'], 'T-D2': ['deny_path_touched', 'none'],
+      'T-R': ['review_failed', 'declared'], 'T-B': ['builder_blocked', 'none'], 'T-N': [null, 'none'],
+    });
+    expect(r.routing.consistency).toMatchObject({ climbsWithoutTrigger: 1, triggersWithoutClimb: 1, unsupported: 3, unknownTasks: 0, tagged: 16, untagged: 0 });
+    expect(row(r, 'build').topTriggers.find((t: { trigger: string }) => t.trigger === 'not declared')).toEqual({ trigger: 'not declared', n: 1 });
+  }, REPO_TIMEOUT);
+
+  it('says unavailable, not zero, for a process no helper agent has recorded, and counts helper agents from before recording began', () => {
+    const { dir } = makeRepo();
+    const start = (min: number, agentId: string): Line => ({ ts: iso(min), event: 'SubagentStart', agentType: 'general-purpose', agentId });
+    seed(dir, [start(0, 'p1'), start(1, 'p2'), start(2, 'p3'), ...task('T-A', 5), agent('a1', 'build', 'T-A', SONNET, 10), start(15, 'p4')]);
+    const r = reportOf(dir);
+    // p4 started after the first record but has none of its own, and p1 to p3 started before: all four are unrecorded.
+    expect(r.routing).toMatchObject({ since: iso(12), agentsBefore: 4, state: 'green' });
+    expect(row(r, 'build')).toMatchObject({ recorded: true, items: 1 });
+    expect(row(r, 'fix')).toMatchObject({
+      recorded: false, items: null, startedAtFloor: null, startedAbove: null, finishedAtFloor: null, tokensByTier: null, topTriggers: null, cost: null,
+      escalation: { state: 'unavailable', reason: 'not_recorded' },
+    });
+    expect(row(r, 'plan')).toMatchObject({ items: null, escalation: { state: 'not_laddered' } });
+    // Before any agent was recorded: everything is unknown and the view is off, never green.
+    const empty = makeRepo();
+    seed(empty.dir, [start(0, 'p1'), start(1, 'p2')]);
+    const e = reportOf(empty.dir);
+    expect(e.routing).toMatchObject({ since: null, agentsBefore: 2, state: 'off' });
+    expect(e.routing.processes.every((p: { items: unknown }) => p.items === null)).toBe(true);
+    expect(check(e)).toMatchObject({ state: 'off' });
+  }, REPO_TIMEOUT);
+
+  it('prices each process\'s tokens exactly and never adds them to the session\'s spend', () => {
+    const { dir } = makeRepo();
+    // Worked by hand at the configured prices (USD per million tokens). Sonnet: input 2, output 10, cache read 0.20,
+    // cache write 2.50 (5 minutes) and 4 (1 hour). Opus: input 4, output 20.
+    // Build agent 1 on Sonnet: 123,456 in = 0.246912; 654,321 out = 6.54321; 1,000,000 read = 0.20; 400,000 w5m = 1.00;
+    // 250,000 w1h = 1.00; total 8.990122. Build agent 2: 1,000,000 in + 1,000,000 out = 2 + 10 = 12.
+    // Both: 20.990122. Median of their token totals (2,427,777 and 2,000,000), the lower middle: 2,000,000.
+    // Review on Opus: 1,000,000 in + 100,000 out = 4 + 2 = 6.00. Untagged on Opus: 50,000 out = 1.00.
+    // The session also holds 1,000,000 Sonnet input (2.00) and 1,000,000 Opus output (20.00) of its own.
+    seed(dir, [
+      ...task('T-A', 0),
+      agent('b1', 'build', 'T-A', SONNET, 1, { tokens: { [SONNET]: tok(654321, 123456, { cacheRead: 1_000_000, cacheWrite5m: 400_000, cacheWrite1h: 250_000 }) } }),
+      agent('b2', 'build', 'T-A', SONNET, 5, { tokens: { [SONNET]: tok(1_000_000, 1_000_000) } }),
+      agent('r1', 'review', 'T-A', OPUS, 9, { tokens: { [OPUS]: tok(100_000, 1_000_000) } }),
+      agent('u1', 'build', 'T-A', OPUS, 12, { process: undefined, task: undefined, tokens: { [OPUS]: tok(50_000) } }),
+      agent('c1', 'check', 'T-A', 'claude-unknown-9', 15),
+      agent('c2', 'check', 'T-A', HAIKU, 17),
+      { ts: iso(30), event: 'Usage', at: 'Stop', costUSD: '50.00000000', costBasis: 'checkpoint+since', tokens: {
+        [SONNET]: tok(1_654_321, 2_123_456, { messages: 3, cacheRead: 1_000_000, cacheWrite5m: 400_000, cacheWrite1h: 250_000 }),
+        [OPUS]: tok(1_150_000, 1_000_000, { messages: 3 }),
+      } },
+    ]);
+    const r = reportOf(dir);
+    const rows = Object.fromEntries(r.processCost.map((x: { process: string; model: string }) => [`${x.process}|${x.model}`, x]));
+    expect(rows[`build|${SONNET}`]).toEqual({ process: 'build', model: SONNET, agents: 2, tokens: 4_427_777, medianTokens: 2_000_000, cost: { usd: '20.99012200' } });
+    expect(rows[`review|${OPUS}`]).toEqual({ process: 'review', model: OPUS, agents: 1, tokens: 1_100_000, medianTokens: 1_100_000, cost: { usd: '6.00000000' } });
+    expect(rows[`not recorded|${OPUS}`]).toEqual({ process: 'not recorded', model: OPUS, agents: 1, tokens: 50_000, medianTokens: 50_000, cost: { usd: '1.00000000' } });
+    // A model with no price is unavailable, not free.
+    expect(rows['check|claude-unknown-9']).toMatchObject({ cost: null });
+    // The main session is what the session totals hold beyond its helper agents; the exact remainders are priced.
+    expect(rows[`main session|${SONNET}`]).toMatchObject({ tokens: 1_000_000, cost: { usd: '2.00000000' } });
+    expect(rows[`main session|${OPUS}`]).toMatchObject({ tokens: 1_000_000, cost: { usd: '20.00000000' } });
+    // Helper agents with more tokens than their session recorded (Haiku, unknown model): unavailable, never clamped to zero.
+    expect(rows[`main session|${HAIKU}`]).toMatchObject({ tokens: null, cost: null });
+    expect(row(r, 'build').cost).toEqual({ usd: '20.99012200' });
+    expect(row(r, 'check').cost).toBeNull();
+    expect(r.economics.spend.usd).toBe('50.00000000'); // Claude Code's own figure for the session, unchanged by the breakdown
+  }, REPO_TIMEOUT);
+
+  it('keeps every helper agent\'s record from one stop, not just the first', () => {
+    const { dir } = makeRepo();
+    // One Stop writes one record per helper agent, all at the same moment.
+    seed(dir, [
+      ...task('T-A', 0),
+      agent('a1', 'build', 'T-A', SONNET, 1, { ts: iso(5) }), agent('a2', 'build', 'T-A', SONNET, 2, { ts: iso(5) }), agent('a3', 'fix', 'T-A', SONNET, 3, { ts: iso(5) }),
+      outcome(6, { task: 'T-A', process: 'review', result: 'passed', agent: 'a1', round: 1 }), outcome(6, { task: 'T-A', process: 'review', result: 'failed', agent: 'a2', round: 1 }),
+    ]);
+    const r = reportOf(dir);
+    expect(r.routing.agents.map((a: { agentId: string }) => a.agentId).sort()).toEqual(['a1', 'a2', 'a3']);
+    expect(row(r, 'build')).toMatchObject({ agents: 2 });
+    expect(row(r, 'review').firstPass).toEqual({ n: 1, of: 2 });
+  }, REPO_TIMEOUT);
+
+  it('records a review outcome only for a known task, process and result, and refuses anything else', () => {
+    const { dir } = makeRepo();
+    const task = (...a: string[]) => run(dir, 'scripts/devlog-task.mjs', a);
+    const outcomes = () => spoolLines(dir).filter((l) => l.event === 'Outcome');
+    const refused = (args: string[], message: string) => {
+      const r = task(...args);
+      expect([r.status, r.stderr]).toEqual([1, expect.stringContaining(message)]);
+    };
+    refused(['start', fake('p', '60123456789'), '--title', 'x'], 'Give a task id');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed'], "T-1 is not on this branch's board. Start it first");
+    expect(task('start', 'T-1', '--title', 'Routing work').status).toBe(0);
+    refused(['outcome', 'T-1', '--process', 'deploy', '--result', 'passed'], '--process must be one of: plan, review, security-review, build, fix, check.');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'ok'], '--result must be one of: passed, failed.');
+    refused(['outcome', 'T-1', '--process', 'review'], 'outcome needs --result.');
+    refused(['outcome', 'T-1', '--result', 'passed'], 'outcome needs --process.');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed', '--agent', 'not an id'], '--agent must be a helper agent\'s id');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed', '--agent', 'x'.repeat(41)], '--agent must be a helper agent\'s id');
+    refused(['outcome', 'T-1', '--process', 'build', '--result', 'passed', '--agent', 's1', '--shadow-of', 'a1'], '--shadow-of needs --process review and --agent.');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed', '--shadow-of', 'a1'], '--shadow-of needs --process review and --agent.');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed', '--round', '0'], '--round must be a whole number from 1 to 99.');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed', '--escalate', 'yes'], 'Unknown option: --escalate.');
+    expect(outcomes()).toEqual([]); // every refusal recorded nothing
+    expect(task('outcome', 'T-1', '--process', 'review', '--result', 'passed', '--agent', 'a1', '--round', '1').status).toBe(0);
+    expect(task('outcome', 'T-1', '--process', 'review', '--result', 'failed', '--agent', 's1', '--shadow-of', 'a1').status).toBe(0);
+    expect(outcomes()).toEqual([
+      expect.objectContaining({ task: 'T-1', process: 'review', result: 'passed', agent: 'a1', round: 1 }),
+      expect.objectContaining({ task: 'T-1', process: 'review', result: 'failed', agent: 's1', shadowOf: 'a1' }),
+    ]);
+  }, 30_000);
+
+  it('reads the ladder and thresholds from control-tower.json, every process and trigger in the code\'s lists, and calls a malformed threshold unavailable', async () => {
+    // @ts-expect-error a plain ES module with no type declarations
+    const { PROCESSES, TRIGGERS } = await import('../.claude/hooks/devlog.mjs');
+    const cfg = JSON.parse(read('devlog/control-tower.json'));
+    expect(Object.keys(cfg.routing.processes).sort()).toEqual([...PROCESSES].sort());
+    expect(Object.keys(cfg.routing.triggers).sort()).toEqual([...TRIGGERS].sort());
+    expect(cfg.routing.escalationAlert).toMatchObject({ overPercent: 30, items: 20 });
+    // Four finished items, two of them climbed: 2 of 4 is 50%.
+    const lines = Array.from({ length: 4 }, (_, i) => [
+      ...task(`T-${i}`, 0, 100 + i), agent(`s${i}`, 'build', `T-${i}`, SONNET, 1 + i * 10),
+      ...(i < 2 ? [agent(`o${i}`, 'build', `T-${i}`, OPUS, 5 + i * 10)] : []),
+    ]).flat();
+    const withAlert = (alert: unknown) => { const r = makeRepo((c) => { c.routing.escalationAlert = alert; }); seed(r.dir, lines); return reportOf(r.dir); };
+    // The threshold in the file decides: the same four items are green at 50% and amber at 40%, and 3 items are too few for 4.
+    expect(row(withAlert({ overPercent: 50, items: 4 }), 'build').escalation).toMatchObject({ state: 'green', escalated: 2, need: 4, overPercent: 50 });
+    expect(row(withAlert({ overPercent: 40, items: 4 }), 'build').escalation).toMatchObject({ state: 'amber', escalated: 2, need: 4, overPercent: 40 });
+    expect(row(withAlert({ overPercent: 40, items: 5 }), 'build').escalation).toMatchObject({ state: 'collecting', window: 4, need: 5 });
+    // A threshold that does not parse is unavailable, never 30 and 20 (lesson L-034).
+    for (const bad of [{ overPercent: '30', items: 20 }, { overPercent: 30.5, items: 20 }, { overPercent: 0, items: 20 }, { overPercent: 30, items: 0 }, { overPercent: 130, items: 20 }, { items: 20 }, null]) {
+      const r = withAlert(bad);
+      expect(r.routing.state, JSON.stringify(bad)).toBe('unavailable');
+      expect(row(r, 'build').escalation).toMatchObject({ state: 'unavailable', reason: 'config' });
+      expect(check(r)).toMatchObject({ state: 'unavailable' });
+      expect(attention(r)).toContain('The routing view is unavailable');
+    }
+    // A process missing from the file, or a floor above its ceiling, is unavailable too.
+    for (const edit of [(c: any) => { delete c.routing.processes.fix; }, (c: any) => { c.routing.processes.build.floor = 'high'; c.routing.processes.build.ceiling = 'low'; }, (c: any) => { delete c.routing.triggers.suite_failed; }]) {
+      const r = makeRepo(edit); seed(r.dir, lines);
+      const out = reportOf(r.dir);
+      expect(out.routing).toMatchObject({ state: 'unavailable', processes: [] });
+      expect(out.routing.error).toEqual(expect.any(String));
+    }
+  }, 60_000);
+
+  it('counts shadow reviews against the review they shadow: agreement, misses and false alarms', () => {
+    const { dir } = makeRepo((c) => { c.routing.shadowReview = { enabled: true, every: 2, excludes: ['security-review'] }; });
+    const primary = (id: string, taskId: string, min: number) => agent(id, 'review', taskId, OPUS, min, { requested: 'opus' });
+    const shadow = (id: string, taskId: string, min: number) => agent(id, 'review', taskId, SONNET, min, { shadow: true, tokens: { [SONNET]: tok(500, 100) } });
+    seed(dir, [
+      ...['T-1', 'T-2', 'T-3', 'T-4', 'T-5'].flatMap((t, i) => [...task(t, 0, 500), primary(`r${i + 1}`, t, 1 + i * 10), shadow(`s${i + 1}`, t, 5 + i * 10)]),
+      agent('x1', 'security-review', 'T-1', OPUS, 60), // excluded from the sample by the owner's setting
+      // Primary verdicts: passed, failed, passed, failed, failed. Shadow verdicts: passed, passed, failed, failed, passed.
+      ...['passed', 'failed', 'passed', 'failed', 'failed'].map((v, i) => outcome(100 + i, { task: `T-${i + 1}`, process: 'review', result: v, agent: `r${i + 1}`, round: 1 })),
+      ...['passed', 'passed', 'failed', 'failed', 'passed'].map((v, i) => outcome(110 + i, { task: `T-${i + 1}`, process: 'review', result: v, agent: `s${i + 1}`, shadowOf: `r${i + 1}` })),
+    ]);
+    const r = reportOf(dir);
+    // Agree on tasks 1 and 4; misses on tasks 2 and 5 (the primary failed them, the cheaper tier passed them); a false
+    // alarm on task 3 (the primary passed it, the cheaper tier failed it). Five primary reviews at one in 2 make 2 due.
+    expect(r.routing.shadow).toEqual({ enabled: true, every: 2, error: null, sample: 5, agree: 2, misses: 2, falseAlarms: 1, due: 2, done: 5, tokens: 3000 });
+    // The shadow agents are not primary reviews: they do not count as items or as first-pass reviews.
+    expect(row(r, 'review')).toMatchObject({ items: 5, firstPass: { n: 2, of: 5 } });
+  }, REPO_TIMEOUT);
+
+  // The audit on its own, at a clock the test controls (lesson L-037): the lines as the report would read them.
+  const auditOf = async (lines: Line[], now = '2026-10-21T12:00:00Z', edit?: (c: any) => void) => {
+    // @ts-expect-error a plain ES module with no type declarations
+    const mod = await import('../scripts/devlog-report.mjs');
+    const cfg = JSON.parse(read('devlog/control-tower.json'));
+    edit?.(cfg);
+    const events = lines.map((l) => ({ session: 'session_01A', ...l })) as any[];
+    return mod.routingAudit({
+      runs: mod.agentRuns(events, cfg), outcomes: events.filter((e) => e.event === 'Outcome'), toolEvents: events.filter((e) => e.tool),
+      subagentStarts: events.filter((e) => e.event === 'SubagentStart'), board: mod.buildBoard(events, new Date(now)), cfg, now: new Date(now),
+    });
+  };
+  const auditRow = (a: any, process: string) => a.processes.find((p: { process: string }) => p.process === process);
+
+  it('counts an honest escalation from one stage into the next as a climb, not as a start above the floor or a trigger with no climb', () => {
+    const { dir } = makeRepo();
+    seed(dir, [
+      // ADR-0014's own case: built on Sonnet, the review failed, the fix runs on Opus and says why.
+      ...task('T-1', 0, 200), agent('b1', 'build', 'T-1', SONNET, 1), outcome(10, { task: 'T-1', process: 'review', result: 'failed', round: 1 }),
+      agent('rv1', 'review', 'T-1', OPUS, 12), // the Opus review in between never climbs, so the fix reads from the Sonnet build
+      agent('f1', 'fix', 'T-1', OPUS, 20, { trigger: 'review_failed' }),
+      // The same, with a failed test run between the build and the fix (recorded), and with nothing to support it.
+      ...task('T-3', 0, 210), agent('b3', 'build', 'T-3', SONNET, 31), testRun(35, false), agent('f3', 'fix', 'T-3', OPUS, 40, { trigger: 'suite_failed' }),
+      ...task('T-4', 0, 220), agent('b4', 'build', 'T-4', SONNET, 51), agent('f4', 'fix', 'T-4', OPUS, 60, { trigger: 'suite_failed' }),
+      // No trigger declared: still a start above the floor, counted apart.
+      ...task('T-2', 0, 230), agent('f2', 'fix', 'T-2', OPUS, 70),
+    ]);
+    const r = reportOf(dir);
+    expect(row(r, 'fix')).toMatchObject({ items: 4, startedAtFloor: 0, startedAbove: 1, enteredByEscalation: 3, escalatedItems: 3, aboveCeiling: 0 });
+    expect(row(r, 'fix').escalation).toMatchObject({ state: 'collecting', escalated: 3, window: 3, need: 20 });
+    expect(r.routing.log.map((c: any) => [c.task, c.process, c.fromModel, c.toModel, c.trigger, c.support]).sort()).toEqual([
+      ['T-1', 'fix', SONNET, OPUS, 'review_failed', 'declared'], // from the build (mid to high), not from the review (high to high)
+      ['T-3', 'fix', SONNET, OPUS, 'suite_failed', 'recorded'],
+      ['T-4', 'fix', SONNET, OPUS, 'suite_failed', 'none'],
+    ]);
+    expect(r.routing.log.find((c: any) => c.task === 'T-1')).toMatchObject({ fromTier: 'mid', toTier: 'high' });
+    expect(r.routing.consistency).toMatchObject({ climbsWithoutTrigger: 0, triggersWithoutClimb: 0, unsupported: 1 });
+    expect(attention(r)).toContain('1 fix item(s) started above their floor tier');
+    expect(attention(r)).not.toContain('3 fix item(s)');
+  }, REPO_TIMEOUT);
+
+  it('never counts a declared trigger alone as a climb: the agent before it must have run on a lower tier', () => {
+    const { dir } = makeRepo();
+    seed(dir, [
+      // (a) built on Opus with no trigger, then fixed on Opus with a trigger: nothing climbed.
+      ...task('T-A', 0, 100), agent('a1', 'build', 'T-A', OPUS, 1), agent('a2', 'fix', 'T-A', OPUS, 10, { trigger: 'review_failed' }),
+      // (b) the item's very first agent is on Opus and claims an escalation: there was nothing to climb from.
+      ...task('T-B', 0, 110), agent('b1', 'build', 'T-B', OPUS, 20, { trigger: 'review_failed' }),
+    ]);
+    const r = reportOf(dir);
+    // (a) is carried: the item had already reached Opus, so the fix holds that tier. (b) is a plain start above the floor.
+    expect(row(r, 'fix')).toMatchObject({ items: 1, startedAbove: 0, carried: 1, enteredByEscalation: 0, escalatedItems: 0 });
+    expect(row(r, 'build')).toMatchObject({ items: 2, startedAbove: 2, carried: 0, enteredByEscalation: 0, escalatedItems: 0 });
+    expect(row(r, 'fix').escalation).toMatchObject({ escalated: 0, window: 0 });
+    expect(r.routing.log).toEqual([]);
+    expect(r.routing.consistency).toMatchObject({ climbsWithoutTrigger: 0, triggersWithoutClimb: 1 }); // only (b): (a) carries its trigger
+  }, REPO_TIMEOUT);
+
+  it('keeps an item that already climbed on the tier it reached, without calling it an odd start or a trigger with no climb', () => {
+    const { dir } = makeRepo();
+    seed(dir, [
+      // Built on Sonnet, climbed to Opus (suite failed), the Opus review failed, and the fix runs on Opus (review failed).
+      ...task('T-1', 0, 200), agent('b1', 'build', 'T-1', SONNET, 1), testRun(3, false), agent('b2', 'build', 'T-1', OPUS, 5, { trigger: 'suite_failed' }),
+      agent('rv', 'review', 'T-1', OPUS, 10), outcome(12, { task: 'T-1', process: 'review', result: 'failed', round: 1 }),
+      agent('f1', 'fix', 'T-1', OPUS, 20, { trigger: 'review_failed' }),
+    ]);
+    const r = reportOf(dir);
+    expect(row(r, 'fix')).toMatchObject({ items: 1, startedAbove: 0, carried: 1, enteredByEscalation: 0, escalatedItems: 0 });
+    expect(row(r, 'build')).toMatchObject({ items: 1, escalatedItems: 1, carried: 0 }); // the one real climb
+    expect(r.routing.consistency).toMatchObject({ climbsWithoutTrigger: 0, triggersWithoutClimb: 0, unsupported: 0 });
+    expect(r.routing.log.map((c: any) => [c.process, c.fromTier, c.toTier])).toEqual([['build', 'mid', 'high']]);
+    expect(r.routing.agents.find((a: any) => a.agentId === 'f1').reason).toBe('carried'); // the same word in both views
+    expect(attention(r)).not.toContain('started above their floor tier');
+  }, REPO_TIMEOUT);
+
+  it('keeps a weekly trend from the week recording began, and counts items below the floor, above the ceiling and unrated apart', async () => {
+    const day = 1440;
+    // Now is Wed 2026-10-21 (ISO week 43). Recording began Tue 10-06 (week 41); earlier weeks are unknown, not empty.
+    const a = await auditOf([
+      ...task('T-W1', 1 * day, 3 * day), agent('w1a', 'build', 'T-W1', SONNET, 1 * day, { ts: iso(1 * day) }), agent('w1b', 'build', 'T-W1', OPUS, 1 * day + 30, { trigger: 'suite_failed' }),
+      ...task('T-W2', 10 * day, 11 * day), agent('w2', 'build', 'T-W2', SONNET, 10 * day),
+      ...task('T-W3', 15 * day, 16 * day), agent('w3', 'build', 'T-W3', SONNET, 15 * day),
+      // Below the floor (Haiku on the build floor of Sonnet), and a check agent above its ceiling (Opus over Sonnet).
+      ...task('T-LOW', 15 * day), agent('low', 'build', 'T-LOW', HAIKU, 15 * day + 5),
+      ...task('T-HIGH', 15 * day), agent('high', 'check', 'T-HIGH', OPUS, 15 * day + 5),
+    ]);
+    expect(auditRow(a, 'build').weeks).toEqual([
+      { week: '2026-W41', items: 1, escalated: 1 }, { week: '2026-W42', items: 1, escalated: 0 }, { week: '2026-W43', items: 1, escalated: 0 },
+    ]);
+    expect(auditRow(a, 'build')).toMatchObject({ startedBelow: 1, aboveCeiling: 0, startedAtFloor: 3, escalatedItems: 1 });
+    expect(auditRow(a, 'check')).toMatchObject({ aboveCeiling: 1, startedAbove: 1, startedBelow: 0 });
+    const reason = Object.fromEntries(a.agents.map((x: any) => [x.agentId, x.reason]));
+    expect(reason).toMatchObject({ w1a: 'floor', w1b: 'escalation:suite_failed', low: 'below_floor', high: 'undeclared' });
+    // A model the tiers do not name is unrated: the item is left out of the window and the finished-at-floor figure.
+    const u = await auditOf([
+      ...task('T-F', 0, 100), agent('f', 'build', 'T-F', SONNET, 1),
+      ...task('T-U', 0, 200), agent('u1', 'build', 'T-U', SONNET, 11), agent('u2', 'build', 'T-U', 'claude-unknown-9', 15),
+    ], '2026-10-21T12:00:00Z', (c) => { c.routing.escalationAlert = { overPercent: 30, items: 2 }; });
+    expect(auditRow(u, 'build').escalation).toMatchObject({ state: 'collecting', window: 1, need: 2 });
+    expect(auditRow(u, 'build').finishedAtFloor).toEqual({ n: 1, of: 1 });
+    expect(u.unrated).toBe(1);
+    expect(u.agents.find((x: any) => x.agentId === 'u2')).toMatchObject({ reason: null, tier: 'other' });
+  });
+
+  it('starts the weekly trend at the earliest agent, not at the first Stop that wrote a record, and counts an item that entered by escalation', async () => {
+    const day = 1440;
+    // Both agents began Tue 2026-10-06 (week 41), but the Stop that recorded them came on Tue 10-20 (week 43).
+    const a = await auditOf([
+      ...task('T-1', 1 * day, 16 * day),
+      agent('b1', 'build', 'T-1', SONNET, 1 * day, { ts: iso(15 * day) }), agent('f1', 'fix', 'T-1', OPUS, 1 * day + 30, { ts: iso(15 * day), trigger: 'suite_failed' }),
+    ]);
+    expect(auditRow(a, 'build').weeks).toEqual([{ week: '2026-W41', items: 1, escalated: 0 }, { week: '2026-W42', items: 0, escalated: 0 }, { week: '2026-W43', items: 0, escalated: 0 }]);
+    // The fix entered by escalation from the build (mid to high): it is an item from the floor, escalated, in its week.
+    expect(auditRow(a, 'fix').weeks[0]).toEqual({ week: '2026-W41', items: 1, escalated: 1 });
+    expect(a.since).toBe(iso(15 * day)); // for display only
+  });
+
+  it('keeps the last 50 climbs in the log, the newest, and the last 100 helper agents', async () => {
+    const lines = Array.from({ length: 55 }, (_, i) => [
+      ...task(`T-${i}`, 0, 99_999), agent(`s${i}`, 'build', `T-${i}`, SONNET, 10 * i + 1), agent(`o${i}`, 'build', `T-${i}`, OPUS, 10 * i + 5, { trigger: 'suite_failed' }),
+    ]).flat();
+    const a = await auditOf(lines);
+    expect(a.log).toHaveLength(50);
+    expect(a.log[0].task).toBe('T-54');
+    expect(a.log.at(-1).task).toBe('T-5'); // T-0 to T-4 are the oldest five and fall away
+    expect(a.agents).toHaveLength(100);
+    expect(a.agents[0].agentId).toBe('o54');
+    expect(auditRow(a, 'build').escalatedItems).toBe(55); // the cap is on the list, not on the count
+  });
+
+  it('warns of a climb above the ceiling apart from a start above the floor, and of three agents in a day with no metadata', () => {
+    const { dir } = makeRepo();
+    const bare = (id: string, minAgo: number): Line => ({ ts: new Date(Date.now() - minAgo * 60_000).toISOString(), event: 'AgentRun', agentId: id, tokens: { [SONNET]: tok(10) } });
+    seed(dir, [...task('T-H', 0), agent('h1', 'check', 'T-H', OPUS, 5), bare('n1', 30), bare('n2', 60)]);
+    const two = reportOf(dir);
+    expect(attention(two)).toContain("1 check item(s) ran an agent above the process's ceiling tier: a breach of the routing policy");
+    expect(attention(two)).toContain('1 check item(s) started above their floor tier');
+    expect(attention(two)).not.toContain('have no Claude Code metadata');
+    const three = makeRepo();
+    seed(three.dir, [bare('n1', 30), bare('n2', 60), bare('n3', 90), { ...bare('old', 3 * 24 * 60), tokens: {} }]);
+    const r = reportOf(three.dir);
+    expect(attention(r)).toContain('3 helper agents in the last day have no Claude Code metadata');
+    expect(r.routing.consistency).toMatchObject({ noMetadata: 4, untagged: 4, tagged: 0 });
+  }, REPO_TIMEOUT);
+
+  it('counts a helper agent from before recording once, and works out each session\'s main-session figure on its own', () => {
+    const { dir } = makeRepo();
+    const start = (min: number, agentId?: string, session = 'session_01A'): Line => ({ ts: iso(min), session, event: 'SubagentStart', agentType: 'general-purpose', ...(agentId ? { agentId } : {}) });
+    const usage = (session: string, tokens: Record<string, unknown>): Line => ({ ts: iso(2000), session, event: 'Usage', at: 'Stop', costUSD: '1.00000000', costBasis: 'checkpoint+since', tokens });
+    seed(dir, [
+      // Session A: its agent started before the first Stop that wrote any record (that Stop is what `since` shows).
+      start(0, 'a1'), { ...agent('a1', 'build', 'T-A', SONNET, 1), ts: iso(1500) }, start(5, 'gone'), start(6),
+      usage('session_01A', { [SONNET]: tok(5000) }),
+      // Session B has no helper agent at all: its whole total is the main session.
+      { ts: iso(10), session: 'session_01B', event: 'UserPromptSubmit' }, usage('session_01B', { [OPUS]: tok(2000) }),
+      // Session F started one agent that has no record, and nothing else.
+      start(11, 'lost', 'session_01F'), usage('session_01F', { [OPUS]: tok(300) }),
+      // Sessions C and D both have agents. C's agent used more Haiku than C's whole total; D has plenty over.
+      { ...agent('c1', 'check', 'T-C', HAIKU, 20), session: 'session_01C', tokens: { [HAIKU]: tok(1000) } }, usage('session_01C', { [HAIKU]: tok(100) }),
+      { ...agent('d1', 'check', 'T-D', HAIKU, 30), session: 'session_01D', tokens: { [HAIKU]: tok(100) } }, usage('session_01D', { [HAIKU]: tok(5000) }),
+      // Session E has one agent, recorded, and no other start: its remainder is the main session.
+      { ...agent('e1', 'build', 'T-E', SONNET, 40), session: 'session_01E', tokens: { [SONNET]: tok(1000) } }, usage('session_01E', { [SONNET]: tok(5000) }),
+    ]);
+    const r = reportOf(dir);
+    // a1 has its record, so it is not "before recording"; the agent with no record and the start with no id are.
+    expect(r.routing).toMatchObject({ since: iso(22), agentsBefore: 3 }); // a1 started before `since` and is still not "before recording"
+    expect(r.routing.consistency.startedNoRecord).toBe(2); // gone and lost
+    const rows = Object.fromEntries(r.processCost.map((x: { process: string; model: string }) => [`${x.process}|${x.model}`, x]));
+    expect(rows[`build|${SONNET}`]).toMatchObject({ agents: 2, tokens: 2000 }); // a1 and e1
+    expect(rows[`not recorded|${SONNET}`]).toBeUndefined(); // an agent that began before the first Stop is not "not recorded"
+    // Nothing is counted twice: per model, the process rows, the main session and the not-split rows add up to the
+    // sessions' totals exactly, worked by hand. Sonnet: session A 5000 + session E 5000 = 10,000 = the build agents a1
+    // and e1 (1000 + 1000) + A's remainder of 4000 (A started two agents with no record, so its remainder is not split)
+    // + E's remainder of 4000 (every agent E started has a record, so its remainder is the main session).
+    // Opus: session B 2000 (no agent at all: all main session) + session F 300 (one unrecorded start: not split) = 2300.
+    const label = 'not split: main session and unrecorded helper agents together';
+    const sum = (model: string) => r.processCost.filter((x: { model: string }) => x.model === model).reduce((n: number, x: { tokens: number | null }) => n + (x.tokens ?? 0), 0);
+    expect(rows[`build|${SONNET}`]).toMatchObject({ agents: 2, tokens: 2000 });
+    expect(rows[`main session|${SONNET}`]).toEqual({ process: 'main session', model: SONNET, agents: null, tokens: 4000, medianTokens: null, cost: { usd: '0.04000000' } });
+    expect(rows[`${label}|${SONNET}`]).toEqual({ process: label, model: SONNET, agents: null, tokens: 4000, medianTokens: null, cost: { usd: '0.04000000' }, unsplit: true });
+    expect(sum(SONNET)).toBe(10_000);
+    expect(rows[`main session|${OPUS}`]).toEqual({ process: 'main session', model: OPUS, agents: null, tokens: 2000, medianTokens: null, cost: { usd: '0.04000000' } });
+    expect(rows[`${label}|${OPUS}`]).toEqual({ process: label, model: OPUS, agents: null, tokens: 300, medianTokens: null, cost: { usd: '0.00600000' }, unsplit: true });
+    expect(sum(OPUS)).toBe(2300);
+    // C is negative for Haiku (1000 used, 100 held): unavailable for the model, though C and D together come to a positive 4000.
+    expect(rows[`main session|${HAIKU}`]).toMatchObject({ tokens: null, cost: null });
+  }, REPO_TIMEOUT);
+
+  it('computes the helper-agent saving from the agents\' own records, worked by hand', () => {
+    const { dir } = makeRepo();
+    // Sessions: 3,000,000 Sonnet and 500,000 Opus output tokens. At the Opus baseline ($20 per million):
+    // all-Opus 70.00, actual 30.00 + 10.00 = 40.00, saving 30.00 (4285 of 10000, 42.85%).
+    // Helper agents: 1,000,000 Sonnet output and 100,000 Opus output. All-Opus 22.00, actual 10.00 + 2.00 = 12.00, saving 10.00, 45.45%.
+    seed(dir, [
+      ...task('T-A', 0),
+      agent('s1', 'build', 'T-A', SONNET, 1, { tokens: { [SONNET]: tok(1_000_000) } }), agent('o1', 'review', 'T-A', OPUS, 5, { tokens: { [OPUS]: tok(100_000) } }),
+      { ts: iso(30), event: 'Usage', at: 'Stop', costUSD: '40.00000000', costBasis: 'checkpoint+since', tokens: { [SONNET]: tok(3_000_000), [OPUS]: tok(500_000) } },
+    ]);
+    const s = reportOf(dir).economics.routingSaving;
+    expect(s).toMatchObject({ allBaseline: { usd: '70.00000000' }, actual: { usd: '40.00000000' }, saving: { usd: '30.00000000' }, share: 42.85 });
+    expect(s.agents).toEqual({
+      baseline: 'claude-opus-5-5', allBaseline: { usd: '22.00000000' }, actual: { usd: '12.00000000' }, saving: { usd: '10.00000000' }, share: 45.45, scope: 'helper agents only',
+    });
+  }, REPO_TIMEOUT);
+
+  it('does not let a verdict recorded later move when a session was last active', () => {
+    const { dir } = makeRepo();
+    seed(dir, [tool(5, {}), ...task('T-1', 6), outcome(500, { task: 'T-1', process: 'review', result: 'passed', round: 1 })]);
+    expect(reportOf(dir).sessions.find((s: { id: string }) => s.id === 'session_01A').last).toBe(iso(5));
+  }, REPO_TIMEOUT);
+
+  it('counts a helper agent that started with an id and left no record, and warns once its session is quiet', () => {
+    const { dir } = makeRepo();
+    const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+    seed(dir, [
+      // A quiet session: its agent started two hours ago and nothing was recorded for it since.
+      { ts: ago(120), event: 'SubagentStart', agentType: 'general-purpose', agentId: 'q1' },
+      // A session still active (it did something a minute ago): its agent may simply still be running.
+      { ts: ago(10), session: 'session_01B', event: 'SubagentStart', agentType: 'general-purpose', agentId: 'live1' }, { ts: ago(1), session: 'session_01B', event: 'UserPromptSubmit' },
+      // Older than a day: counted, but not worth a warning now.
+      { ts: ago(3 * 24 * 60), session: 'session_01C', event: 'SubagentStart', agentType: 'general-purpose', agentId: 'old1' },
+    ]);
+    const r = reportOf(dir);
+    expect(r.routing.consistency).toMatchObject({ startedNoRecord: 3, startedNoRecordStale: 1 });
+    expect(attention(r)).toContain('1 helper agent(s) started in the last day have no Claude Code record, and their session is no longer active');
+  }, REPO_TIMEOUT);
+
+  it('shows throttle bands as not in use, with the configured thresholds and no reading', async () => {
+    // @ts-expect-error a plain ES module with no type declarations
+    const { throttleTable } = await import('../scripts/devlog-throttle.mjs');
+    const cfg = JSON.parse(read('devlog/control-tower.json'));
+    const r = reportOf(makeRepo().dir);
+    expect(r.throttle).toEqual({
+      state: 'off', reason: 'No runner: nothing reads usage or starts items', bands: throttleTable(cfg.throttle).bands, error: null,
+      thresholds: { fiveHour: { low: 70, crawl: 85, stop: 95 }, weeklyStop: 80, todayLow: 40 },
+    });
+    expect(r.throttle.bands.map((b: { band: string }) => b.band)).toEqual(['Full', 'Normal', 'Low', 'Crawl', 'Stopped']);
+    expect(r.throttle.bands.find((b: { band: string }) => b.band === 'Low').when).toContain('70% to 84%');
+    expect(r.utilisation).toEqual({ state: 'off', reason: expect.stringContaining('No runner') });
+    // Thresholds that make no sense give no table and say why; there is still no reading.
+    const bad = reportOf(makeRepo((c) => { c.throttle.fiveHour = { low: 90, crawl: 85, stop: 95 }; }).dir);
+    expect(bad.throttle).toMatchObject({ state: 'off', bands: null, thresholds: null, error: expect.stringContaining('low < crawl < stop') });
+    expect(Object.keys(bad.throttle).sort()).toEqual(['bands', 'error', 'reason', 'state', 'thresholds']);
+  }, REPO_TIMEOUT);
 });

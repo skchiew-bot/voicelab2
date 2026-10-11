@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { PROCESSES, TRIGGERS, failureKind, isTaskId, scrub } from '../.claude/hooks/devlog.mjs';
 
 const EVENTS = new Set(['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
-  'Usage', 'Alert', 'SubagentStart', 'SubagentStop', 'AgentRun', 'Outcome', 'Task', 'Incident', 'Decision']);
+  'Usage', 'Alert', 'SubagentStart', 'SubagentStop', 'AgentRun', 'Outcome', 'CiRun', 'Task', 'Incident', 'Decision']);
 const KINDS = new Set(['test', 'typecheck', 'build', 'push', 'commit', 'integrate', 'install', 'other']);
 const TASK_STATUSES = new Set(['planned', 'in_progress', 'testing', 'review', 'blocked', 'done', 'abandoned']);
 const INCIDENT_TYPES = new Set(['agent_regression', 'test_failure', 'review_finding', 'process', 'scope', 'security', 'stop_loss', 'other']);
@@ -134,6 +134,13 @@ export function clean(raw) {
     set('agent', id(raw.agent));
     if (raw.process === 'review') set('shadowOf', id(raw.shadowOf)); // only a review can shadow another
     set('round', nat(raw.round, 99));
+  }
+  if (raw.event === 'CiRun') {
+    // A CI result the session declared with the task CLI: fixed fields only.
+    const pr = nat(raw.pr);
+    if (!taskId(raw.task) || !pr || typeof raw.sha !== 'string' || !/^[0-9a-f]{7,40}$/.test(raw.sha) || !['passed', 'failed'].includes(raw.result)) return null;
+    out.task = raw.task; out.pr = pr; out.sha = raw.sha; out.result = raw.result;
+    if (typeof raw.run === 'string' && /^\d{1,20}$/.test(raw.run)) out.run = raw.run;
   }
   if (raw.event === 'Task') {
     if (!taskId(raw.id) || !['start', 'update', 'done'].includes(raw.action)) return null;

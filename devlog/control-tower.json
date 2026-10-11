@@ -156,6 +156,10 @@
       "deny_path_touched": {
         "label": "High-risk path touched",
         "when": "A high-risk file (highRiskPaths) was edited during the item"
+      },
+      "ci_red": {
+        "label": "CI red",
+        "when": "A CI run on the task's pull request failed"
       }
     },
     "escalationAlert": {

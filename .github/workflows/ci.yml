@@ -1,0 +1,65 @@
+# Runs the typecheck and the whole test suite on every pull request to main and on every push to main, with a real
+# Postgres and a real Chromium, so the database and browser tests run instead of skipping. Branch protection (the
+# owner's call) can then require the `test` job before a merge.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to a pull request cancels the older run; runs on main always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Create the test database role
+        # The same role .claude/hooks/session-start.sh creates; tests/helpers.ts logs in as it by default.
+        env:
+          PGPASSWORD: postgres
+        run: psql -X -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE voicelab LOGIN CREATEDB CREATEROLE PASSWORD 'voicelab'"
+      - name: Check the tests can log in to the database
+        # tests/global-setup.ts only warns when the database is unreachable, so fail here instead of going green with
+        # the database tests broken.
+        env:
+          PGPASSWORD: voicelab
+        run: psql -X -h localhost -U voicelab -d postgres -tAc 'SELECT 1' | grep -qx 1
+      - name: Install Chromium
+        run: |
+          npx playwright install --with-deps chromium
+          path="$(node -e "console.log(require('@playwright/test').chromium.executablePath())")"
+          test -x "$path" || { echo "Chromium is not executable at $path"; exit 1; }
+          echo "CHROMIUM_PATH=$path" >> "$GITHUB_ENV"
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test

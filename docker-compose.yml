@@ -25,6 +25,7 @@ services:
       VOICELAB_SECRET_KEY: ${VOICELAB_SECRET_KEY:?run ./scripts/setup.sh first}
       PORT: "3000"
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      PRODUCTION_DEPLOYERS: ${PRODUCTION_DEPLOYERS:-}
     ports:
       - "3000:3000"
 

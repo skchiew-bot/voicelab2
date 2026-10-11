@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { AppError } from '../errors.js';
+import { ACTIVE } from './tenants.js';
 import type { WorkflowDefinition } from '../workflows/definition.js';
 import { checkReferences, isWorkflowName, referencesOf } from '../workflows/refs.js';
 import { validateDefinition, type ValidationResult } from '../workflows/validate.js';
@@ -143,7 +144,38 @@ async function referenceProblems(c: pg.PoolClient, wf: { tenant_id: string; name
  * environment and get the variables it needs. Production also needs the version to be live in staging and to
  * have passed a simulation there.
  */
-export async function deploy(c: pg.PoolClient, actorId: string | null, workflowId: string, e: { versionId: string; environment: Environment }) {
+/**
+ * Who is putting a version live: an approved change (`applyChange`), or a person directly. In production a person may do
+ * so only if they are one of the deployers the owner named (PRODUCTION_DEPLOYERS); anyone else proposes a change.
+ */
+export type DeployAuthority = { by: 'change' } | { by: 'person'; deployers: readonly string[] };
+
+/**
+ * How a person may reach production: directly, as a named deployer; only once they have replaced the token they were
+ * given (whoever added their account saw that one, so it proves nothing about who holds it); or through a change.
+ * A named deployer is an active staff admin whose email the owner listed, made by the installer or holding a token
+ * they replaced themselves.
+ */
+export async function productionAccess(c: pg.PoolClient, actorId: string | null, deployers: readonly string[]): Promise<'direct' | 'replace-token' | 'change'> {
+  if (!actorId) return 'change';
+  const u = (await c.query(
+    `SELECT lower(email) AS email, (created_by IS NULL OR token_rotated_at IS NOT NULL) AS own_token
+       FROM users WHERE id = $1 AND tenant_id IS NULL AND role = 'internal_admin' AND ${ACTIVE}`, [actorId])).rows[0];
+  if (!u || !deployers.includes(u.email)) return 'change';
+  return u.own_token ? 'direct' : 'replace-token';
+}
+
+/** Production is reached directly only by a named deployer; anything else goes through an approved change. Decided before any lock. */
+async function mayGoLive(c: pg.PoolClient, actorId: string | null, environment: Environment, how: DeployAuthority): Promise<boolean> {
+  if (environment !== 'production' || how.by === 'change') return false;
+  const access = await productionAccess(c, actorId, how.deployers);
+  if (access === 'replace-token') throw new AppError(403, 'You are a named deployer, but your sign-in token is still the one you were given when your account was added. Replace it (POST /me/token, or "New token" in the console) and deploy again.');
+  if (access === 'change') throw new AppError(403, 'Putting a flow live in production needs an approved change: propose it, and a different person approves it. Only the deployers the owner has named go live directly.');
+  return true;
+}
+
+export async function deploy(c: pg.PoolClient, actorId: string | null, workflowId: string, e: { versionId: string; environment: Environment }, how: DeployAuthority) {
+  const direct = await mayGoLive(c, actorId, e.environment, how);
   await c.query('SELECT id FROM workflows WHERE id = $1 FOR UPDATE', [workflowId]);
   const wf = await getWorkflow(c, workflowId);
   await lockTenant(c, wf.tenant_id); // deploys of one tenant's workflows are checked against each other one at a time
@@ -187,12 +219,13 @@ export async function deploy(c: pg.PoolClient, actorId: string | null, workflowI
   const d = (await c.query(
     `INSERT INTO workflow_deployments (workflow_id, environment, version_id, kind, deployed_by) VALUES ($1,$2,$3,'deploy',$4) RETURNING *`,
     [workflowId, e.environment, version.id, actorId])).rows[0];
-  await audit(c, actorId, 'workflow.deploy', 'workflow', workflowId, { version: label, environment: e.environment });
+  await audit(c, actorId, 'workflow.deploy', 'workflow', workflowId, { version: label, environment: e.environment, ...(direct ? { approval: 'named deployer' } : {}), ...(how.by === 'change' ? { approval: 'change' } : {}) });
   return { ...d, version: label };
 }
 
 /** Go back to the version that was live before the current one. Calls already under way keep the version they started on. */
-export async function rollback(c: pg.PoolClient, actorId: string | null, workflowId: string, environment: Environment) {
+export async function rollback(c: pg.PoolClient, actorId: string | null, workflowId: string, environment: Environment, how: DeployAuthority) {
+  const direct = await mayGoLive(c, actorId, environment, how);
   await c.query('SELECT id FROM workflows WHERE id = $1 FOR UPDATE', [workflowId]);
   const wf = await getWorkflow(c, workflowId);
   await lockTenant(c, wf.tenant_id);
@@ -206,7 +239,7 @@ export async function rollback(c: pg.PoolClient, actorId: string | null, workflo
   const d = (await c.query(
     `INSERT INTO workflow_deployments (workflow_id, environment, version_id, kind, deployed_by) VALUES ($1,$2,$3,'rollback',$4) RETURNING *`,
     [workflowId, environment, target.id, actorId])).rows[0];
-  await audit(c, actorId, 'workflow.rollback', 'workflow', workflowId, { to: versionLabel(target), environment });
+  await audit(c, actorId, 'workflow.rollback', 'workflow', workflowId, { to: versionLabel(target), environment, ...(direct ? { approval: 'named deployer' } : {}) });
   return { ...d, version: versionLabel(target) };
 }
 

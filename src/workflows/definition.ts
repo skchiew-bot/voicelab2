@@ -48,7 +48,15 @@ export interface ApiNode extends Common {
 export interface SubflowNode extends Common { type: 'subflow'; workflow: string; exports?: string[]; transitions?: Transition[] }
 /** Hand the call, with every variable, to another workflow or to a person. Control does not come back. */
 export interface HandoffNode extends Common { type: 'handoff'; target: { workflow: string } | { human: { reason: string } } }
-export interface EndNode extends Common { type: 'end'; outcome: string }
+/** How an outbound call turned out, as the outbound analytics count it. */
+export const CONTACT_OUTCOMES = ['contacted', 'rejected', 'wrong_number', 'third_party'] as const;
+export type ContactOutcome = (typeof CONTACT_OUTCOMES)[number];
+/**
+ * The call is over. `contact` says what reaching this end means for an outbound call (the right person was reached, they
+ * refused, a wrong number, someone else answered); it is recorded as the call's outcome when a live outbound call's run
+ * ends here. An end inside a subflow hands back to its parent, so only the end the call finishes at counts.
+ */
+export interface EndNode extends Common { type: 'end'; outcome: string; contact?: ContactOutcome }
 
 export type WorkflowNode = SpeakNode | ApiNode | SubflowNode | HandoffNode | EndNode;
 

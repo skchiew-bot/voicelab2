@@ -5,7 +5,7 @@ import { AppError } from '../errors.js';
 import { lineAmount, quantityFor, type Unit } from '../billing.js';
 import { fromScaled, mulDiv, SCALE } from '../money.js';
 import { decryptSecrets, encryptSecrets } from '../secrets.js';
-import { own, type Json, type WorkflowDefinition } from '../workflows/definition.js';
+import { CONTACT_OUTCOMES, own, type ContactOutcome, type Json, type WorkflowDefinition } from '../workflows/definition.js';
 import { PhoneInVariable, reply as engineReply, start as engineStart, type Deps, type RunState, type StepRecord } from '../workflows/engine.js';
 import { callIntegration, type HttpDeps } from '../workflows/integrations.js';
 import { referencesOf } from '../workflows/refs.js';
@@ -13,6 +13,7 @@ import { chargingAt } from './charging.js';
 import { perUsd } from './costs.js';
 import { evaluateScenario, gateProblems, MAX_REPLIES, MAX_SCENARIOS, type Scenario, type ScenarioResult } from '../workflows/simulate.js';
 import { audit } from './audit.js';
+import { recordWorkflowOutcome } from './outbound.js';
 import { recordStepDecisions } from './ai-decisions.js';
 import { caseVariables } from './cases.js';
 import { publishedArticles } from './knowledge.js';
@@ -143,6 +144,16 @@ export async function startRun(d: RunDeps, actorId: string | null, e: StartInput
 }
 type StartInput = { workflowId: string; environment: Environment; kind: RunKind; variables: Record<string, Json>; callId?: string };
 
+/**
+ * A live call whose run ends at an end that says how the call turned out records that as the call's outcome, in the same
+ * step that ends the run. Rehearsals and runs with no call record nothing.
+ */
+async function recordContact(c: pg.PoolClient, kind: string, callId: string | null, runId: string, records: StepRecord[]) {
+  if (kind !== 'live' || !callId) return;
+  const contact = records.find((r) => r.type === 'end')?.payload.contact;
+  if (typeof contact === 'string' && (CONTACT_OUTCOMES as readonly string[]).includes(contact)) await recordWorkflowOutcome(c, { callId, runId, contact: contact as ContactOutcome });
+}
+
 /** As startRun, and also the lines to say, for the live call voice link. */
 export async function startRunSpoken(d: RunDeps, actorId: string | null, e: StartInput): Promise<{ view: RunView; speech: SpokenLine[] }> {
   if (e.kind === 'simulation') throw new AppError(400, 'Use the simulation endpoint for simulations.');
@@ -175,6 +186,7 @@ export async function startRunSpoken(d: RunDeps, actorId: string | null, e: Star
       [id, ctx.wf.tenant_id, ctx.wf.id, ctx.resolved.entryVersionId, e.environment, e.kind, JSON.stringify(ctx.resolved.pins), JSON.stringify(held.state), held.sealed,
         out.state.status, out.state.outcome ?? null, out.state.error ?? null, e.callId ?? null]);
     await persistSteps(c, id, 1, out.records);
+    await recordContact(c, e.kind, e.callId ?? null, id, out.records);
     await recordStepDecisions(c, { tenantId: ctx.wf.tenant_id, callId: e.callId ?? null, runId: id, records: out.records });
     await logLearningTurns(c, { tenantId: ctx.wf.tenant_id, runId: id, callId: e.callId ?? null, kind: e.kind, records: out.records, vars: out.state.vars, sensitive: out.state.sensitive, context: contextOf(out.state) });
     if (out.state.escalation || out.state.outcome === 'handoff_human') await ticketForEscalation(c, actorId, id);
@@ -237,6 +249,7 @@ export async function replyRunSpoken(d: RunDeps, runId: string, text: string, ex
     if (upd.rowCount === 0) return null;
     const last = (await c.query('SELECT coalesce(max(seq), 0) AS n FROM workflow_run_steps WHERE run_id = $1', [runId])).rows[0].n as number;
     await persistSteps(c, runId, last + 1, out.records);
+    await recordContact(c, ctx.run.kind, ctx.run.call_id ?? null, runId, out.records);
     // A call passed to a person gets its ticket in the same step that passed it, so none can be missed.
     await recordStepDecisions(c, { tenantId: ctx.run.tenant_id, callId: ctx.run.call_id ?? null, runId, records: out.records });
     await logLearningTurns(c, { tenantId: ctx.run.tenant_id, runId, callId: ctx.run.call_id ?? null, kind: ctx.run.kind, records: out.records, vars: out.state.vars, sensitive: out.state.sensitive, context: contextOf(out.state) });

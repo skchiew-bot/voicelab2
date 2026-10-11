@@ -176,7 +176,7 @@ describe('exit criterion 3: a client cannot read internal-ledger data', () => {
 
   it('keeps the funding ledger readable for staff', async () => {
     const res = await env.call(env.staffToken, 'GET', `/internal/providers/${providerId}/funding`);
-    expect(res.json()).toEqual([{ currency: 'USD', balance: '500.000000' }]);
+    expect(res.json()).toEqual([{ currency: 'USD', balance: '500.00000000' }]);   // kept to the cost record's eight places
   });
 
   it('keeps both ledgers append-only', async () => {

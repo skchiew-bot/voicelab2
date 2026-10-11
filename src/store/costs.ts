@@ -3,6 +3,7 @@ import { billedSeconds, lineAmount, quantityFor, type Unit, type Usage } from '.
 import { AppError } from '../errors.js';
 import { fromScaled, mulDiv, SCALE, toScaled } from '../money.js';
 import { audit } from './audit.js';
+import { drawFundingForCall } from './ledgers.js';
 
 // ----------------------------------------------------------------- FX
 export async function addFxRate(
@@ -166,6 +167,9 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
         l.rate, l.currency, l.burstMultiplier, fromScaled(l.amount), fromScaled(l.perUsd), fromScaled(l.amountUsd)],
     );
   }
+
+  // The providers' own funding goes down by what the call cost them. Once, here: a reconciled record copies these lines.
+  await drawFundingForCall(c, input.callId, lines.map((l) => ({ providerId: l.providerId, currency: l.currency, amount: l.amount })));
 
   if (credits > 0n) {
     await c.query(

@@ -364,7 +364,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/transfer.test.ts` › "runs the ladder when Twilio asks again after the agent number was removed"
 
 ### L-045: A failing check must stop the commit
-- **Seen:** A test run, the board update and the commit were joined with `;`, so a broken `src/progress.ts` (an unescaped apostrophe) was committed and pushed while the run reported a failure (human transfer, 2026-10-10).
+- **Seen:** 2 times. A test run, the board update and the commit were joined with `;`, so a broken `src/progress.ts` (an unescaped apostrophe) was committed and pushed while the run reported a failure (human transfer, 2026-10-10). The same unescaped apostrophe was written into `src/progress.ts` again; the typecheck joined with `&&` stopped it before any commit (Phase 4 funding draw-down, 2026-10-11).
 - **Rule:** Join the checks and the commit with `&&`, never `;`, and read the result before pushing. A failure you cannot explain is read from its kept output before anything else (L-038).
 - **Guards:**
   - `CLAUDE.md` › "so a failing check stops the commit"

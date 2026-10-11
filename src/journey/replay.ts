@@ -74,8 +74,8 @@ function describe(s: ReplayStep): { summary: string; text?: string; speaker: Tim
       reasoning: { strategy: p.strategy ?? null, spokenLive: p.synthChars ?? null, playedFromRecording: p.recordedChars ?? null, ...(p.ai ? { ai: p.ai } : {}) },
     };
     case 'heard': return {
-      summary: `The caller replied at ${s.node}${p.intent ? `; understood as "${str(p.intent)}"` : ''}.`, text: str(p.text), speaker: 'caller',
-      reasoning: { intent: p.intent ?? null, matchedWords: p.matched ?? null, reading: p.analysis ?? null },
+      summary: `The caller replied at ${s.node}${p.intent ? `; understood as "${str(p.intent)}"` : ''}${p.rules ? ` (read by a model; the rules found it ${str(p.rules)})` : ''}.`, text: str(p.text), speaker: 'caller',
+      reasoning: { intent: p.intent ?? null, matchedWords: p.matched ?? null, reading: p.analysis ?? null, ...(p.rules ? { rules: p.rules } : {}), ...(p.interpreted ? { model: p.interpreted } : {}) },
     };
     case 'route': return { summary: p.to ? `Went from ${s.node} to ${str(p.to)} (${str(p.via)}).` : `Nothing matched at ${s.node}, so the call ended cleanly (${str(p.via)}).`, speaker: 'system', reasoning: { rule: p.via ?? null, to: p.to ?? null } };
     case 'reroute': return { summary: `The caller's intent changed (${str(p.kind)}${p.topic ? `, ${str(p.topic)}` : ''}), so the call went to ${str(p.to)}.`, speaker: 'system', reasoning: { kind: p.kind ?? null, topic: p.topic ?? null, to: p.to ?? null } };

@@ -8,7 +8,7 @@ export type Tier = 'rules' | 'haiku' | 'sonnet' | 'opus';
 
 export interface DecisionInput {
   tenantId?: string | null; task: string; subjectType: string; subjectId: string; decision: Decision; reason: string;
-  model?: string | null; tier?: Tier | null; inputTokens?: number; outputTokens?: number; confidence?: number | null;
+  model?: string | null; tier?: Tier | null; /** null: not known (the model failed or timed out); left out: none. */ inputTokens?: number | null; outputTokens?: number | null; confidence?: number | null;
   escalatedFrom?: string | null; callId?: string | null;
 }
 
@@ -18,7 +18,7 @@ export async function recordDecision(c: pg.PoolClient, d: DecisionInput) {
   await c.query(
     `INSERT INTO ai_decisions (tenant_id, task, subject_type, subject_id, decision, reason, model, tier, input_tokens, output_tokens, confidence, escalated_from, call_id)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-    [d.tenantId ?? null, d.task, d.subjectType, d.subjectId, d.decision, d.reason.slice(0, 1000), d.model ?? null, d.tier ?? null, d.inputTokens ?? 0, d.outputTokens ?? 0, d.confidence ?? null, d.escalatedFrom ?? null, d.callId ?? null]);
+    [d.tenantId ?? null, d.task, d.subjectType, d.subjectId, d.decision, d.reason.slice(0, 1000), d.model ?? null, d.tier ?? null, d.inputTokens === undefined ? 0 : d.inputTokens, d.outputTokens === undefined ? 0 : d.outputTokens, d.confidence ?? null, d.escalatedFrom ?? null, d.callId ?? null]);
 }
 
 // ------------------------------------------------------------------------------------- model configuration
@@ -59,7 +59,8 @@ export async function recordStepDecisions(
           tenantId: e.tenantId, task: 'interpret_reply', subjectType: 'run_step', subjectId: `${e.runId}:${r.node ?? ''}`, callId: e.callId,
           decision: a.decision as Decision, reason: String(a.reason ?? 'No reason given.'),
           model: (a.model as string | undefined) ?? null, tier: (a.tier as Tier | undefined) ?? null, escalatedFrom: (a.escalatedFrom as string | undefined) ?? null,
-          inputTokens: Number(a.inputTokens ?? 0), outputTokens: Number(a.outputTokens ?? 0), confidence: a.confidence === undefined ? null : Number(a.confidence),
+          inputTokens: a.inputTokens == null ? null : Number(a.inputTokens), outputTokens: a.outputTokens == null ? null : Number(a.outputTokens),
+          confidence: a.confidence === undefined ? null : Number(a.confidence),
         });
       }
       continue;

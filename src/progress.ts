@@ -58,7 +58,7 @@ export const PHASES: PhaseProgress[] = [
       'Live phone calls hold this conversation through Twilio\'s speech relay, which turns the caller\'s words into text; tested only against a fake relay, with no live call yet',
       'The prompt-to-workflow builder (deferred in the plan)',
       'A visual canvas: the console shows an outline and a JSON editor',
-      'A reply the phrase rules cannot read goes to a model (task `interpret_reply`, a tier up below 0.7 confidence), shown only the words without numbers and the intents on offer, never a sensitive answer; tested with stand-in models only, as no model is connected. Simulations, and so the production gate, read replies by rules only',
+      'A reply the phrase rules cannot read goes to a model on a question whose author allows it (`listen.model: true`), once the task `interpret_reply` is configured (a tier up below 0.7 confidence, six seconds each), shown only the words without numbers and the intents on offer, never a sensitive answer; tested with stand-in models only, as no model is connected. Simulations, and so the production gate, read replies by rules only, so the gate does not show where a model would send an unclear reply. A model call that failed or timed out is recorded with its tokens unknown, and they are not in the call\'s cost. Turning the model on counts more turns as understood, which moves the QA, drift and change-impact figures that count misunderstood turns',
     ],
   },
   {

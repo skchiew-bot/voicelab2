@@ -6,7 +6,7 @@ import { lineAmount, quantityFor, type Unit } from '../billing.js';
 import { fromScaled, mulDiv, SCALE } from '../money.js';
 import { decryptSecrets, encryptSecrets } from '../secrets.js';
 import { CONTACT_OUTCOMES, own, type ContactOutcome, type Json, type WorkflowDefinition } from '../workflows/definition.js';
-import { INTERPRET_MIN_CONFIDENCE, PhoneInVariable, reply as engineReply, start as engineStart, type Deps, type Interpreter, type ReplyReader, type RunState, type StepRecord } from '../workflows/engine.js';
+import { INTERPRET_MIN_CONFIDENCE, INTERPRET_TIMEOUT_MS, PhoneInVariable, reply as engineReply, start as engineStart, type Deps, type Interpreter, type ReplyReader, type RunState, type StepRecord } from '../workflows/engine.js';
 import { callIntegration, type HttpDeps } from '../workflows/integrations.js';
 import { referencesOf } from '../workflows/refs.js';
 import { chargingAt } from './charging.js';
@@ -34,14 +34,15 @@ export interface RunDeps {
 
 /**
  * The reply reader the configuration asks for: the tier set for `interpret_reply`, and the tier it escalates to. A task with
- * no configuration, or a tier with no model connected, reads replies by rules only.
+ * no configuration, a tier with no model connected, or a connected model other than the one configured, reads replies by
+ * rules only, so the configuration and the audit trail never name different models.
  */
 async function replyReader(c: pg.PoolClient, d: RunDeps): Promise<ReplyReader | undefined> {
   if (!d.interpreters) return undefined;
   const cfg = await modelFor(c, 'interpret_reply');
   const primary = cfg ? d.interpreters[cfg.tier] : undefined;
-  if (!cfg || !primary) return undefined;
-  return { primary, escalate: cfg.escalateTo ? d.interpreters[cfg.escalateTo] : undefined, minConfidence: INTERPRET_MIN_CONFIDENCE };
+  if (!cfg || !primary || primary.model !== cfg.modelId) return undefined;
+  return { primary, escalate: cfg.escalateTo ? d.interpreters[cfg.escalateTo] : undefined, minConfidence: INTERPRET_MIN_CONFIDENCE, timeoutMs: INTERPRET_TIMEOUT_MS };
 }
 export type RunKind = 'simulation' | 'test' | 'live';
 

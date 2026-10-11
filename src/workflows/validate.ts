@@ -80,6 +80,7 @@ export function validateDefinition(input: unknown): ValidationResult {
   const used: { name: string; nodeId: string }[] = [];
   const spoken: { name: string; nodeId: string }[] = [];   // read out loud or fed to a model
   const sent: { name: string; nodeId: string }[] = [];     // sent to an integration
+  const modelRead: { id: string; captureAs: string }[] = []; // answers a model may read when the rules cannot
   const sensitive = new Set<string>();
   if (def.sensitiveVariables !== undefined) {
     if (!Array.isArray(def.sensitiveVariables) || !def.sensitiveVariables.every((v) => isName(v))) err('bad_sensitive', '"sensitiveVariables" must be a list of variable names.');
@@ -158,6 +159,9 @@ export function validateDefinition(input: unknown): ValidationResult {
             assigned.add(l.captureAs);
             if (l.sensitive !== undefined && typeof l.sensitive !== 'boolean') nodeErr('bad_listen', 'listen.sensitive must be true or false.');
             if (l.sensitive === true) sensitive.add(l.captureAs);
+            if (l.model !== undefined && typeof l.model !== 'boolean') nodeErr('bad_listen', 'listen.model must be true or false.');
+            if (l.model === true && l.intents === undefined) nodeErr('bad_listen', 'listen.model needs intents for the model to choose from.');
+            if (l.model === true) modelRead.push({ id, captureAs: l.captureAs });
             if (l.intents !== undefined) {
               if (!isObj(l.intents) || !Object.entries(l.intents).every(([k, v]) => isName(k) && Array.isArray(v) && v.length > 0 && v.every((p) => typeof p === 'string' && p.trim() !== ''))) {
                 nodeErr('bad_intents', 'intents must map each intent name to a non-empty list of phrases.');
@@ -221,6 +225,7 @@ export function validateDefinition(input: unknown): ValidationResult {
 
   for (const u of spoken) if (sensitive.has(u.name)) err('sensitive_in_speech', `"${u.name}" is sensitive, so it cannot be spoken or given to a model.`, u.nodeId);
   for (const u of sent) if (sensitive.has(u.name)) err('sensitive_in_request', `"${u.name}" is sensitive, so it cannot be sent to an integration.`, u.nodeId);
+  for (const m of modelRead) if (sensitive.has(m.captureAs)) err('sensitive_to_model', `"${m.captureAs}" is sensitive, so a model may not read the answer.`, m.id);
   for (const name of sensitive) if (!assigned.has(name)) err('unknown_variable', `"${name}" is marked sensitive but is never set.`);
   for (const u of used) {
     if (!assigned.has(u.name)) err('unknown_variable', `"${u.name}" is used but never set: declare it in "variables" or capture it earlier.`, u.nodeId);

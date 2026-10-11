@@ -28,6 +28,12 @@ export interface Listen {
   captureAs: string; intents?: Record<string, string[]>;
   /** The answer is used to route the call and then forgotten: it is not recorded, and not kept after this step. */
   sensitive?: boolean;
+  /**
+   * A reply the phrase rules cannot read may be read by a model (when one is configured). Off unless set: a question whose
+   * answer must be clear (consent, identity, a promise) stays with the rules, and an unclear answer stays unclear.
+   * Never allowed on a sensitive answer.
+   */
+  model?: boolean;
 }
 
 interface Common { label?: string }

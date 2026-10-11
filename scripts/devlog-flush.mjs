@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { failureKind, scrub } from '../.claude/hooks/devlog.mjs';
 
 const EVENTS = new Set(['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
-  'Usage', 'Alert', 'SubagentStart', 'SubagentStop', 'Task', 'Incident']);
+  'Usage', 'Alert', 'SubagentStart', 'SubagentStop', 'Task', 'Incident', 'Decision']);
 const KINDS = new Set(['test', 'typecheck', 'build', 'push', 'commit', 'integrate', 'install', 'other']);
 const TASK_STATUSES = new Set(['planned', 'in_progress', 'testing', 'review', 'blocked', 'done', 'abandoned']);
 const INCIDENT_TYPES = new Set(['agent_regression', 'test_failure', 'review_finding', 'process', 'scope', 'security', 'stop_loss', 'other']);
@@ -129,6 +129,14 @@ export function clean(raw) {
     for (const [k, max] of [['title', 160], ['impact', 160], ['detectedBy', 80], ['action', 160]]) set(k, text(raw[k], max));
     if (typeof raw.lesson === 'string' && /^L-\d{3}$/.test(raw.lesson)) out.lesson = raw.lesson;
     if (typeof raw.policyUpdated === 'boolean') out.policyUpdated = raw.policyUpdated;
+    set('task', taskId(raw.task));
+  }
+  if (raw.event === 'Decision') {
+    if (typeof raw.id !== 'string' || !/^DEC-\d{8}-[0-9a-f]{4}$/.test(raw.id)) return null;
+    if (typeof raw.on !== 'string' || !/^\d{4}-\d\d-\d\d$/.test(raw.on)) return null;
+    out.id = raw.id; out.on = raw.on;
+    for (const [k, max] of [['title', 200], ['by', 60], ['ref', 80]]) set(k, text(raw[k], max));
+    if (!out.title) return null;
     set('task', taskId(raw.task));
   }
   return out;

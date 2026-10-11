@@ -101,6 +101,7 @@ export function registerResilienceRoutes(app: FastifyInstance, ctx: Ctx): void {
     return run(req, (c, u) => chargeExtraChannels(c, u, tenantId, b.month));
   });
   app.post('/internal/queue/expire', async (req) => {
+    await ctx.internal(req);                                      // who is asking is checked before anything changes
     const b = z.object({ maxWaitSeconds: z.number().int().min(1).max(86_400).default(300) }).parse(req.body ?? {});
     await promoteWaiting(ctx.callDeps);                          // a free channel goes to a waiting caller before anyone is timed out
     const out = await run(req, (c, u) => expireQueued(c, u, b.maxWaitSeconds));

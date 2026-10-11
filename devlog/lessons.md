@@ -399,3 +399,9 @@ Format, checked by `tests/devlog.test.ts`:
 - **Guards:**
   - `tests/devlog.test.ts` › "leaves another project's session alone, and judges by the event's folder only when the project folder is unknown"
   - `CLAUDE.md` › "do it only with the owner's go-ahead"
+
+### L-049: Check who is asking before anything changes
+- **Seen:** The queue sweep's endpoint gave waiting callers their channels, starting their credits and asking Twilio to redirect their calls, before it checked the request's token: anyone could make it act and only then be refused (queued caller hand-over re-review, 2026-10-11).
+- **Rule:** A route authenticates and authorises first, before any read that leaks, any write, and any request to a provider. Work added to an existing route goes after that check, never in front of it; test the route with no token and assert that nothing moved.
+- **Guards:**
+  - `tests/concurrency.test.ts` › "checks who is asking before the queue sweep changes anything: without a token, no caller is served and no provider is called"

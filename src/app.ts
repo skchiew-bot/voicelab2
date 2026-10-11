@@ -465,9 +465,9 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
     { name: 'cases-dispatch', everySeconds: 60, run: () => drain(() => dispatchDue(caseDeps, () => new Date(), 20), 20, 10) },
     { name: 'queue-expire', everySeconds: 60, run: async () => {
       // A free channel goes to a waiting caller before anyone is timed out of the queue.
-      const served = await promoteWaiting(callDeps);
+      const promotion = await promoteWaiting(callDeps);   // never throws, so expiry always runs
       const out = await sys((c) => expireQueued(c, null, 300));
-      return { served, expired: out.expired, hungUp: await hangUpCalls(callDeps, out.hangups) };
+      return { served: promotion.served, promotionFailed: promotion.failed, expired: out.expired, hungUp: await hangUpCalls(callDeps, out.hangups) };
     } },
     { name: 'faults-sweep', everySeconds: 300, run: () => sys((c) => sweepFaults(c)) },
     { name: 'workflow-runs-sweep', everySeconds: 900, run: () => abandonStaleRuns(runDeps, null, { olderThanMinutes: 60 }) },

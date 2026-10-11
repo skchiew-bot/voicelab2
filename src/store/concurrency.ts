@@ -89,7 +89,7 @@ export async function promoteQueued(c: pg.PoolClient, tenantId: string): Promise
 
 /** Clients with callers waiting, for the queue sweep to give any free channel to. */
 export const tenantsWaiting = async (c: pg.PoolClient): Promise<string[]> =>
-  (await c.query(`SELECT DISTINCT tenant_id FROM calls WHERE direction = 'inbound' AND status = 'queued'`)).rows.map((r) => r.tenant_id as string);
+  (await c.query(`SELECT DISTINCT tenant_id FROM calls WHERE direction = 'inbound' AND status = 'queued' ORDER BY tenant_id`)).rows.map((r) => r.tenant_id as string);
 
 /**
  * Queued callers who have waited too long are not left hanging: the call ends, and a callback request is recorded so

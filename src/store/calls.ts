@@ -322,9 +322,11 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
   const burst = isFull(load);
   const call = (await c.query(
     `INSERT INTO calls (id, tenant_id, project_id, provider_id, provider_call_id, direction, status, country, started_at, queued_at, burst, credit_multiplier, workflow_id)
-     VALUES ($1,$2,$3,$4,$5,'inbound',$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+     VALUES ($1,$2,$3,$4,$5,'inbound',$6,$7,$8,CASE WHEN $9 THEN now() END,$10,$11,$12) RETURNING *`,
+    // The wait is stamped by the database's clock, the same clock that stamps when the caller is served, so the hold billed
+    // as not served is exactly the time between the two (L-022).
     [id, n.tenant_id, n.project_id, providerId, ev.providerCallId, adm.admit === 'queue' ? 'queued' : 'ringing', n.country, ev.occurredAt,
-      adm.admit === 'queue' ? ev.occurredAt : null, burst, adm.admit === 'premium' ? adm.creditMultiplier : null, n.inbound_workflow_id],
+      adm.admit === 'queue', burst, adm.admit === 'premium' ? adm.creditMultiplier : null, n.inbound_workflow_id],
   )).rows[0];
   await recordEvent(c, { tenantId: n.tenant_id, projectId: n.project_id ?? undefined, callId: id, type: 'call.initiated', payload: { direction: 'inbound', country: n.country }, occurredAt: ev.occurredAt });
   if (adm.admit === 'queue') await recordEvent(c, { tenantId: n.tenant_id, projectId: n.project_id ?? undefined, callId: id, type: 'call.queued', payload: { active: adm.active, channels: adm.channels }, occurredAt: ev.occurredAt });
@@ -457,6 +459,10 @@ export async function serveNow(d: CallDeps, promoted: Promoted[]) {
     try {
       const provider = await asInternal(d, (c) => loadProvider(c, p.providerId));
       if (provider?.adapter_key !== 'twilio') continue;
+      // The hold's own next turn may already have handed the caller to the relay: redirecting now would cut that off.
+      const taken = await asInternal(d, async (c) => (await c.query(
+        `SELECT 1 FROM calls WHERE id = $1 AND (relay_owner IS NOT NULL OR EXISTS (SELECT 1 FROM workflow_runs WHERE call_id = $1 AND kind = 'live'))`, [p.callId])).rowCount === 1);
+      if (taken) continue;
       await twilioRedirect(credentials<TwilioCreds>(provider, d.key), d.http, p.providerCallId, `${d.baseUrl}/webhooks/twilio/${p.providerId}/voice`);
     } catch (err) {
       await asInternal(d, async (c) => {
@@ -467,15 +473,25 @@ export async function serveNow(d: CallDeps, promoted: Promoted[]) {
   }
 }
 
-/** Give any free channel to a waiting caller, for every client with callers waiting (the queue sweep, an entitlement change). */
-export async function promoteWaiting(d: CallDeps, tenantIds?: string[]) {
-  const promoted = await asInternal(d, async (c) => {
-    const out: Promoted[] = [];
-    for (const t of tenantIds ?? await tenantsWaiting(c)) out.push(...await promoteQueued(c, t));
-    return out;
-  });
-  await serveNow(d, promoted);
-  return promoted.length;
+/**
+ * Give any free channel to a waiting caller, for every client with callers waiting (the queue sweep, an entitlement
+ * change). Each client in its own short transaction, holding one client's lock at a time, so two sweeps cannot deadlock
+ * and one client's failure costs no other client its turn (L-006). It never throws: a failure is counted and recorded.
+ */
+export async function promoteWaiting(d: CallDeps, tenantIds?: string[]): Promise<{ served: number; failed: number }> {
+  let served = 0; let failed = 0;
+  const tenants = tenantIds ?? await asInternal(d, (c) => tenantsWaiting(c)).catch(() => [] as string[]);
+  for (const t of tenants) {
+    try {
+      const promoted = await asInternal(d, (c) => promoteQueued(c, t));
+      served += promoted.length;
+      await serveNow(d, promoted);
+    } catch {
+      failed++;
+      await asInternal(d, (c) => audit(c, null, 'queue.promotion_failed', 'tenant', t, {})).catch(() => undefined);
+    }
+  }
+  return { served, failed };
 }
 
 export async function processWebhook(d: CallDeps, provider: ProviderRow, ev: NormalizedEvent, hint?: string) {

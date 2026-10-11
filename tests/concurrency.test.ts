@@ -6,6 +6,7 @@ import { loadProvider, processWebhook, type CallDeps } from '../src/store/calls.
 import { promoteQueued } from '../src/store/concurrency.js';
 import { dncKeyFrom } from '../src/store/dnc.js';
 import { twimlHold } from '../src/telephony/twilio.js';
+import { TEST_CALL_MESSAGE } from '../src/telephony/types.js';
 import type { NormalizedEvent } from '../src/telephony/types.js';
 
 type Env = Awaited<ReturnType<typeof import('./helpers.js').setupDb>>;
@@ -377,7 +378,7 @@ describe('found in review: queued callers', () => {
     await send(ev('ended', 't1', { durationSeconds: 30, endReason: 'completed' }));               // their turn comes mid-message
     expect((await callRow('t2')).status).toBe('in_progress');
     const first = await send(ev('speak_ended', 't2'));                                            // the hold message they were hearing ends
-    expect(first.actions).toEqual([expect.objectContaining({ action: 'speak', body: expect.objectContaining({ payload: expect.not.stringContaining('busy') }) })]);
+    expect(first.actions).toEqual([expect.objectContaining({ action: 'speak', body: expect.objectContaining({ payload: TEST_CALL_MESSAGE }) })]);
     expect((await send(ev('speak_ended', 't2'))).actions).toEqual([expect.objectContaining({ action: 'hangup' })]);   // served; then the call ends
     await clearActive();
   });
@@ -395,6 +396,33 @@ describe('found in review: queued callers', () => {
     expect((await post('/internal/queue/expire', { maxWaitSeconds: 300 })).json()).toEqual({ expired: 0, hungUp: 0 });
     expect((await callRow('f4')).status).toBe('in_progress');
     await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1 }));
+    await clearActive();
+  });
+
+  it('promotes each waiting caller once, and never past the channels, when two calls end at the same moment', async () => {
+    await clearActive();
+    await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 2 }));
+    for (const id of ['s1', 's2']) { await send(ev('initiated', id)); await send(ev('answered', id)); }
+    for (const id of ['s3', 's4', 's5']) await send(ev('initiated', id));
+    await Promise.all([send(ev('ended', 's1', { durationSeconds: 30, endReason: 'completed' })), send(ev('ended', 's2', { durationSeconds: 30, endReason: 'completed' }))]);
+    const rows = (await env.pool.query(`SELECT provider_call_id AS id, status FROM calls WHERE provider_call_id IN ('s3','s4','s5') ORDER BY provider_call_id`)).rows;
+    expect(rows).toEqual([{ id: 's3', status: 'in_progress' }, { id: 's4', status: 'in_progress' }, { id: 's5', status: 'queued' }]);   // the two who waited longest
+    const dequeued = (await env.pool.query(`SELECT count(*)::int AS n FROM call_events e JOIN calls c ON c.id = e.call_id WHERE c.provider_call_id IN ('s3','s4','s5') AND e.type = 'call.dequeued'`)).rows[0].n;
+    expect(dequeued).toBe(2);
+    await must(put(`/internal/tenants/${tenant}/entitlement`, { inboundChannels: 1 }));
+    await clearActive();
+  });
+
+  it('checks who is asking before the queue sweep changes anything: without a token, no caller is served and no provider is called', async () => {
+    await clearActive();
+    await send(ev('initiated', 'noauth1')); await send(ev('answered', 'noauth1'));
+    await send(ev('initiated', 'noauth2'));
+    await env.pool.query(`UPDATE calls SET status = 'completed', ended_at = now() WHERE provider_call_id = 'noauth1'`);   // a channel is free
+    env.provider.calls.length = 0;
+    const r = await env.app.inject({ method: 'POST', url: '/internal/queue/expire', payload: { maxWaitSeconds: 300 } });
+    expect(r.statusCode).toBe(401);
+    expect((await callRow('noauth2')).status).toBe('queued');
+    expect(env.provider.calls).toEqual([]);
     await clearActive();
   });
 

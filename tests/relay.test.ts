@@ -701,6 +701,23 @@ describe('a live call through the speech relay', () => {
     expect((await voice('CA_qf_2', 'in-progress')).body).toContain('<ConversationRelay');
   });
 
+  it('does not cut short a waiting caller the relay has already taken: the hold\'s own turn got there first', async () => {
+    const t = (await must(post('/internal/tenants', { name: 'Queue Race Co' }))).json().id;
+    const Q = '+60300000781';
+    const n = (await must(post('/internal/numbers', { providerId: twilioId, e164: Q, tenantId: t, country: 'MY' }))).json().id;
+    const wf = await liveWorkflow(t, 'queue_race_flow', flow, { replies: ['no'], outcome: 'promised' });
+    await must(put(`/internal/numbers/${n}/workflow`, { workflowId: wf }));
+    await must(put(`/internal/tenants/${t}/entitlement`, { inboundChannels: 1 }));
+    const voice = (sid: string, status: string) => twilioPost(`/webhooks/twilio/${twilioId}/voice`, { CallSid: sid, CallStatus: status, Direction: 'inbound', From: CUSTOMER, To: Q });
+    await voice('CA_qr_1', 'ringing'); await voice('CA_qr_2', 'ringing');
+    await env.pool.query(`UPDATE calls SET relay_owner = gen_random_uuid(), relay_claimed_at = now() WHERE provider_call_id = 'CA_qr_2'`);   // the relay holds it
+    env.provider.calls.length = 0;
+    env.provider.state.respond = () => new Response('{}', { status: 200 });
+    await twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: 'CA_qr_1', CallStatus: 'completed', Direction: 'inbound', CallDuration: '30' });
+    expect((await env.pool.query(`SELECT status FROM calls WHERE provider_call_id = 'CA_qr_2'`)).rows[0].status).toBe('in_progress');
+    expect(env.provider.calls.filter((c) => c.url.endsWith('/Calls/CA_qr_2.json'))).toEqual([]);
+  });
+
   it('tells a caller timed out of the queue, whose line is still open, that a callback is booked, and ends the call', async () => {
     const t = (await must(post('/internal/tenants', { name: 'Queue Timeout Co' }))).json().id;
     const Q = '+60300000780';

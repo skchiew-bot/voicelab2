@@ -30,9 +30,8 @@ describe('the TwiML that puts a caller through to a person', () => {
   });
 
   it('allows only a Malaysian agent number, and reads the length of the agent leg strictly', () => {
-    for (const ok of ['+60312345678', '+601123456789', '+6082123456', '+60131234567', '+60130012345', '+60180012345']) expect(agentNumberAllowed(ok)).toBe(true);
-    // Malaysia's special-rate and premium ranges are never an agent phone (toll fraud)
-    for (const no of ['+601300881234', '+601600123456', '+601700881234', '+601800881234', '+601900123456', '+60600812345']) expect(agentNumberAllowed(no)).toBe(false);
+    // every +60 number, the 1-300, 1-700, 1-800 and 1-900 ranges included (owner's decision, 2026-10-11)
+    for (const ok of ['+60312345678', '+601123456789', '+6082123456', '+60131234567', '+601300881234', '+601700881234', '+601800881234', '+601900123456']) expect(agentNumberAllowed(ok)).toBe(true);
     for (const no of ['+6512345678', '+14155550100', '+44207946000', '+600312345678', '+60123', '+6031234567890', '60312345678', '+60 312345678']) expect(agentNumberAllowed(no)).toBe(false);
     expect(dialSeconds('61')).toBe(61);
     expect(dialSeconds('0')).toBe(0);
@@ -347,21 +346,24 @@ describe('a live caller passed to a person', () => {
   });
 
   it('refuses an agent number outside Malaysia when it is set, and again at dial time for one stored before the rule', async () => {
-    for (const abroad of ['+6512345678', '+14155550100', '+44 20 7946 0000', '+60 1800-88-1234', '+60 600-81-2345']) {
+    for (const abroad of ['+6512345678', '+14155550100', '+44 20 7946 0000']) {
       const r = await put(`/internal/tenants/${bareTenant}/transfer`, { agentNumber: abroad });
       expect(r.statusCode).toBe(400);
       expect(r.json().error).toContain('Malaysian number (+60)');
     }
     expect((await env.call(env.staffToken, 'GET', `/internal/tenants/${bareTenant}/transfer`)).json()).toBeNull();
+    // a Malaysian 1-800 line is fine as an agent phone (owner's decision, 2026-10-11)
+    expect((await put(`/internal/tenants/${bareTenant}/transfer`, { agentNumber: '+60 1800-88-1234' })).statusCode).toBe(200);
+    await must(env.call(env.staffToken, 'DELETE', `/internal/tenants/${bareTenant}/transfer`));
     // the database refuses one too, whatever path writes it
-    for (const bad of ['+6512345678', '+601900123456', '+60600812345']) {
+    for (const bad of ['+6512345678', '+14155550100']) {
       await expect(env.pool.query(`INSERT INTO transfer_settings (tenant_id, agent_e164) VALUES ($1, $2)`, [bareTenant, bad])).rejects.toThrow(/transfer_settings_agent_malaysian/);
     }
 
     // A setting stored before the rule existed (the check is NOT VALID, so old rows stay): it is never rung.
     await env.pool.query('ALTER TABLE transfer_settings DROP CONSTRAINT transfer_settings_agent_malaysian');
     await env.pool.query(`INSERT INTO transfer_settings (tenant_id, agent_e164) VALUES ($1, '+6512345678')`, [bareTenant]);
-    await env.pool.query(`ALTER TABLE transfer_settings ADD CONSTRAINT transfer_settings_agent_malaysian CHECK (agent_e164 ~ '^\\+60[1-9][0-9]{7,9}$' AND agent_e164 !~ '^\\+60(1[36789]00[0-9]{6}|600[0-9]+)$') NOT VALID`);
+    await env.pool.query(`ALTER TABLE transfer_settings ADD CONSTRAINT transfer_settings_agent_malaysian CHECK (agent_e164 ~ '^\\+60[1-9][0-9]{7,9}$') NOT VALID`);
     try {
       const { callSid, callId } = await handedOver(BARE);
       const r = await relayEnded(callSid, callId, {}, BARE);

@@ -18,7 +18,7 @@ const money = (usd: string) => ({ usd });
 const proc = (process: string, label: string, floor: string, ceiling: string, laddered: boolean, extra: Record<string, unknown> = {}) => ({
   process, label, work: label, floor, ceiling, laddered, firstPass: null, recorded: false,
   escalation: laddered ? { state: 'unavailable', reason: 'not_recorded', escalated: null, window: null, need: 20, overPercent: 30 } : { state: 'not_laddered', escalated: null, window: null, need: null, overPercent: null },
-  cost: null, agents: null, items: null, startedAtFloor: null, startedAbove: null, startedBelow: null, enteredByEscalation: null, aboveCeiling: null, escalatedItems: null,
+  cost: null, agents: null, items: null, startedAtFloor: null, startedAbove: null, startedBelow: null, enteredByEscalation: null, carried: null, aboveCeiling: null, escalatedItems: null,
   finishedAtFloor: null, topTriggers: null, tokensByTier: null, weeks: null, ...extra,
 });
 
@@ -45,10 +45,10 @@ function fixedReport() {
     branches: { branches: [], error: null, defaultBranch: 'main', forksCount: 0, fetchedAt: null },
     routing: {
       since: '2026-10-09T08:00:00.000Z', agentsBefore: 51, error: null, state: 'amber', triggers: [], unrated: 0,
-      agents: Array.from({ length: 25 }, (_, i) => ({ agentId: `a${i}`, session: 's1', process: 'build', task: `P3-${i}`, round: 1, model: 'claude-sonnet-5-5', tier: 'mid', reason: i === 0 ? 'escalation:suite_failed' : i === 1 ? 'undeclared' : i === 2 ? 'below_floor' : 'floor', trigger: null, first: `2026-10-10T${String(i % 24).padStart(2, '0')}:00:00.000Z` })),
+      agents: Array.from({ length: 25 }, (_, i) => ({ agentId: `a${i}`, session: 's1', process: 'build', task: `P3-${i}`, round: 1, model: 'claude-sonnet-5-5', tier: 'mid', reason: i === 0 ? 'escalation:suite_failed' : i === 1 ? 'undeclared' : i === 2 ? 'below_floor' : i === 3 ? 'carried' : 'floor', trigger: null, first: `2026-10-10T${String(i % 24).padStart(2, '0')}:00:00.000Z` })),
       processes: [
         proc('plan', 'Plan', 'high', 'high', false),
-        proc('build', 'Build', 'mid', 'high', true, { recorded: true, items: 25, agents: 30, startedAtFloor: 20, startedAbove: 2, startedBelow: 1, enteredByEscalation: 1, aboveCeiling: 2, escalatedItems: 7, firstPass: { n: 8, of: 10 }, cost: money('0.50'), weeks: [{ week: '2026-W41', items: 4, escalated: 1 }, { week: '2026-W42', items: 6, escalated: 2 }], escalation: { state: 'amber', escalated: 7, window: 20, need: 20, overPercent: 30 }, finishedAtFloor: { n: 13, of: 20 }, topTriggers: [{ trigger: 'suite_failed', n: 4 }], tokensByTier: { high: 100, mid: 900, low: 0, other: 0, unknown: 0 } }),
+        proc('build', 'Build', 'mid', 'high', true, { recorded: true, items: 25, agents: 30, startedAtFloor: 20, startedAbove: 2, startedBelow: 1, enteredByEscalation: 1, carried: 1, aboveCeiling: 2, escalatedItems: 7, firstPass: { n: 8, of: 10 }, cost: money('0.50'), weeks: [{ week: '2026-W41', items: 4, escalated: 1 }, { week: '2026-W42', items: 6, escalated: 2 }], escalation: { state: 'amber', escalated: 7, window: 20, need: 20, overPercent: 30 }, finishedAtFloor: { n: 13, of: 20 }, topTriggers: [{ trigger: 'suite_failed', n: 4 }], tokensByTier: { high: 100, mid: 900, low: 0, other: 0, unknown: 0 } }),
         // Recorded, but nothing has finished yet: "None finished yet", not the words for not recorded.
         proc('fix', 'Fix', 'mid', 'high', true, { recorded: true, items: 1, agents: 1, finishedAtFloor: null, topTriggers: [], tokensByTier: { high: 0, mid: 10, low: 0, other: 0, unknown: 0 }, escalation: { state: 'collecting', escalated: 0, window: 0, need: 20, overPercent: 30 } }),
         // Nothing recorded yet: every figure null, which the page must not turn into 0.
@@ -163,17 +163,18 @@ describe.skipIf(!run)('dev Control Tower page', () => {
 
   it('shows the routing notes and the recent helper agents with why each ran on its tier', async () => {
     const { page, errors } = await open(fixedPage, 1280, '#routing');
-    expect(await page.locator('#rt-notes thead th').allTextContents()).toEqual(['Process', 'Above ceiling', 'Below floor', 'Started above floor', 'Entered by escalation', 'First-pass reviewDeclared', 'Cost', 'Weekly escalations (of items from the floor)']);
-    expect(await page.locator('#rt-notes tbody tr', { hasText: 'Build' }).locator('td').allTextContents()).toEqual(['Build', '2', '1', '2', '1', '8 of 10', '$0.50', '2026-W41: 1 of 4; 2026-W42: 2 of 6']);
+    expect(await page.locator('#rt-notes thead th').allTextContents()).toEqual(['Process', 'Above ceiling', 'Below floor', 'Started above floor', 'Entered by escalation', 'Carried', 'First-pass reviewDeclared', 'Cost', 'Weekly escalations (of items from the floor)']);
+    expect(await page.locator('#rt-notes tbody tr', { hasText: 'Build' }).locator('td').allTextContents()).toEqual(['Build', '2', '1', '2', '1', '1', '8 of 10', '$0.50', '2026-W41: 1 of 4; 2026-W42: 2 of 6']);
     // A process with nothing recorded has no counts: the words, never 0.
-    expect((await page.locator('#rt-notes tbody tr', { hasText: 'Check' }).locator('td').allTextContents()).slice(1, 6)).toEqual([UNREC, UNREC, UNREC, UNREC, UNREC]);
+    expect((await page.locator('#rt-notes tbody tr', { hasText: 'Check' }).locator('td').allTextContents()).slice(1, 7)).toEqual([UNREC, UNREC, UNREC, UNREC, UNREC, UNREC]);
     // The last 20 of the 25 agents, newest first, each with its reason.
     const rows = await page.locator('#rt-agents tbody tr').evaluateAll((trs) => trs.map((tr) => [...tr.querySelectorAll('td')].map((td) => td.textContent)));
     expect(rows).toHaveLength(20);
     expect(rows[0]).toEqual(['2026-10-10 00:00 UTC', 'build', 'P3-0', '1', 'sonnet-5-5 (mid)', 'Escalation: suite failed']);
     expect(rows[1]?.[5]).toBe('Above the floor, no trigger declared');
     expect(rows[2]?.[5]).toBe('Below the floor');
-    expect(rows[3]?.[5]).toBe('At the floor');
+    expect(rows[3]?.[5]).toBe('Carried: the item had already reached this tier');
+    expect(rows[4]?.[5]).toBe('At the floor');
     expect(errors).toEqual([]);
     await page.close();
   });

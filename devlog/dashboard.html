@@ -217,7 +217,7 @@ footer { font-size: 13px; color: var(--ink-muted); }
   <div class="view" id="v-routing" hidden>
     <section class="card" aria-labelledby="rl-h"><div class="head"><h2 id="rl-h">Routing and escalation</h2><span id="rt-state"></span></div><p class="sub" id="rt-legend"></p><div id="rt-off"></div></section>
     <section aria-labelledby="ld-h"><div class="head"><h2 id="ld-h">Ladder by process</h2><span class="note" id="rt-since"></span></div><div class="tbox" id="ladder"></div></section>
-    <section aria-labelledby="rn-h"><div class="head"><h2 id="rn-h">Routing notes</h2><span class="note">Counts the ladder has no column for: breaches, odd starts, first-pass reviews and the weekly trend</span></div><div class="tbox" id="rt-notes"></div></section>
+    <section aria-labelledby="rn-h"><div class="head"><h2 id="rn-h">Routing notes</h2><span class="note">Counts the ladder has no column for: breaches, odd and carried starts, first-pass reviews and the weekly trend</span></div><div class="tbox" id="rt-notes"></div></section>
     <section aria-labelledby="el-h"><div class="head"><h2 id="el-h">Escalation log</h2><span class="note">The last 50 climbs up a tier</span></div><div class="tbox" id="esc-log"></div></section>
     <section aria-labelledby="ra-h"><div class="head"><h2 id="ra-h">Recent helper agents</h2><span class="note">The last 20 tagged agents, with why each ran on its tier</span></div><div class="tbox" id="rt-agents"></div></section>
     <div class="g2">
@@ -559,14 +559,14 @@ function routingView(r) {
   // Figures the ladder does not have a column for: the policy breaches and odd starts, the first-pass review, the
   // cost, and the weekly trend (the weeks recording has covered; earlier weeks are unknown, not empty).
   const weeks = (p) => (p.weeks === null ? na(UNREC) : p.weeks.length ? p.weeks.map((w) => `${w.week}: ${w.escalated} of ${w.items}`).join('; ') : 'No week yet');
-  fill('rt-notes', table(['Process', { t: 'Above ceiling', cls: 'num' }, { t: 'Below floor', cls: 'num' }, { t: 'Started above floor', cls: 'num' }, { t: 'Entered by escalation', cls: 'num' }, dh('First-pass review', 'num'), { t: 'Cost', cls: 'num' }, 'Weekly escalations (of items from the floor)'],
+  fill('rt-notes', table(['Process', { t: 'Above ceiling', cls: 'num' }, { t: 'Below floor', cls: 'num' }, { t: 'Started above floor', cls: 'num' }, { t: 'Entered by escalation', cls: 'num' }, { t: 'Carried', cls: 'num' }, dh('First-pass review', 'num'), { t: 'Cost', cls: 'num' }, 'Weekly escalations (of items from the floor)'],
     rt.processes.map((p) => {
       const count = (v) => h('td', { class: 'num' }, v === null ? na(UNREC) : num(v));
-      return h('tr', null, h('td', null, p.label), count(p.aboveCeiling), count(p.startedBelow), count(p.startedAbove), count(p.enteredByEscalation),
+      return h('tr', null, h('td', null, p.label), count(p.aboveCeiling), count(p.startedBelow), count(p.startedAbove), count(p.enteredByEscalation), count(p.carried),
         h('td', { class: 'num' }, p.firstPass ? `${p.firstPass.n} of ${p.firstPass.of}` : na(UNREC)),
         h('td', { class: 'num' }, p.cost ? fmtMoney(p.cost.usd) : na(UNREC)), h('td', null, weeks(p)));
     }), rt.error ? `Unavailable: ${rt.error}` : UNREC));
-  const REASON = { floor: 'At the floor', below_floor: 'Below the floor', undeclared: 'Above the floor, no trigger declared' };
+  const REASON = { floor: 'At the floor', below_floor: 'Below the floor', undeclared: 'Above the floor, no trigger declared', carried: 'Carried: the item had already reached this tier' };
   const reasonText = (a) => (a.reason === null ? 'Model not rated' : a.reason.startsWith('escalation:') ? `Escalation: ${a.reason.slice(11).replace(/_/g, ' ')}` : (REASON[a.reason] ?? a.reason));
   fill('rt-agents', table(['Started', dh('Process'), dh('Task'), { t: 'Round', cls: 'num' }, 'Model', 'Tier reason'],
     (rt.agents ?? []).slice(0, 20).map((a) => h('tr', null, h('td', { class: 'mono' }, when(a.first)), h('td', null, a.process), h('td', { class: 'mono' }, a.task), h('td', { class: 'num' }, String(a.round)),

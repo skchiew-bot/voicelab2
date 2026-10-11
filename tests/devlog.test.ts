@@ -1839,11 +1839,29 @@ describe('routing and escalation', () => {
       ...task('T-B', 0, 110), agent('b1', 'build', 'T-B', OPUS, 20, { trigger: 'review_failed' }),
     ]);
     const r = reportOf(dir);
-    expect(row(r, 'fix')).toMatchObject({ items: 1, startedAbove: 1, enteredByEscalation: 0, escalatedItems: 0 });
-    expect(row(r, 'build')).toMatchObject({ items: 2, startedAbove: 2, enteredByEscalation: 0, escalatedItems: 0 });
+    // (a) is carried: the item had already reached Opus, so the fix holds that tier. (b) is a plain start above the floor.
+    expect(row(r, 'fix')).toMatchObject({ items: 1, startedAbove: 0, carried: 1, enteredByEscalation: 0, escalatedItems: 0 });
+    expect(row(r, 'build')).toMatchObject({ items: 2, startedAbove: 2, carried: 0, enteredByEscalation: 0, escalatedItems: 0 });
     expect(row(r, 'fix').escalation).toMatchObject({ escalated: 0, window: 0 });
     expect(r.routing.log).toEqual([]);
-    expect(r.routing.consistency).toMatchObject({ climbsWithoutTrigger: 0, triggersWithoutClimb: 2 });
+    expect(r.routing.consistency).toMatchObject({ climbsWithoutTrigger: 0, triggersWithoutClimb: 1 }); // only (b): (a) carries its trigger
+  }, REPO_TIMEOUT);
+
+  it('keeps an item that already climbed on the tier it reached, without calling it an odd start or a trigger with no climb', () => {
+    const { dir } = makeRepo();
+    seed(dir, [
+      // Built on Sonnet, climbed to Opus (suite failed), the Opus review failed, and the fix runs on Opus (review failed).
+      ...task('T-1', 0, 200), agent('b1', 'build', 'T-1', SONNET, 1), testRun(3, false), agent('b2', 'build', 'T-1', OPUS, 5, { trigger: 'suite_failed' }),
+      agent('rv', 'review', 'T-1', OPUS, 10), outcome(12, { task: 'T-1', process: 'review', result: 'failed', round: 1 }),
+      agent('f1', 'fix', 'T-1', OPUS, 20, { trigger: 'review_failed' }),
+    ]);
+    const r = reportOf(dir);
+    expect(row(r, 'fix')).toMatchObject({ items: 1, startedAbove: 0, carried: 1, enteredByEscalation: 0, escalatedItems: 0 });
+    expect(row(r, 'build')).toMatchObject({ items: 1, escalatedItems: 1, carried: 0 }); // the one real climb
+    expect(r.routing.consistency).toMatchObject({ climbsWithoutTrigger: 0, triggersWithoutClimb: 0, unsupported: 0 });
+    expect(r.routing.log.map((c: any) => [c.process, c.fromTier, c.toTier])).toEqual([['build', 'mid', 'high']]);
+    expect(r.routing.agents.find((a: any) => a.agentId === 'f1').reason).toBe('carried'); // the same word in both views
+    expect(attention(r)).not.toContain('started above their floor tier');
   }, REPO_TIMEOUT);
 
   it('keeps a weekly trend from the week recording began, and counts items below the floor, above the ceiling and unrated apart', async () => {

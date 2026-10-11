@@ -519,9 +519,14 @@ export function routingAudit({ runs, outcomes, toolEvents, subagentStarts, board
       // the floor stays a start above the floor, and its trigger, if any, is a trigger with no climb.
       const ladderedProcess = (q) => !conf.processes[q].neverLaddered && rankOf(conf.processes[q].floor) !== rankOf(conf.processes[q].ceiling);
       const priorLaddered = (a) => primary.filter((x) => x.task === task && ladderedProcess(x.process) && byStart(x, a) < 0).sort(byStart).pop() ?? null;
-      const entryFrom = laddered && first !== null && first > floor && agents[0].trigger ? priorLaddered(agents[0]) : null;
-      const entered = entryFrom !== null && rankOf(entryFrom.tier) !== null && rankOf(entryFrom.tier) < first;
-      const started = first === null ? 'unknown' : entered ? 'entered' : first === floor ? 'floor' : first > floor ? 'above' : 'below';
+      const entryFrom = laddered && first !== null && first > floor ? priorLaddered(agents[0]) : null;
+      const entered = Boolean(agents[0].trigger) && entryFrom !== null && rankOf(entryFrom.tier) !== null && rankOf(entryFrom.tier) < first;
+      // Carried: the item already reached this tier (its previous laddered agent ran at or above it), and tiers never step
+      // down within an item (ADR-0014 section 1.2). So this agent holds the tier the item reached: not an odd start, not an
+      // escalation, and a trigger it declares is not a trigger with no climb (the climb came earlier, in another process).
+      const carried = !entered && entryFrom !== null && rankOf(entryFrom.tier) !== null && rankOf(entryFrom.tier) >= first;
+      if (carried) agents[0].reason = 'carried';
+      const started = first === null ? 'unknown' : entered ? 'entered' : carried ? 'carried' : first === floor ? 'floor' : first > floor ? 'above' : 'below';
       const t = boardById.get(task);
       if (!t) consistency.unknownTasks.add(task);
       agents.forEach((a, i) => {
@@ -533,7 +538,7 @@ export function routingAudit({ runs, outcomes, toolEvents, subagentStarts, board
           climbs.push({ ts: startOf(a), task, process: p, round: a.round, fromModel: prev?.model ?? null, toModel: a.model, fromTier: prev?.tier ?? null, toTier: a.tier, trigger: a.trigger, support: sup, session: a.session });
           if (!a.trigger) consistency.climbsWithoutTrigger++;
           else if (sup === 'none') consistency.unsupported++;
-        } else if (a.trigger) consistency.triggersWithoutClimb++;
+        } else if (a.trigger && !(i === 0 && carried)) consistency.triggersWithoutClimb++;
       });
       return {
         task, agents, started, unrated: agents.some((a) => a.rank === null), aboveCeiling: agents.some((a) => a.rank !== null && a.rank > ceiling),
@@ -545,10 +550,10 @@ export function routingAudit({ runs, outcomes, toolEvents, subagentStarts, board
     Object.assign(row, mine.length ? {
       recorded: true, agents: mine.length, items: items.length,
       startedAtFloor: items.filter((i) => i.started === 'floor').length, startedAbove: items.filter((i) => i.started === 'above').length,
-      startedBelow: items.filter((i) => i.started === 'below').length, enteredByEscalation: items.filter((i) => i.started === 'entered').length, aboveCeiling: items.filter((i) => i.aboveCeiling).length,
+      startedBelow: items.filter((i) => i.started === 'below').length, enteredByEscalation: items.filter((i) => i.started === 'entered').length, carried: items.filter((i) => i.started === 'carried').length, aboveCeiling: items.filter((i) => i.aboveCeiling).length,
       escalatedItems: items.filter((i) => i.escalated).length,
       finishedAtFloor: doneItems.length ? { n: doneItems.filter((i) => i.agents.every((a) => a.rank === floor)).length, of: doneItems.length } : null,
-    } : { recorded: false, agents: null, items: null, startedAtFloor: null, startedAbove: null, startedBelow: null, enteredByEscalation: null, aboveCeiling: null, escalatedItems: null, finishedAtFloor: null });
+    } : { recorded: false, agents: null, items: null, startedAtFloor: null, startedAbove: null, startedBelow: null, enteredByEscalation: null, carried: null, aboveCeiling: null, escalatedItems: null, finishedAtFloor: null });
     // Escalation rate over the last N finished items that started at the floor; amber only past the owner's threshold.
     if (!laddered) row.escalation = { state: 'not_laddered', escalated: null, window: null, need: null, overPercent: null };
     else if (conf.alertError) row.escalation = { state: 'unavailable', reason: 'config', error: conf.alertError, escalated: null, window: null, need: null, overPercent: null };

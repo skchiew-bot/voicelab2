@@ -64,7 +64,7 @@ export interface CallCostInput {
   /** Seconds at the start of the call that are not billed to the client (time spent waiting in the queue). */
   creditSkipSeconds?: number;
   /** One entry per provider that served part of the call. */
-  usage: { providerId: string; usage: Usage }[];
+  usage: { providerId: string; usage: Usage; relay?: boolean }[];
 }
 
 interface Line {
@@ -105,18 +105,21 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
       minimumChargeSeconds: version.minimum_charge_seconds,
       rounding: version.rounding,
     });
-    if (provider.kind === 'telephony' && billed !== null && creditSeconds === null) creditSeconds = input.drawCredits === false ? null : Math.max(0, billed - Math.ceil(input.creditSkipSeconds ?? 0));
+    if (provider.kind === 'telephony' && !item.relay && billed !== null && creditSeconds === null) creditSeconds = input.drawCredits === false ? null : Math.max(0, billed - Math.ceil(input.creditSkipSeconds ?? 0));
 
     const burst = item.usage.burst && version.burst_premium_multiplier ? version.burst_premium_multiplier : null;
     const comps = (await c.query(
       `SELECT component, unit, rate, currency, billing_line FROM charging_components
-        WHERE charging_version_id = $1 AND direction IN ('any', $2) ORDER BY id`,
-      [version.id, input.direction],
+        WHERE charging_version_id = $1 AND direction IN ('any', $2) AND (billing_line = 'relay') = $3 ORDER BY id`,
+      [version.id, input.direction, item.relay === true],
     )).rows;
 
+    // Every part of the usage must meet a rate: a part no rate covers would be costed as nothing, which is a guess.
+    const covered = new Set<string>();
     for (const comp of comps) {
       const q = quantityFor(comp.unit as Unit, comp.billing_line, item.usage, billed);
       if (!q) continue;
+      for (const part of partsOf(comp.unit as Unit, comp.billing_line)) covered.add(part);
       let amount = lineAmount(comp.rate, q);
       if (burst) amount = mulDiv(amount, toScaled(burst), SCALE);
       const fx = await perUsd(c, comp.currency, input.occurredAt);
@@ -126,6 +129,11 @@ export async function recordCallCost(c: pg.PoolClient, actorId: string | null, i
         rate: comp.rate, currency: comp.currency, burstMultiplier: burst, amount, perUsd: fx,
         amountUsd: mulDiv(amount, SCALE, fx), // currency -> USD
       });
+    }
+    const used: [string, number | undefined][] = [['seconds', item.usage.seconds], ['characters', item.usage.characters], ['input tokens', item.usage.inputTokens], ['output tokens', item.usage.outputTokens]];
+    const missing = used.filter(([part, n]) => (n ?? 0) > 0 && !covered.has(part)).map(([part]) => part);
+    if (missing.length) {
+      throw new AppError(400, `Provider ${item.providerId} has no ${item.relay ? 'speech relay ' : ''}rate for the ${missing.join(' and ')} this call used${item.relay ? ' (a "relay" billing line on its charging version)' : ''}. Add one, then cost the call again.`);
     }
   }
   if (lines.length === 0) throw new AppError(400, 'The usage given does not match any billable component of those providers.');
@@ -208,4 +216,15 @@ export async function campaignCosts(c: pg.PoolClient, tenantId?: string) {
     [tenantId ?? null],
   );
   return rows;
+}
+
+/** Which part of the usage a rate prices. */
+function partsOf(unit: Unit, billingLine: string): string[] {
+  switch (unit) {
+    case 'per_minute': case 'per_second': return ['seconds'];
+    case 'per_character': case 'per_1k_characters': return ['characters'];
+    case 'per_token': case 'per_1k_tokens': case 'per_1m_tokens':
+      return billingLine === 'input' ? ['input tokens'] : billingLine === 'output' ? ['output tokens'] : ['input tokens', 'output tokens'];
+    default: return [];
+  }
 }

@@ -101,7 +101,7 @@ describe("the app's own jobs", () => {
     await q('UPDATE scheduled_jobs SET next_run_at = now() - interval \'1 second\' WHERE name NOT LIKE \'t-%\'');
     const results = await env.app.scheduler.tick();
     const names = results.map((r) => r.job).sort();
-    expect(names).toEqual(['alerts-email', 'appointment-reminders', 'case-ageing', 'cases-dispatch', 'faults-sweep',
+    expect(names).toEqual(['alerts-email', 'appointment-reminders', 'calls-cost', 'case-ageing', 'cases-dispatch', 'faults-sweep',
       'learning-sweep', 'payment-checks', 'queue-expire', 'reconcile', 'workflow-runs-sweep']);
     expect(results.filter((r) => r.outcome !== 'ok')).toEqual([]);
     expect(results.find((r) => r.job === 'case-ageing')!.summary.clients).toBe(3);

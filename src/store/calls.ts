@@ -334,13 +334,24 @@ async function createInbound(c: pg.PoolClient, providerId: string, ev: Normalize
 }
 
 /** Price a finished call and store the result. Failing to price never loses the call or fails the webhook. */
-export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'not_applicable'> {
+/** How long after a call ends it is costed even if the relay never let go of it (a server stopped mid-call). */
+export const COST_WAIT_MS = 5 * 60_000;
+
+export async function costCall(c: pg.PoolClient, actorId: string | null, callId: string, opts: { force?: boolean } = {}): Promise<'recorded' | 'failed' | 'reconciled' | 'variance' | 'not_applicable' | 'pending'> {
   const call = (await c.query('SELECT * FROM calls WHERE id = $1 FOR UPDATE', [callId])).rows[0];
   if (!call) throw new AppError(404, 'Call not found.');
   if (!call.ended_at) throw new AppError(409, 'The call has not ended yet.');
   // Already priced and possibly checked: pricing again must not wipe a reconciled or variance flag.
   // A call that never connected has nothing to price, and re-pricing must not invent a cost for it.
   if (['recorded', 'reconciled', 'variance', 'not_applicable'].includes(call.cost_status)) return call.cost_status;
+  // The speech relay may still be writing what the call used (a reply landing, a line said again): costed once it lets go,
+  // by the 'calls-cost' job, so nothing it adds after is left out. A call is priced once, so it must not be priced early.
+  if (!opts.force && Date.now() - new Date(call.ended_at).getTime() < COST_WAIT_MS) {
+    const busy = (await c.query(
+      `SELECT $2::uuid IS NOT NULL OR EXISTS (SELECT 1 FROM workflow_runs WHERE call_id = $1 AND kind = 'live' AND status = 'processing') AS busy`,
+      [callId, call.relay_owner ?? null])).rows[0].busy;
+    if (busy) return 'pending';
+  }
   try {
     await recordCallCost(c, actorId, {
       callId, tenantId: call.tenant_id, projectId: call.project_id ?? undefined, direction: call.direction,
@@ -505,4 +516,31 @@ export async function hangUpCalls(d: CallDeps, calls: { providerId: string; prov
     }
   }
   return hungUp;
+}
+
+/**
+ * Cost the calls that ended while the relay still held them, once it has let go (or once enough time has passed that it
+ * never will). Each call in its own transaction, so one that fails does not stop the rest.
+ */
+export async function costPendingCalls(d: CallDeps, limit = 100) {
+  const ids = await asInternal(d, async (c) => (await c.query(
+    `SELECT id FROM calls WHERE cost_status = 'pending' AND ended_at IS NOT NULL ORDER BY ended_at LIMIT $1`, [limit])).rows.map((r) => r.id as string));
+  const tally: Record<string, number> = {};
+  for (const id of ids) {
+    const r = await asInternal(d, (c) => costCall(c, null, id)).catch(() => 'error' as const);
+    tally[r] = (tally[r] ?? 0) + 1;
+  }
+  return tally;
+}
+
+/** Cost again every call whose cost could not be recorded, e.g. once a missing rate has been entered. */
+export async function retryFailedCosts(d: CallDeps, actorId: string, limit = 500) {
+  const ids = await asInternal(d, async (c) => (await c.query(
+    `SELECT id FROM calls WHERE cost_status = 'failed' ORDER BY ended_at LIMIT $1`, [limit])).rows.map((r) => r.id as string));
+  const tally: Record<string, number> = {};
+  for (const id of ids) {
+    const r = await asInternal(d, (c) => costCall(c, actorId, id, { force: true })).catch(() => 'error' as const);
+    tally[r] = (tally[r] ?? 0) + 1;
+  }
+  return { checked: ids.length, ...tally };
 }

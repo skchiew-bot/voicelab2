@@ -48,8 +48,6 @@ export const twilio: Adapter = {
       help: "The voice to speak with, as that service names it. Twilio's default if empty." },
     { key: 'relayTranscriptionProvider', label: 'Live call speech recognition', type: 'string', required: false,
       help: "Which of Twilio's speech services hears the caller, e.g. Deepgram or Google. Twilio's default if empty." },
-    { key: 'relayPricingProviderId', label: 'Live call speech pricing', type: 'string', required: false,
-      help: "The voice provider whose rates price Twilio's speech relay on a live call: its minutes and the characters it speaks. A live call cannot be costed without one." },
   ],
   defaultCapabilities: {
     inbound_calls: 'native', outbound_calls: 'native', call_transfer: 'native', call_recording: 'native',

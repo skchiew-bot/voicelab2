@@ -109,7 +109,7 @@ export const PHASES: PhaseProgress[] = [
       'Mood and intent are read by word lists (English and Bahasa Malaysia, extendable per client); a model for turns the lists cannot read is not connected',
       'QA judgement questions need a model; none is connected, so they are left out of the score and the scorecard says it is incomplete',
       'The council (Phase 6) does not exist, so ticket council notes are empty and changes are not reviewed by it',
-      'Production is reached only through an approved change, except by the deployers the owner names in PRODUCTION_DEPLOYERS (owner\'s decision, 2026-10-11); none is named until the owner sets it, so until then every production deploy and rollback needs a change. A rollback by anyone else means proposing the earlier version as a change, which needs it live in staging and rehearsed again',
+      'A workflow version is put live in production only through an approved change, except by the deployers the owner names in PRODUCTION_DEPLOYERS (owner\'s decision, 2026-10-11), and only once each holds a token they chose; none is named until the owner sets it, so until then every production deploy and rollback needs a change. A rollback by anyone else means proposing the earlier version as a change, which needs it live in staging and rehearsed again. Which workflow a number answers with, and a client\'s approval levels, are changed by any admin without approval',
     ],
   },
   {

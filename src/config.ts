@@ -14,7 +14,8 @@ const schema = z.object({
   SCHEDULER: z.enum(['on', 'off']).default('on'),
   // The staff (by sign-in email, comma-separated) who may put a flow live in production directly. Everyone else proposes
   // a change, which a different person approves. Set by the owner here, outside the API, so no admin can add themselves.
-  PRODUCTION_DEPLOYERS: z.string().default('').transform((s) => s.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean)),
+  PRODUCTION_DEPLOYERS: z.string().default('').transform((s) => s.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean))
+    .pipe(z.array(z.string().email())),
 });
 
 export type Config = z.infer<typeof schema>;

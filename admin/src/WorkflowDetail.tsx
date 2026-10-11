@@ -33,7 +33,10 @@ function Issues({ errors, warnings }: { errors: WfIssue[]; warnings: WfIssue[] }
   );
 }
 
-export function WorkflowDetail({ id }: { id: string }) {
+/** How the signed-in person may reach production: directly (a named deployer), after replacing their token, or by a change. */
+type ProductionAccess = 'direct' | 'replace-token' | 'change';
+
+export function WorkflowDetail({ id, production = 'change' }: { id: string; production?: ProductionAccess }) {
   const wf = useLoad(() => api<WorkflowDetailData>('GET', `/internal/workflows/${id}`), [id]);
   const latest = wf.data?.versions[0];
   const [draft, setDraft] = useState('');
@@ -93,19 +96,22 @@ export function WorkflowDetail({ id }: { id: string }) {
                   <td>{fmtDate(v.created_at)}</td><td>{v.note}</td>
                   <td className="actions">
                     <button className="secondary" disabled={deployAction.pending} onClick={() => deploy(v, 'staging')} aria-label={`Put ${v.version} in staging`}>Staging</button>{' '}
-                    <button className="secondary" disabled={deployAction.pending} onClick={() => deploy(v, 'production')} aria-label={`Put ${v.version} in production`}>Production</button>
+                    {production === 'direct' && <button className="secondary" disabled={deployAction.pending} onClick={() => deploy(v, 'production')} aria-label={`Put ${v.version} in production`}>Production</button>}
                   </td>
                 </tr>
               ))}</tbody>
             </table>
             <div className="inline">
-              {(['staging', 'production'] as const).map((env) => (
+              {(production === 'direct' ? ['staging', 'production'] as const : ['staging'] as const).map((env) => (
                 <button key={env} className="link" disabled={deployAction.pending || !d.previous[env]} onClick={() => rollback(env)}>
                   {d.previous[env] ? `Roll ${env} back to ${d.previous[env]}` : `Nothing to roll ${env} back to`}
                 </button>
               ))}
             </div>
             <p className="muted">Calls already under way keep the version they started on when you roll back.</p>
+            {production !== 'direct' && <p className="muted" aria-label="How to reach production">{production === 'replace-token'
+              ? 'You are named to put flows live in production, but your sign-in token is still the one you were given. Replace it ("New token" at the top) first.'
+              : 'Putting a version live in production, or rolling production back, needs an approved change: propose it on the Changes screen, and a different person approves it.'}</p>}
           </section>
 
           <section className="card" aria-label="Edit">
@@ -165,7 +171,7 @@ function Simulate({ workflowId, detail }: { workflowId: string; detail: Workflow
       {result && (
         <>
           <div className={result.clean ? 'notice ok' : 'errors'} role={result.clean ? 'status' : 'alert'}>
-            {result.passed} of {result.total} passed. {result.clean ? 'This version can now go to production.' : 'Fix the failures before this version can go to production.'}
+            {result.passed} of {result.total} passed. {result.clean ? 'This version has passed the rehearsal production needs.' : 'Fix the failures before this version can go to production.'}
             {result.gateProblems && result.gateProblems.length > 0 && ` ${result.gateProblems.join(' ')}`}
           </div>
           <table>

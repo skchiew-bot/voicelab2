@@ -51,7 +51,8 @@ import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-r
 import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
 import { parseTwilio, twimlHold, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
 import { createProvider, getProvider, listProviders, preflight, recheckProvider, setCapability } from './store/providers.js';
-import { ACTIVE, approveAdmin, createProject, createTenant, createUser, disableUser, listProjects, listTenants, listUsers, STAFF_ROLES, type Role } from './store/tenants.js';
+import { ACTIVE, approveAdmin, createProject, createTenant, createUser, disableUser, listProjects, listTenants, listUsers, rotateOwnToken, STAFF_ROLES, type Role } from './store/tenants.js';
+import { productionAccess } from './store/workflows.js';
 
 interface Session { userId: string; email: string; role: Role; actor: Actor }
 
@@ -159,7 +160,14 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
   // Who am I: the admin UI uses this to validate a pasted token and pick its menus.
   app.get('/me', async (req) => {
     const s = await authenticate(req);
-    return { email: s.email, role: s.role, readOnly: s.actor.kind === 'internal' && Boolean(s.actor.readOnly) };
+    // production: how this person may put a flow live there (directly, after replacing their token, or by a change).
+    const production = s.actor.kind === 'internal' ? await withActor(pool, s.actor, (c) => productionAccess(c, s.userId, config.PRODUCTION_DEPLOYERS)) : 'change';
+    return { email: s.email, role: s.role, readOnly: s.actor.kind === 'internal' && Boolean(s.actor.readOnly), production };
+  });
+  // Replace your own sign-in token. The one you were given was shown to whoever added you; this one only you see.
+  app.post('/me/token', async (req) => {
+    const s = await authenticate(req);
+    return withActor(pool, { kind: 'internal' }, (c) => rotateOwnToken(c, s.userId));
   });
 
   // ------------------------------------------------------------ users

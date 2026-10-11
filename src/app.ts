@@ -40,7 +40,8 @@ import { listDeliveries, listSubscriptions, sendTest, subscribe, subscriptionSch
 import { actionSchema, controlState, runAction } from './store/control-actions.js';
 import { CROSS_CUTTING, DECISIONS, PHASES } from './progress.js';
 import { clientAddUser, clientCalls, clientDisableUser, clientSummary, clientUsers } from './store/portal.js';
-import { listReconciliations, reconcileCall, reconcileSweep } from './store/reconcile.js';
+import { audit } from './store/audit.js';
+import { listReconciliations, reconcileCall, reconcileSweep, recordTelnyxCost } from './store/reconcile.js';
 import { countsOf, createScheduler, drain, listJobs, runJobNow, updateJob, type Job } from './scheduler.js';
 import { sweepFaults } from './store/call-end.js';
 import { expireQueued } from './store/concurrency.js';
@@ -49,7 +50,7 @@ import { checkPayments, cleanNote, dispatchDue, sweepAgeing } from './store/case
 import { sweepAudio, sweepDrift } from './store/learning.js';
 import { sweepReminders } from './store/appointments.js';
 import { REFERENCE_NOTE, REFERENCE_RATES, referenceRateFor } from './reference-rates.js';
-import { parseTelnyx, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
+import { parseTelnyx, parseTelnyxCost, verifyTelnyxSignature, type TelnyxCreds } from './telephony/telnyx.js';
 import { parseTwilio, twimlHold, twimlQueueTimedOut, twimlReject, twimlTestCall, verifyTwilioSignature, type TwilioCreds } from './telephony/twilio.js';
 import { createProvider, getProvider, listProviders, preflight, recheckProvider, setCapability } from './store/providers.js';
 import { ACTIVE, approveAdmin, createProject, createTenant, createUser, disableUser, listProjects, listTenants, listUsers, rotateOwnToken, STAFF_ROLES, type Role } from './store/tenants.js';
@@ -812,6 +813,15 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
       rawBody: (req as FastifyRequest & { rawBody?: string }).rawBody ?? '',
     });
     if (!ok) throw new AppError(403, 'Bad signature.');
+    // What Telnyx charged for a call: kept against it and checked against our estimate. A report in a form we do not
+    // recognise is refused (Telnyx retries it), never read as a guess.
+    let report;
+    try { report = parseTelnyxCost(req.body); } catch (err) {
+      // Left a trace, so a report Telnyx stops retrying is not lost unseen. The reason is our own fixed wording, never its text.
+      await withActor(pool, { kind: 'internal' }, (c) => audit(c, null, 'webhook.unreadable', 'provider', provider.id, { kind: 'cost', reason: (err as Error).message }));
+      throw new AppError(400, (err as Error).message);
+    }
+    if (report) { await recordTelnyxCost(callDeps, provider, report); return reply.status(200).send({ ok: true }); }
     const ev = parseTelnyx(req.body);
     if (ev) await processWebhook(callDeps, provider, ev);
     return reply.status(200).send({ ok: true });

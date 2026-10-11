@@ -262,6 +262,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('carries on the same run when the relay reconnects, and starts the workflow once when two connections arrive together', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
     const { callSid, callId } = await ring();
     const [a, b] = await Promise.all([connect(), connect()]);
     a.send(setup(callSid, callId)); b.send(setup(callSid, callId));
@@ -276,6 +277,32 @@ describe('a live call through the speech relay', () => {
     speaker.send(prompt('no'));
     await speaker.until(4); await settle();
     expect(speaker.got.slice(2)).toEqual([{ type: 'text', token: 'Thank you. Goodbye.', last: true }, { type: 'end' }]);
+    for (const l of [a, b]) l.ws.close();
+    await Promise.all([a.closed, b.closed]); await settle();
+    expect((await runOf(callId))[0]).toMatchObject({ status: 'ended', outcome: 'promised' });
+  });
+
+  it('asks the question again, and does not apply the caller\'s words, on a connection that carries on a call another is still serving', async () => {
+    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    const { callSid, callId } = await ring();
+    const [a, b] = await Promise.all([connect(), connect()]);
+    a.send(setup(callSid, callId));
+    await a.until(2);                                                                          // the run exists, and a has put the question
+    b.send(setup(callSid, callId));                                                            // b arrives after it: it carries the call on, silently
+    const opened = async () => (await env.pool.query(`SELECT payload->>'opening' AS o FROM call_events WHERE call_id = $1 AND type = 'relay.connected' ORDER BY id`, [callId])).rows.map((r) => r.o);
+    expect(await waitFor(async () => (await opened()).length === 2)).toBe(true);
+    expect(await opened()).toEqual(['start', 'resume']);
+    expect(b.got).toEqual([]);
+    // The question went out on a, so the caller may not have heard it on b's line: nothing they say before b has asked
+    // it is applied to it, however many times they speak (here twice, before the first is handled).
+    b.send(prompt('no')); b.send(prompt('no, sorry'));
+    expect((await b.until(2)).map((m) => m.type)).toEqual(['play', 'text']);
+    await settle(); await settle();
+    expect(b.got).toHaveLength(2);
+    expect((await runOf(callId))[0]).toMatchObject({ status: 'awaiting_reply' });
+    b.send(prompt('no'));                                                                      // the answer to the question b put
+    await b.until(4); await settle();
+    expect(b.got.slice(2)).toEqual([{ type: 'text', token: 'Thank you. Goodbye.', last: true }, { type: 'end' }]);
     for (const l of [a, b]) l.ws.close();
     await Promise.all([a.closed, b.closed]); await settle();
     expect((await runOf(callId))[0]).toMatchObject({ status: 'ended', outcome: 'promised' });
@@ -325,8 +352,11 @@ describe('a live call through the speech relay', () => {
     fresh.send(setup(callSid, callId)); await settle(); await settle();
     old.ws.close(); await old.closed; await settle();
     expect((await runOf(callId))[0].status).toBe('awaiting_reply');                       // the stale line closing did not end it
+    // The question went out on the old line, so the new one asks it again before taking an answer (L-043).
     fresh.send(prompt('yes'));
-    expect((await fresh.until(1))[0]).toEqual({ type: 'text', token: 'Please say your secret word.', last: true });
+    expect((await fresh.until(2)).map((m) => m.type)).toEqual(['play', 'text']);
+    fresh.send(prompt('yes'));
+    expect((await fresh.until(3))[2]).toEqual({ type: 'text', token: 'Please say your secret word.', last: true });
     fresh.ws.close(); await fresh.closed; await settle();
     expect((await runOf(callId))[0]).toMatchObject({ status: 'ended', outcome: 'abandoned' });  // the line that held it did
   });

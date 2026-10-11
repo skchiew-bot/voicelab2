@@ -714,8 +714,9 @@ export function buildApp(pool: pg.Pool, config: Config, deps: Deps = {}): Fastif
       socket.on('message', (data: Buffer) => {
         const m = parseRelay(data.toString('utf8'));
         if (!m) return;
-        // The question the call was on when these words arrived; null if this connection was not yet serving the call.
-        const askedAt = session?.runId ? session.version : null;
+        // The question the call was on when these words arrived; null if this connection had not yet put a question to the
+        // caller itself (it was not yet serving the call, or it carried the call on and has not asked again yet, L-043).
+        const askedAt = session?.runId && session.asking ? session.version : null;
         // One message at a time, in order: a turn finishes before the next is looked at.
         queue = queue.then(async () => {
           if (m.type === 'setup') {

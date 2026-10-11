@@ -160,7 +160,7 @@ export async function openRelay(d: RelayDeps, providerId: string, setup: Extract
       session.runId = opening.run.id; session.version = opening.run.state_version;
       if (opening.run.status === 'ended') return endedRun(d, session, opening.run);
       if (opening.run.stuck) return failed(d, session);
-      return { session, send: [] };   // carry on: the next thing the caller says answers the question already asked
+      return { session, send: [] };   // carry on silently: when the caller speaks, the question is asked again (see onRelayMessage)
     }
     case 'start':
       session.asking = true;
@@ -179,8 +179,9 @@ export async function openRelay(d: RelayDeps, providerId: string, setup: Extract
 /**
  * Something came from the relay. The caller's finished words are the answer to the question the call was on when they
  * finished speaking (`askedAt`); anything they say while that answer is being worked out was said before the next
- * question, so it is not applied to it. `askedAt` is null for words that arrived before this connection was serving the
- * call: on a connection that started the run they were said before the first question was heard, so they answer nothing.
+ * question, so it is not applied to it. `askedAt` is null for words that arrived before this connection had put a
+ * question to the caller itself (before its first lines, or, on a connection that carried the call on, before it asked
+ * again): they answer nothing.
  */
 export async function onRelayMessage(d: RelayDeps, session: RelaySession, m: RelayInbound, askedAt?: number | null): Promise<RelayOutbound[]> {
   if (session.ended || session.closed) return [];
@@ -189,6 +190,9 @@ export async function onRelayMessage(d: RelayDeps, session: RelaySession, m: Rel
   // A connection that stood by while another started the call takes it over once the run exists. The caller's words are
   // not applied: the question went to the connection that dropped, so they may never have heard it. It is asked again.
   if (!session.runId) return (await standbyCheck(d, session)).send;
+  // A connection that carried on a call another was serving did not put the question the call is on: it went out on the
+  // other line, which Twilio may already have replaced. As when taking over from standby, it is asked again (L-043).
+  if (!session.asking) return (await catchUp(d, session, true)).send;
   if (askedAt === null && session.asking) return [];
   const asked = askedAt ?? session.version;
   try {
@@ -250,15 +254,16 @@ export async function standbyCheck(d: RelayDeps, session: RelaySession): Promise
 
 /**
  * A connection that resumed or took over a call whose reply was still being applied, or that another connection has moved
- * on since, catches up: once the run is waiting again, it says the lines since the caller last spoke. `again` means a
- * reply is still being applied, so look later.
+ * on since, catches up: once the run is waiting again, it says the lines since the caller last spoke. `always` says them
+ * even when the run has not moved on, for a connection that did not put its question itself. `again` means a reply is
+ * still being applied, so look later.
  */
-async function catchUp(d: RelayDeps, session: RelaySession): Promise<{ send: RelayOutbound[]; again: boolean }> {
+async function catchUp(d: RelayDeps, session: RelaySession, always = false): Promise<{ send: RelayOutbound[]; again: boolean }> {
   const found = await asInternal(d, async (c) => {
     const run = (await c.query(
       `SELECT status, outcome, error, state_version, (status = 'processing' AND claimed_at < now() - make_interval(secs => $2)) AS stuck
          FROM workflow_runs WHERE id = $1`, [session.runId, STUCK_REPLY_MS / 1000])).rows[0] as { status: string; outcome: string | null; error: string | null; state_version: number; stuck: boolean } | undefined;
-    const behind = (run?.status === 'awaiting_reply' || run?.status === 'ended') && run.state_version > session.version;
+    const behind = (run?.status === 'awaiting_reply' || run?.status === 'ended') && (always || run.state_version > session.version);
     return { run, lines: behind ? await lastLines(c, session.runId!) : null };
   });
   const run = found.run;

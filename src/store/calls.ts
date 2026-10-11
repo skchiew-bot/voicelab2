@@ -546,7 +546,9 @@ export async function costPendingCalls(d: CallDeps, limit = 500) {
   // A caller timed out of the queue is costed when the provider reports how long they were held (the 'ended' event),
   // never before: costing it now would record no provider time and the held time would never be costed.
   const tally: Record<string, number> = {};
-  await eachPage(d, `cost_status = 'pending' AND ended_at IS NOT NULL AND NOT (end_reason = 'queue_timeout' AND duration_seconds IS NULL)`, limit,
+  // Nor a call waiting to hear how long a transfer's agent leg lasted: the dial's report, or a person settling it, costs it.
+  await eachPage(d, `cost_status = 'pending' AND ended_at IS NOT NULL AND NOT (end_reason = 'queue_timeout' AND duration_seconds IS NULL)
+      AND NOT (transfer_started_at IS NOT NULL AND transfer_seconds IS NULL)`, limit,
     async (id) => { const r = await asInternal(d, (c) => costCall(c, null, id)).catch(() => 'error' as const); tally[r] = (tally[r] ?? 0) + 1; });
   return tally;
 }

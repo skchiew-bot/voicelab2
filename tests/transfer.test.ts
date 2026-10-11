@@ -437,6 +437,9 @@ describe('a live caller passed to a person', () => {
       ]);
       expect(costed.filter((l) => l.billing_line === 'relay').map((l) => [l.leg, l.component])).toEqual([['caller', 'tts'], ['caller', 'other']]);
       expect(costed.filter((l) => l.leg === 'agent')).toEqual([{ leg: 'agent', component: 'telephony_leg', billing_line: 'main', amount_usd: '0.02800000' }]);
+      // Twilio prices the relay as its own item, so the call is checked by its two legs alone: 90 + 61 seconds, and
+      // 0.0170 + 0.0020 + 0.0280 = 0.0470 USD. Were the relay's lines counted, this would show a variance.
+      expect((await must(post(`/internal/calls/${a}/reconcile`, { source: 'manual', reportedSeconds: 151, reportedCost: '0.0470' }))).json().outcome).toBe('matched');
       // Only an inbound rate: the agent leg cannot be priced, so the call is refused a cost, never recorded with the leg free.
       await rates(1000, [{ ...LEG, rate: '0.0085', direction: 'inbound' }, ...FREE_RELAY]);
       const b = await putThrough({ DialCallDuration: '61' });

@@ -251,4 +251,14 @@ describe('a call\'s cost record holds everything the call used', () => {
     await costPendingCalls({ pool: env.pool } as Parameters<typeof costPendingCalls>[0]);
     expect((await status(id)).cost_status).toBe('recorded');
   });
+
+  it('leaves a call waiting on a transfer agent leg to the dial report, so it never takes the place of a call the job can cost', async () => {
+    const deps = { pool: env.pool } as Parameters<typeof costPendingCalls>[0];
+    const waiting = await finishedCall(60, twilioId, COST_WAIT_MS + 60_000);
+    await env.pool.query(`UPDATE calls SET transfer_started_at = started_at WHERE id = $1`, [waiting.id]);
+    const ready = await finishedCall(60, twilioId, COST_WAIT_MS + 30_000);
+    expect(await costPendingCalls(deps, 1)).toEqual({ recorded: 1 });            // the one place goes to the call that can be costed
+    expect((await status(ready.id)).cost_status).toBe('recorded');
+    expect((await status(waiting.id)).cost_status).toBe('pending');
+  });
 });

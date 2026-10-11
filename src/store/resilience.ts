@@ -156,16 +156,16 @@ export const getRoutes = async (c: pg.PoolClient, tenantId: string, role: 'voice
 // ------------------------------------------------------------------------------------- fallback plan
 export async function setFallbackPlan(c: pg.PoolClient, actorId: string | null, tenantId: string, p: FallbackPlan) {
   await c.query(
-    `INSERT INTO fallback_plans (tenant_id, holding_message, offer_callback, human_transfer, voicemail) VALUES ($1,$2,$3,$4,$5)
-     ON CONFLICT (tenant_id) DO UPDATE SET holding_message = $2, offer_callback = $3, human_transfer = $4, voicemail = $5, updated_at = now()`,
-    [tenantId, p.holdingMessage, p.offerCallback, p.humanTransfer, p.voicemail]);
+    `INSERT INTO fallback_plans (tenant_id, holding_message, offer_callback, human_transfer, voicemail, wait_message) VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (tenant_id) DO UPDATE SET holding_message = $2, offer_callback = $3, human_transfer = $4, voicemail = $5, wait_message = $6, updated_at = now()`,
+    [tenantId, p.holdingMessage, p.offerCallback, p.humanTransfer, p.voicemail, p.waitMessage ?? null]);
   await audit(c, actorId, 'fallback.set', 'tenant', tenantId, { offerCallback: p.offerCallback, humanTransfer: p.humanTransfer, voicemail: p.voicemail });
   return getFallbackPlan(c, tenantId);
 }
 
 export async function getFallbackPlan(c: pg.PoolClient, tenantId: string): Promise<FallbackPlan | null> {
   const r = (await c.query('SELECT * FROM fallback_plans WHERE tenant_id = $1', [tenantId])).rows[0];
-  return r ? { holdingMessage: r.holding_message, offerCallback: r.offer_callback, humanTransfer: r.human_transfer, voicemail: r.voicemail } : null;
+  return r ? { holdingMessage: r.holding_message, offerCallback: r.offer_callback, humanTransfer: r.human_transfer, voicemail: r.voicemail, waitMessage: r.wait_message } : null;
 }
 
 export async function addCallbackRequest(c: pg.PoolClient, e: { tenantId: string; callId: string; contactRef?: string; reason: string }) {

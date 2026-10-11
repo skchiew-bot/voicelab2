@@ -43,7 +43,7 @@ export const PHASES: PhaseProgress[] = [
       'Twilio\'s per-minute charge for the speech relay is not in the rate card until an operator adds it; the relay speaks in the one language set on the provider',
       'Telnyx automatic reconciliation (the reconciliation sweep now runs every hour as a scheduled job)',
       'Voice usage (characters, tokens) is not yet fed into cost records, including lines the voice link says again when a reconnected line takes a call over (recorded on the call, not yet priced)',
-      'When the server running a call\'s start or reply dies, a reconnected line can wait up to 60 to 90 seconds with nothing to say before the caller hears the holding line; there is no interim "one moment" line yet',
+      'When the server running a call\'s start or reply dies, a reconnected line still waits up to 60 to 90 seconds before the holding line, but after 5 seconds with nothing said the caller now hears a short wait line once ("One moment, please.", or the client\'s own, set on its fallback plan through the API; no console field yet). Tested only against a fake relay over real WebSockets; a slow but healthy reply on the caller\'s own line still has no wait line',
     ],
   },
   {

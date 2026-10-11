@@ -16,7 +16,11 @@ export interface Load { providerId: string; active: number; ceiling: number | nu
 export async function providerLoad(c: pg.PoolClient, providerIds: string[], at = new Date()): Promise<Map<string, Load>> {
   const out = new Map<string, Load>();
   for (const providerId of providerIds) {
-    const active = (await c.query(`SELECT count(*)::int AS n FROM calls WHERE provider_id = $1 AND status IN ${ACTIVE}`, [providerId])).rows[0].n as number;
+    // A call being put through to a person holds a second channel for the agent's leg until the dial ends (Twilio reports
+    // the end of the dial when the agent's leg is over, whoever answered).
+    const active = (await c.query(
+      `SELECT (count(*) + count(*) FILTER (WHERE transfer_status = 'dialing'))::int AS n FROM calls WHERE provider_id = $1 AND status IN ${ACTIVE}`,
+      [providerId])).rows[0].n as number;
     const v = (await c.query(
       `SELECT concurrency_limit FROM charging_versions WHERE provider_id = $1 AND effective_from <= $2 ORDER BY effective_from DESC LIMIT 1`, [providerId, at])).rows[0];
     out.set(providerId, { providerId, active, ceiling: v?.concurrency_limit ?? null });

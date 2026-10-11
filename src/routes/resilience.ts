@@ -5,7 +5,7 @@ import { withActor, type Actor } from '../db.js';
 import { hangUpCalls, promoteWaiting, type CallDeps } from '../store/calls.js';
 import { chargeExtraChannels, expireQueued, getEntitlement, providerLoad, setEntitlement } from '../store/concurrency.js';
 import { fundingStatus, setThresholds } from '../store/funding-monitor.js';
-import { clearTransferSettings, getTransferSettings, setTransferSettings } from '../store/transfer.js';
+import { clearTransferSettings, getTransferSettings, listTransferSettings, setTransferSettings } from '../store/transfer.js';
 import { getFallbackPlan, getPolicy, getRoutes, listFailovers, providerHealthViews, recordSample, setFallbackPlan, setPolicy, setRoutes } from '../store/resilience.js';
 
 interface Ctx { pool: pg.Pool; callDeps: CallDeps; internal(req: FastifyRequest): Promise<{ userId: string; actor: Actor }> }
@@ -51,7 +51,7 @@ export function registerResilienceRoutes(app: FastifyInstance, ctx: Ctx): void {
   });
   app.put('/internal/tenants/:tenantId/fallback', async (req) => {
     const { tenantId } = z.object({ tenantId: id }).parse(req.params);
-    const b = z.object({ holdingMessage: z.string().min(1).max(500), offerCallback: z.boolean(), humanTransfer: z.boolean(), voicemail: z.boolean() }).parse(req.body);
+    const b = z.object({ holdingMessage: z.string().min(1).max(500), offerCallback: z.boolean(), humanTransfer: z.boolean(), voicemail: z.boolean(), waitMessage: z.string().trim().min(1).max(200).nullable().optional() }).parse(req.body);
     return run(req, (c, u) => setFallbackPlan(c, u, tenantId, b));
   });
   app.get('/internal/tenants/:tenantId/fallback', async (req) => {
@@ -65,6 +65,7 @@ export function registerResilienceRoutes(app: FastifyInstance, ctx: Ctx): void {
     const b = z.object({ agentNumber: z.string().min(1).max(40), ringSeconds: z.number().int().min(5).max(60).default(25), whisper: z.boolean().default(true) }).strict().parse(req.body);
     return run(req, (c, u) => setTransferSettings(c, u, tenantId, b));
   });
+  app.get('/internal/transfer-settings', async (req) => run(req, (c) => listTransferSettings(c)));
   app.get('/internal/tenants/:tenantId/transfer', async (req) => {
     const { tenantId } = z.object({ tenantId: id }).parse(req.params);
     return run(req, (c) => getTransferSettings(c, tenantId));

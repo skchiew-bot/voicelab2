@@ -1820,10 +1820,10 @@
  {
   "number": 43,
   "title": "Control Tower workstream: one board task id per piece of work, and PR data to #42",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/43",
   "created_at": "2026-10-11T00:13:21Z",
-  "merged_at": null,
+  "merged_at": "2026-10-11T03:54:29Z",
   "findings": [
    {
     "severity": "Medium",
@@ -1847,7 +1847,7 @@
    }
   ],
   "head": "claude/phase-CT-devlog-task-ids",
-  "head_sha": "a0a06661022c7023efecb913a28bffa8d32295ef"
+  "head_sha": "427c43f5b09b333d1b24317d02f85e7a931aa964"
  },
  {
   "number": 44,
@@ -1958,7 +1958,7 @@
    }
   ],
   "head": "claude/phase-3-callback-times",
-  "head_sha": "6f0df5340455284dd8c35ee08670a4e8e6de9def"
+  "head_sha": "b42fd616ef4bac19ec1b636e2ec701b59e31d281"
  },
  {
   "number": 47,
@@ -2082,7 +2082,7 @@
    }
   ],
   "head": "claude/phase-1-relay-reconnect-flake",
-  "head_sha": "24a72d9c58130a30b2397d49d16f39b07f0aa157"
+  "head_sha": "1c7980d43d794f89380c8d49db00584493555a2b"
  },
  {
   "number": 50,
@@ -2171,10 +2171,10 @@
  {
   "number": 51,
   "title": "Phase 6: only real live calls are evidence, and a script's author never approves it",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/51",
   "created_at": "2026-10-11T00:52:04Z",
-  "merged_at": null,
+  "merged_at": "2026-10-11T03:02:32Z",
   "findings": [
    {
     "severity": "Medium",
@@ -2222,15 +2222,15 @@
    }
   ],
   "head": "claude/phase-6-evidence-live",
-  "head_sha": "436cefb4a3892736951e95570f6cfc3356bf7594"
+  "head_sha": "d8dd4a8e14c3a202233b88a54b52221e44e69823"
  },
  {
   "number": 52,
   "title": "Phase 4: serve a queued inbound caller the moment a channel frees, and bill only service",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/52",
   "created_at": "2026-10-11T00:57:33Z",
-  "merged_at": null,
+  "merged_at": "2026-10-11T03:00:29Z",
   "findings": [
    {
     "severity": "High",
@@ -2255,18 +2255,42 @@
    {
     "severity": "Unrated",
     "fixed": true
+   },
+   {
+    "severity": "Med (security)",
+    "fixed": true
+   },
+   {
+    "severity": "Low-med",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
    }
   ],
   "head": "claude/phase-4-queue-to-workflow",
-  "head_sha": "add1075281f47d3b03e1ea6e9fa713f2f7d0f182"
+  "head_sha": "fb14c7bec76ecb0fa4104ba852ab05cd5147e599"
  },
  {
   "number": 53,
   "title": "DCT-6: Keep the branch audit tests clear of the machine's git config and load",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/53",
   "created_at": "2026-10-11T01:11:39Z",
-  "merged_at": null,
+  "merged_at": "2026-10-11T03:00:24Z",
   "findings": [
    {
     "severity": "Unrated",
@@ -2303,13 +2327,13 @@
  {
   "number": 54,
   "title": "Phase 7: a workflow records a promise to pay from the call",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/54",
   "created_at": "2026-10-11T01:21:02Z",
-  "merged_at": null,
+  "merged_at": "2026-10-11T03:00:26Z",
   "findings": [
    {
-    "severity": "High",
+    "severity": "HIGH",
     "fixed": true
    },
    {
@@ -2353,7 +2377,7 @@
     "fixed": true
    },
    {
-    "severity": "Low",
+    "severity": "Low (your decision)",
     "fixed": false
    },
    {
@@ -2419,10 +2443,10 @@
  {
   "number": 56,
   "title": "Phase 5: production only through an approved change, except for the owner's named deployers",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/56",
   "created_at": "2026-10-11T01:55:38Z",
-  "merged_at": null,
+  "merged_at": "2026-10-11T03:00:34Z",
   "findings": [
    {
     "severity": "High",
@@ -2466,15 +2490,15 @@
    }
   ],
   "head": "claude/phase-5-production-approval",
-  "head_sha": "0dd2750e1bbc7f1ccb6510e4b871a736e2b51f7a"
+  "head_sha": "e32227de13f6cd80cf4b0ebd91599bad74d3b992"
  },
  {
   "number": 57,
   "title": "Control Tower: ask a reason for every settings change made on other screens",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/57",
   "created_at": "2026-10-11T02:01:38Z",
-  "merged_at": null,
+  "merged_at": "2026-10-11T03:09:24Z",
   "findings": [
    {
     "severity": "High",
@@ -2514,15 +2538,15 @@
    }
   ],
   "head": "claude/phase-ct-settings-reasons",
-  "head_sha": "7af4297e162be052b8b216b7509b8f9fc9a48b9b"
+  "head_sha": "c15b5e1a98cf395a8af4c7659dc6ef1c896e9422"
  },
  {
   "number": 58,
   "title": "Control Tower: clusters close to the promotion threshold on the learning panel",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/58",
   "created_at": "2026-10-11T02:28:24Z",
-  "merged_at": null,
+  "merged_at": "2026-10-11T03:19:25Z",
   "findings": [
    {
     "severity": "Medium",
@@ -2542,6 +2566,261 @@
    }
   ],
   "head": "claude/phase-ct-learning-near",
-  "head_sha": "27ef0d89b1f9cd8ccf430d464052f010b3e68ad9"
+  "head_sha": "f1137ac5f783c9d1848264b0c790fc2666ca4026"
+ },
+ {
+  "number": 59,
+  "title": "Phase 1: check Telnyx calls against the cost Telnyx reports",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/59",
+  "created_at": "2026-10-11T02:40:24Z",
+  "merged_at": "2026-10-11T03:19:24Z",
+  "findings": [
+   {
+    "severity": "medium",
+    "fixed": true
+   },
+   {
+    "severity": "medium",
+    "fixed": true
+   },
+   {
+    "severity": "low–medium",
+    "fixed": true
+   },
+   {
+    "severity": "low",
+    "fixed": true
+   },
+   {
+    "severity": "low",
+    "fixed": true
+   },
+   {
+    "severity": "low",
+    "fixed": true
+   },
+   {
+    "severity": "low",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   }
+  ],
+  "head": "claude/phase-1-telnyx-reconcile",
+  "head_sha": "57dbc3a23f16666da67091616050520b2ca5a945"
+ },
+ {
+  "number": 60,
+  "title": "Dev Control Tower: PR data to #58, review findings read one way, board ids untangled",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/60",
+  "created_at": "2026-10-11T02:43:57Z",
+  "merged_at": "2026-10-11T03:00:32Z",
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low/Info",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Info",
+    "fixed": true
+   },
+   {
+    "severity": "Info",
+    "fixed": false
+   }
+  ],
+  "head": "claude/keen-bohr-z9h8p7",
+  "head_sha": "2c46037335f99b4e307f7c77423d7ce415f8622e"
+ },
+ {
+  "number": 61,
+  "title": "Phase 1: count the relay's wait line and holding message as speech; the manual cost route refuses live calls",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/61",
+  "created_at": "2026-10-11T02:53:35Z",
+  "merged_at": "2026-10-11T03:12:52Z",
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low–medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   }
+  ],
+  "head": "claude/phase-1-voice-usage-gaps",
+  "head_sha": "3097dbf1526f786eeb1973d04f41c7ba7ed4a292"
+ },
+ {
+  "number": 62,
+  "title": "Phase 0: record VR-5 and P0-L as done on the dev Control Tower board",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/62",
+  "created_at": "2026-10-11T02:56:58Z",
+  "merged_at": "2026-10-11T02:57:40Z",
+  "findings": [],
+  "head": "claude/phase-0-board-catchup",
+  "head_sha": "167525695334eefc9d6382424742da4f58c2af71"
+ },
+ {
+  "number": 63,
+  "title": "Phase 2: a model reads a reply the phrase rules cannot",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/63",
+  "created_at": "2026-10-11T03:44:30Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   }
+  ],
+  "head": "claude/phase-2-reply-model",
+  "head_sha": "5bde6f3d705f2a84bfc19fa9dbde617016c1cdd8"
+ },
+ {
+  "number": 64,
+  "title": "Phase 3: lock a DID when the carrier blocks the number we showed",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/64",
+  "created_at": "2026-10-11T03:48:13Z",
+  "merged_at": "2026-10-11T03:49:15Z",
+  "findings": [
+   {
+    "severity": "medium",
+    "fixed": true
+   },
+   {
+    "severity": "low",
+    "fixed": true
+   },
+   {
+    "severity": "low",
+    "fixed": true
+   },
+   {
+    "severity": "low",
+    "fixed": true
+   },
+   {
+    "severity": "low",
+    "fixed": true
+   },
+   {
+    "severity": "low",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-3-did-failure-events",
+  "head_sha": "01b3a181983cb3c4a711ca2776a17c08d1e1b77b"
  }
 ]

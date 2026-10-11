@@ -273,7 +273,7 @@ Built and tested against fakes (no real provider has failed during a live call):
 Not built or not proven:
 - **No voice provider is connected to live calls**, so voice failover is exercised through a model of a provider, and the bridge and replay are not heard.
 - **An outbound dial held back is not queued here:** keeping a queue would mean keeping the customer's number. The dialler retries after the time it is given.
-- **A queued inbound caller hears a hold message;** nothing yet starts the workflow when their turn comes.
+- **A queued inbound caller is handed to the workflow at the next turn of the hold message, on Twilio only.** When a channel frees, the longest-waiting caller is served from that moment (billed from then on), and the hold message's next redirect, at most about 20 seconds later, hands them to the speech relay and the workflow begins; tested end to end against fakes, not on a live call. Telnyx has no voice link yet, so a queued Telnyx caller who is served still hears the test message. Nothing yet cuts the hold short the moment a channel frees.
 - **Funding is not deducted as calls are costed**, so the monitor works from entered balances.
 - **Failures come from errors at dial time and reported samples,** not yet from provider webhooks or measured dead air on a live call.
 - **Nothing sends a failed provider traffic, so recovery needs probes.** `probeProviders` tries failed voice providers; it is not yet a scheduled job, because no voice provider is connected to the app for it to probe; a failed telephony provider has no probe yet and recovers only when samples are reported through the API. A recovered provider must show a run of good attempts spanning the minimum time.

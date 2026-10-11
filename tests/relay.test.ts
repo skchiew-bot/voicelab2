@@ -644,6 +644,39 @@ describe('a live call through the speech relay', () => {
     line.ws.close(); await line.closed;
   });
 
+  it('gives a caller who waited in the queue the workflow when their turn comes, at the next turn of the hold message', async () => {
+    // A client with one channel and its own number answering with the workflow.
+    const t = (await must(post('/internal/tenants', { name: 'Queue Co' }))).json().id;
+    const QUEUE_NUMBER = '+60300000778';
+    const n = (await must(post('/internal/numbers', { providerId: twilioId, e164: QUEUE_NUMBER, tenantId: t, country: 'MY' }))).json().id;
+    const wf = await liveWorkflow(t, 'queue_flow', flow, { replies: ['no'], outcome: 'promised' });
+    await must(put(`/internal/numbers/${n}/workflow`, { workflowId: wf }));
+    await must(put(`/internal/tenants/${t}/entitlement`, { inboundChannels: 1 }));
+    const voice = (sid: string, status: string) => twilioPost(`/webhooks/twilio/${twilioId}/voice`, { CallSid: sid, CallStatus: status, Direction: 'inbound', From: CUSTOMER, To: QUEUE_NUMBER });
+    const first = await voice('CA_queue_1', 'ringing');
+    expect(first.body).toContain('<ConversationRelay');                            // served at once
+    const second = await voice('CA_queue_2', 'ringing');
+    expect(second.body).toContain('<Say>');                                        // no channel free: the hold message,
+    expect(second.body).toContain(`<Redirect method="POST">${BASE}/webhooks/twilio/${twilioId}/voice</Redirect>`);   // then back here
+    expect(second.body).not.toContain('ConversationRelay');
+    // Still waiting at the next turn of the hold message.
+    expect((await voice('CA_queue_2', 'in-progress')).body).not.toContain('ConversationRelay');
+    // The first caller hangs up; the waiting one is served from now on.
+    const done = await twilioPost(`/webhooks/twilio/${twilioId}/status`, { CallSid: 'CA_queue_1', CallStatus: 'completed', Direction: 'inbound', CallDuration: '30' });
+    expect(done.statusCode).toBe(204);
+    const row = (await env.pool.query(`SELECT id, status, credit_from IS NOT NULL AS billed_from_now FROM calls WHERE provider_call_id = 'CA_queue_2'`)).rows[0];
+    expect(row).toMatchObject({ status: 'in_progress', billed_from_now: true });
+    // At the next turn of the hold message, the caller is handed to the relay for this call, and the workflow begins.
+    const turn = await voice('CA_queue_2', 'in-progress');
+    expect(turn.body).toContain(`<ConversationRelay url="wss://voicelab.test/relay/twilio/${twilioId}"`);
+    expect(turn.body).toContain(`<Parameter name="callId" value="${row.id}"/>`);
+    const line = await connect();
+    line.send(setup('CA_queue_2', row.id));
+    // the greeting (spoken: this client has no recording of it), then the first question
+    expect(await line.until(2)).toEqual([{ type: 'text', token: 'Hello from Voice Lab.', last: true }, { type: 'text', token: 'Can you pay this week?', last: true }]);
+    line.ws.close(); await line.closed; await settle();
+  });
+
   it('accepts the signature on the https form of the address too, as the scheme Twilio signs is not yet confirmed', async () => {
     const { callSid, callId } = await ring();
     const line = await connect(wsSig('https'));

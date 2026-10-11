@@ -116,12 +116,13 @@ Format, checked by `tests/devlog.test.ts`:
 
   - `tests/staff-roles.test.ts` › "is refused every change, on every route, and nothing in the database moves"
 ### L-011: Show old data as old
-- **Seen:** 2 times. A failed Control Tower refresh left stale numbers looking current, and a slow older request could overwrite a newer one ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The client portal's calls screen said "No calls yet." when its load had failed, showed no time for its data, and a token disabled mid-session left every screen failing instead of returning to sign-in (client portal independent review, 2026-10-10).
+- **Seen:** 3 times. A failed Control Tower refresh left stale numbers looking current, and a slow older request could overwrite a newer one ([#7](https://github.com/skchiew-bot/voicelab2/pull/7)). The client portal's calls screen said "No calls yet." when its load had failed, showed no time for its data, and a token disabled mid-session left every screen failing instead of returning to sign-in (client portal independent review, 2026-10-10). Once calls drew funding down, the funding panel dated a balance by its latest automatic draw-down, so an estimate resting on a weeks-old top-up looked freshly recorded (Phase 4 funding draw-down independent review, 2026-10-11).
 - **Rule:** Every live screen shows when its data is from, says so when an update fails, and lets the newest request win.
 - **Guards:**
   - `tests/admin-ui.test.ts` › "says so when a refresh fails, instead of showing old numbers as current"
   - `tests/admin-ui.test.ts` › "never mixes an old filter's late answer into the change log"
   - `tests/admin-ui.test.ts` › "gives a client its own portal: credits and calls for everyone, users for its admins, and a sign-in apart from the console"
+  - `tests/funding-usage.test.ts` › "dates the Control Tower's balance from the last entry staff recorded, not from the latest call drawn from it"
 
 ### L-012: One blip is not a failure, and one good sign is not a recovery
 - **Seen:** One error on the bridge message dropped a healthy provider. Recovery time was counted from the failure, not across the run of good attempts ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)).
@@ -367,7 +368,7 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/transfer.test.ts` › "runs the ladder when Twilio asks again after the agent number was removed"
 
 ### L-045: A failing check must stop the commit
-- **Seen:** A test run, the board update and the commit were joined with `;`, so a broken `src/progress.ts` (an unescaped apostrophe) was committed and pushed while the run reported a failure (human transfer, 2026-10-10).
+- **Seen:** 2 times. A test run, the board update and the commit were joined with `;`, so a broken `src/progress.ts` (an unescaped apostrophe) was committed and pushed while the run reported a failure (human transfer, 2026-10-10). The same unescaped apostrophe was written into `src/progress.ts` again; the typecheck joined with `&&` stopped it before any commit (Phase 4 funding draw-down, 2026-10-11).
 - **Rule:** Join the checks and the commit with `&&`, never `;`, and read the result before pushing. A failure you cannot explain is read from its kept output before anything else (L-038).
 - **Guards:**
   - `CLAUDE.md` › "so a failing check stops the commit"

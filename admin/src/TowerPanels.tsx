@@ -17,7 +17,7 @@ export function TowerPanels({ p }: { p: Panels }) {
               {p.funding.providers.map((f) => (
                 <tr key={`${f.providerId}-${f.currency}`}>
                   <td><a href={`#/providers/${f.providerId}`}>{f.provider}</a></td>
-                  <td>{fmtDecimal(f.balance)} {f.currency} <span className="muted">as of {fmtDate(f.recordedAt)}</span></td>
+                  <td>{fmtDecimal(f.balance)} {f.currency} <span className="muted">estimate: last recorded by staff {fmtDate(f.recordedAt)}, less calls since</span></td>
                   <td>{fmtDecimal(f.spent7d)} {f.currency}{f.spentInOtherCurrencies.map((o) => <div key={o.currency} className="muted">and {fmtDecimal(o.spent)} {o.currency}</div>)}</td>
                   <td>{fmtDecimal(f.perDay)} {f.currency}</td>
                   <td>{f.runway === 'measured' ? f.runwayDays : <span className="muted">{f.runway === 'no_spend' ? 'no spend to measure' : `unknown: spend is in ${f.spentInOtherCurrencies.map((o) => o.currency).join(', ')}`}</span>}</td>

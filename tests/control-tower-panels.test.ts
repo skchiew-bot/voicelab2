@@ -131,8 +131,9 @@ describe('the panels', () => {
        VALUES ($1,$2,$3,'CA_panel','outbound','completed', now() - interval '5 minutes', now() - interval '3 minutes', 61, 'recorded')`, [call, tenantId, providerId]);
     await must(env.call(st(), 'POST', `/internal/calls/${call}/cost`, { tenantId, direction: 'outbound', occurredAt: new Date(Date.now() - 300_000).toISOString(), usage: [{ providerId, usage: { seconds: 61 } }] }));
     await must(env.call(st(), 'POST', `/internal/calls/${call}/reconcile`, { source: 'manual', reportedCost: '0.028' }));
-    // 61 seconds billed as two minutes at 0.014 = 0.028; 0.028 over 7 days is 0.004 a day; 10 ÷ 0.004 = 2500 days.
-    expect((await panels()).funding.providers[0]).toMatchObject({ spent7d: '0.02800000', perDay: '0.00400000', runwayDays: '2500.0', runway: 'measured' });
+    // 61 seconds billed as two minutes at 0.014 = 0.028, drawn from the balance once (the reconciled record draws nothing more):
+    // 10 - 0.028 = 9.972 left. 0.028 over 7 days is 0.004 a day; 9.972 ÷ 0.004 = 2493 days.
+    expect((await panels()).funding.providers[0]).toMatchObject({ balance: '9.97200000', spent7d: '0.02800000', perDay: '0.00400000', runwayDays: '2493.0', runway: 'measured' });
     // A balance kept in MYR cannot be set against spend in USD: unknown, and it says why, never "no spend".
     await must(env.call(st(), 'POST', `/internal/providers/${providerId}/funding`, { kind: 'topup', amount: '50', currency: 'MYR' }));
     expect((await panels()).funding.providers.find((f: { currency: string }) => f.currency === 'MYR')).toMatchObject({
@@ -205,7 +206,7 @@ describe('the panels', () => {
     try {
       const p = await panels();
       expect(p.unavailable).toEqual(['deliverability']); expect(p.deliverability).toBeNull();
-      expect(p.funding.providers.find((f: { provider: string; currency: string }) => f.provider === 'tw-panel' && f.currency === 'USD')).toMatchObject({ runwayDays: '2500.0' }); expect(p.stitching.recordedPercent).toBe('40.00');      // 300 recorded of 750, once the 25 child workflows have spoken
+      expect(p.funding.providers.find((f: { provider: string; currency: string }) => f.provider === 'tw-panel' && f.currency === 'USD')).toMatchObject({ runwayDays: '2493.0' }); expect(p.stitching.recordedPercent).toBe('40.00');      // 300 recorded of 750, once the 25 child workflows have spoken
     } finally { await env.pool.query('ALTER TABLE outbound_outcomes_away RENAME TO outbound_outcomes'); }
   });
 });

@@ -55,6 +55,7 @@ async function call(answer: string) {
   return r.id;
 }
 const steps = async (runId: string) => (await env.pool.query(`SELECT type, node, payload FROM workflow_run_steps WHERE run_id = $1 ORDER BY seq`, [runId])).rows;
+const near = async () => (await must(get('/internal/control-tower/panels'))).json().learning.nearThreshold;
 const promotions = async (status?: string) => (await get(`/internal/tenants/${tenantId}/learning/promotions${status ? `?status=${status}` : ''}`)).json() as { id: string; status: string; node: string; script: string }[];
 
 beforeAll(async () => {
@@ -80,7 +81,11 @@ describe('logging, clustering and distilling', () => {
     expect(rows[0]).toMatchObject({ text: 'Hello {{name}}, you owe {{amount}}. Can you pay this week?', context_kind: 'start', synth_chars: 48, slot_chars: 8 });
     const report = (await get(`/internal/tenants/${tenantId}/learning`)).json();
     expect(report.threshold).toBe(5);
-    expect(report.clusters[0]).toMatchObject({ node: 'ask', support: 3, ready: false, percentOfThreshold: 60 });
+    expect(report.clusters[0]).toMatchObject({ node: 'ask', support: 3, ready: false, percentOfThreshold: 60, next: true });
+    // The Control Tower shows it as close: three of the five turns needed, from the same report (lesson L-033).
+    expect(await near()).toEqual({ closeAtPercent: 50, close: 1, readyToDistil: 0, clusters: [
+      { tenantId, tenant: 'Learning Co', workflow: 'learn_flow', node: 'ask', language: 'en', context: 'start', script: report.clusters[0].script, support: 3, threshold: 5, percentOfThreshold: 60 },
+    ] });
     expect((await post(`/internal/tenants/${tenantId}/learning/scan`, {})).json().created).toEqual([]);          // not enough evidence yet
     await expect(env.pool.query('UPDATE learning_turns SET text = $1', ['x'])).rejects.toThrow(/append-only/);
   });
@@ -95,8 +100,11 @@ describe('logging, clustering and distilling', () => {
 describe('promotion', () => {
   it('draws up one script once a cluster passes the threshold, and does not draw up a second while one is open', async () => {
     for (let i = 0; i < 3; i++) await call('yes thanks');
+    expect(await near()).toMatchObject({ close: 0, readyToDistil: 1, clusters: [] });                  // past the threshold, not drawn up yet
     const out = (await must(post(`/internal/tenants/${tenantId}/learning/scan`, {}))).json();
     expect(out.created).toHaveLength(1);
+    expect(await near()).toMatchObject({ close: 0, readyToDistil: 0, clusters: [] });                  // a script is in review: nothing waits
+    expect((await get(`/internal/tenants/${tenantId}/learning`)).json().clusters[0]).toMatchObject({ node: 'ask', ready: true, next: false });
     const [p] = await promotions();
     expect(p).toMatchObject({ status: 'in_review', node: 'ask', script: 'Hello {{name}}, you owe {{amount}}. Can you pay this week?' });
     const full = (await get(`/internal/promotions/${p!.id}`)).json();

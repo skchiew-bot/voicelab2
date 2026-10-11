@@ -182,15 +182,23 @@ export async function clusterGroups(c: pg.PoolClient, tenantId: string, cfg: Lea
   });
 }
 
-/** Clusters and how close each is to the frequency threshold: what the console shows before anything is promoted. */
+/**
+ * Clusters and how close each is to the frequency threshold: what the console shows before anything is promoted.
+ * `next` marks the cluster distilling would act on: the top one of its node and context, which has no script in review,
+ * approved or promoted (distilling skips those, so its turns cannot lead to a new script).
+ */
 export async function clusterReport(c: pg.PoolClient, tenantId: string) {
   const cfg = await getLearningConfig(c, tenantId);
   const groups = await clusterGroups(c, tenantId, cfg);
+  const key = (w: string, n: string, l: string, k: string, t: string) => [w, n, l, k, t].join('\n');
+  const open = new Set((await listPromotions(c, tenantId)).filter((p) => LIVE.includes(p.status))
+    .map((p) => key(p.workflow, p.node, p.language, p.context_kind, p.context_topic)));
   return {
     threshold: cfg.minSupport,
-    clusters: groups.flatMap((g) => g.clusters.map((k) => ({
+    clusters: groups.flatMap((g) => g.clusters.map((k, i) => ({
       workflow: g.workflow, node: g.node, language: g.language, context: g.contextKind + (g.contextTopic ? `/${g.contextTopic}` : ''),
       script: k.canonical, support: k.support, variants: k.variants, ready: k.support >= cfg.minSupport, percentOfThreshold: Math.min(100, Math.round((k.support / cfg.minSupport) * 100)),
+      next: i === 0 && !open.has(key(g.workflow, g.node, g.language, g.contextKind, g.contextTopic)),
     }))).sort((a, b) => b.support - a.support),
   };
 }

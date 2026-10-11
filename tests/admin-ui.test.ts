@@ -931,6 +931,7 @@ describe.skipIf(!run)('admin UI', () => {
     await signIn(page, env.staffToken);
     await expect(page.getByLabel('Runway')).toBeVisible();
     await expect(page.getByLabel('Learning loop')).toContainText('waiting for review');
+    await expect(page.getByLabel('Learning loop')).toContainText(/\d+ past the threshold and waiting to be drawn up as a script; \d+ close to it \(at least 50% of the way\)/);
     await expect(page.getByLabel('Modules')).toContainText('Cases');
     await page.goto(`${base}#/change-log`);
     const changes = page.getByLabel('Changes');

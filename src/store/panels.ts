@@ -11,7 +11,7 @@ import { appointmentSummary } from './appointments.js';
 import { caseSummary } from './cases.js';
 import { providerLoad } from './concurrency.js';
 import { dialPace } from './control-actions.js';
-import { learningSummary } from './learning.js';
+import { clusterReport, learningSummary } from './learning.js';
 import { outboundAnalytics } from './outbound.js';
 
 const BURN_DAYS = 7;
@@ -118,8 +118,27 @@ async function journeyQa(c: pg.PoolClient) {
   };
 }
 
+/** A cluster at or above this share of its client's frequency threshold, and not yet past it, is shown as close. */
+export const CLOSE_PERCENT = 50;
+const CLOSE_SHOWN = 10;
+
 async function learning(c: pg.PoolClient) {
   const tenants = (await c.query('SELECT DISTINCT p.tenant_id, t.name FROM promotions p JOIN tenants t ON t.id = p.tenant_id ORDER BY t.name')).rows;
+  // Clusters come from the Learning screen's own report, so the two never disagree (lesson L-033); every client with
+  // logged turns is counted, and the totals are over every cluster, not just the ones listed.
+  const withTurns = (await c.query('SELECT DISTINCT l.tenant_id, t.name FROM learning_turns l JOIN tenants t ON t.id = l.tenant_id ORDER BY t.name')).rows;
+  const close: { tenantId: string; tenant: string; workflow: string; node: string; language: string; context: string; script: string; support: number; threshold: number; percentOfThreshold: number }[] = [];
+  let ready = 0;
+  for (const t of withTurns) {
+    const r = await clusterReport(c, t.tenant_id);
+    for (const k of r.clusters.filter((x) => x.next)) {       // only what distilling would act on
+      if (k.ready) ready += 1;
+      else if (k.support * 100 >= r.threshold * CLOSE_PERCENT) {
+        close.push({ tenantId: t.tenant_id, tenant: t.name, workflow: k.workflow, node: k.node, language: k.language, context: k.context, script: k.script, support: k.support, threshold: r.threshold, percentOfThreshold: k.percentOfThreshold });
+      }
+    }
+  }
+  close.sort((a, b) => b.support * a.threshold - a.support * b.threshold || b.support - a.support);
   const total = { inReview: 0, approved: 0, promoted: 0, demoted: 0, rejected: 0 };
   for (const t of tenants) {
     const s = await learningSummary(c, t.tenant_id);
@@ -128,7 +147,10 @@ async function learning(c: pg.PoolClient) {
   const demotions = (await c.query(
     `SELECT count(*) FILTER (WHERE coalesce((detail->>'forced')::boolean, false) = false)::int AS drift, count(*) FILTER (WHERE (detail->>'forced')::boolean)::int AS forced
        FROM promotion_events WHERE kind = 'demoted' AND created_at > now() - interval '7 days'`)).rows[0];
-  return { ...total, driftDemotions7d: demotions.drift as number, forcedDemotions7d: demotions.forced as number };
+  return {
+    ...total, driftDemotions7d: demotions.drift as number, forcedDemotions7d: demotions.forced as number,
+    nearThreshold: { closeAtPercent: CLOSE_PERCENT, close: close.length, readyToDistil: ready, clusters: close.slice(0, CLOSE_SHOWN) },
+  };
 }
 
 async function modules(c: pg.PoolClient) {

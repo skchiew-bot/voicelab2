@@ -109,10 +109,21 @@ export function TowerPanels({ p }: { p: Panels }) {
 
       <section className="card" aria-label="Learning loop">
         <h2>Learning loop</h2>
-        {p.learning === null ? <Unavailable what="learning loop" /> : (
+        {p.learning === null ? <Unavailable what="learning loop" /> : (<>
           <p>{p.learning.inReview} waiting for review, {p.learning.approved} approved and waiting for audio, {p.learning.promoted} speaking from recordings, {p.learning.demoted} demoted
             ({p.learning.driftDemotions7d} for drift and {p.learning.forcedDemotions7d} by hand this week). <a href="#/learning">Review and decide</a></p>
-        )}
+          <p>{p.learning.nearThreshold.readyToDistil} past the threshold and waiting to be drawn up as a script; {p.learning.nearThreshold.close} close to it (at least {p.learning.nearThreshold.closeAtPercent}% of the way).</p>
+          {p.learning.nearThreshold.clusters.length > 0 && (
+            <table aria-label="Close to the threshold">
+              <thead><tr><th>Client</th><th>Workflow · node</th><th>Context</th><th>Wording</th><th>Turns</th><th>Of threshold</th></tr></thead>
+              <tbody>{p.learning.nearThreshold.clusters.map((k) => (
+                <tr key={`${k.tenantId}|${k.workflow}|${k.node}|${k.language}|${k.context}`}>
+                  <td>{k.tenant}</td><td>{k.workflow} · {k.node}</td><td>{k.context}</td><td>{k.script}</td><td>{k.support} of {k.threshold}</td><td>{k.percentOfThreshold}%</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          )}
+        </>)}
       </section>
 
       <section className="card" aria-label="Modules">

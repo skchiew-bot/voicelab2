@@ -27,6 +27,7 @@ export const scenario = z.object({
   expect: z.object({
     outcome: z.string().optional(), says: z.array(z.string()).optional(),
     doesNotSay: z.array(z.string()).optional(), handoff: z.string().optional(), contact: z.enum([...CONTACT_OUTCOMES, 'none']).optional(),
+    callback: z.union([z.literal('none'), z.object({ day: z.number().int().min(0).max(6), hour: z.number().int().min(0).max(23) })]).optional(),
   }).optional(),
 });
 

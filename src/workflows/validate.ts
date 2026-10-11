@@ -1,6 +1,6 @@
 import { conditionVars } from './conditions.js';
 import {
-  CONTACT_OUTCOMES, ID_RE, isName, LIMITS, OPERATORS, own, SLOT_RE, type Condition, type Json, type LocalText, type WorkflowDefinition, type WorkflowNode,
+  CONTACT_OUTCOMES, ID_RE, isName, validTimeZone, LIMITS, OPERATORS, own, SLOT_RE, type Condition, type Json, type LocalText, type WorkflowDefinition, type WorkflowNode,
 } from './definition.js';
 import { isWorkflowName } from './refs.js';
 import { slotsIn } from './render.js';
@@ -80,6 +80,7 @@ export function validateDefinition(input: unknown): ValidationResult {
   const used: { name: string; nodeId: string }[] = [];
   const spoken: { name: string; nodeId: string }[] = [];   // read out loud or fed to a model
   const sent: { name: string; nodeId: string }[] = [];     // sent to an integration
+  const recorded: { name: string; nodeId: string }[] = []; // recorded with the call's outcome (a callback time)
   const sensitive = new Set<string>();
   if (def.sensitiveVariables !== undefined) {
     if (!Array.isArray(def.sensitiveVariables) || !def.sensitiveVariables.every((v) => isName(v))) err('bad_sensitive', '"sensitiveVariables" must be a list of variable names.');
@@ -201,6 +202,23 @@ export function validateDefinition(input: unknown): ValidationResult {
         if (n.contact !== undefined && !(CONTACT_OUTCOMES as readonly unknown[]).includes(n.contact)) {
           nodeErr('unknown_contact', `"${String(n.contact)}" is not a call outcome (${CONTACT_OUTCOMES.join(', ')}). Leave it out when this end does not say.`);
         }
+        if (n.callback !== undefined) {
+          const cb = n.callback as unknown;
+          if (n.contact === undefined || n.contact === 'wrong_number') nodeErr('bad_callback', 'A callback time needs a call outcome on the same end, and a wrong number has none.');
+          if (!isObj(cb)) { nodeErr('bad_callback', 'callback must be { day, hour, timeZone }.'); break; }
+          if (!validTimeZone(cb.timeZone)) nodeErr('bad_callback', 'callback.timeZone must be a time zone name, such as Asia/Kuala_Lumpur.');
+          for (const [part, max] of [['day', 6], ['hour', 23]] as const) {
+            const p = cb[part];
+            if (!isObj(p) || typeof p.var !== 'string' || !isName(p.var) || !isObj(p.map) || Object.keys(p.map).length === 0) {
+              nodeErr('bad_callback', `callback.${part} must be { var, map }, mapping what the variable can hold to a number.`); continue;
+            }
+            for (const [k, v] of Object.entries(p.map)) {
+              if (k.length === 0 || k.length > 100 || !Number.isInteger(v) || (v as number) < 0 || (v as number) > max) nodeErr('bad_callback', `callback.${part}.map: "${k}" must map to a whole number from 0 to ${max}.`);
+            }
+            recorded.push({ name: p.var, nodeId: id });
+            used.push({ name: p.var, nodeId: id });
+          }
+        }
         break;
       default: nodeErr('unknown_node_type', `"${String((n as { type: unknown }).type)}" is not a node type (speak, api, subflow, handoff, end).`);
     }
@@ -221,6 +239,8 @@ export function validateDefinition(input: unknown): ValidationResult {
 
   for (const u of spoken) if (sensitive.has(u.name)) err('sensitive_in_speech', `"${u.name}" is sensitive, so it cannot be spoken or given to a model.`, u.nodeId);
   for (const u of sent) if (sensitive.has(u.name)) err('sensitive_in_request', `"${u.name}" is sensitive, so it cannot be sent to an integration.`, u.nodeId);
+  // A sensitive answer's intent is forgotten with it, so it cannot be read for a callback time either.
+  for (const u of recorded) if (sensitive.has(u.name) || [...sensitive].some((s) => u.name === `${s}_intent`)) err('sensitive_in_record', `"${u.name}" is sensitive, so it cannot be recorded as a callback time.`, u.nodeId);
   for (const name of sensitive) if (!assigned.has(name)) err('unknown_variable', `"${name}" is marked sensitive but is never set.`);
   for (const u of used) {
     if (!assigned.has(u.name)) err('unknown_variable', `"${u.name}" is used but never set: declare it in "variables" or capture it earlier.`, u.nodeId);

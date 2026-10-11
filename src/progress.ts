@@ -74,7 +74,7 @@ export const PHASES: PhaseProgress[] = [
       'Recordings and live speech are sent to a call through Twilio\'s speech relay (recordings by a signed, short-lived link), but only to a fake relay so far, so the seams between them are still unheard',
       "A call's cost record does not yet receive the synthesised-character count (the count is in each run)",
       'DID failures are not detected automatically from provider or carrier events',
-      'A workflow records how an outbound call turned out at the end it finishes at, tested only against fakes; it does not yet capture a callback time asked for on the call',
+      'A workflow records how an outbound call turned out, and the callback time the person asked for, at the end it finishes at; tested only against fakes, and a time is understood only through the workflow\'s phrase rules',
     ],
   },
   {

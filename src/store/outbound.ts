@@ -2,14 +2,13 @@ import type pg from 'pg';
 import { AppError } from '../errors.js';
 import { audit } from './audit.js';
 
-import { CONTACT_OUTCOMES, type ContactOutcome } from '../workflows/definition.js';
+import { CONTACT_OUTCOMES, validTimeZone, type CallbackTime, type ContactOutcome } from '../workflows/definition.js';
 
 export const OUTCOMES = CONTACT_OUTCOMES;
 export type Outcome = ContactOutcome;
 /** Calls that never reached the dialling stage: not attempts, and not the provider's doing. */
 const NOT_DIALLED = `('did_locked', 'all_locked_for_contact', 'no_numbers', 'providers_unhealthy')`;
 
-const validTimeZone = (tz: string) => { try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch { return false; } };
 
 /**
  * Say how an answered outbound call turned out, and, if the person asked to be called back, when. The latest
@@ -47,7 +46,7 @@ const lockOutcomes = (c: pg.PoolClient, callId: string) => c.query(`SELECT pg_ad
  * and the latest statement is the current one; once a person has spoken, the workflow records nothing. The call may not have completed yet (its end is reported after the
  * workflow's); the analytics count an outcome only once the call has.
  */
-export async function recordWorkflowOutcome(c: pg.PoolClient, e: { callId: string; runId: string; contact: Outcome }) {
+export async function recordWorkflowOutcome(c: pg.PoolClient, e: { callId: string; runId: string; contact: Outcome; callback?: CallbackTime }) {
   const call = (await c.query('SELECT tenant_id, project_id, direction FROM calls WHERE id = $1', [e.callId])).rows[0];
   if (!call || call.direction !== 'outbound') return null;
   // A person's statement is never replaced by the workflow's, even one that lands after it (a reply still being applied
@@ -55,9 +54,9 @@ export async function recordWorkflowOutcome(c: pg.PoolClient, e: { callId: strin
   await lockOutcomes(c, e.callId);
   if ((await c.query('SELECT 1 FROM outbound_outcomes WHERE call_id = $1 AND recorded_by IS NOT NULL LIMIT 1', [e.callId])).rowCount) return null;
   const row = (await c.query(
-    `INSERT INTO outbound_outcomes (tenant_id, project_id, call_id, outcome) VALUES ($1,$2,$3,$4) RETURNING id`,
-    [call.tenant_id, call.project_id, e.callId, e.contact])).rows[0];
-  await audit(c, null, 'outbound.outcome', 'call', e.callId, { outcome: e.contact, callback: false, source: 'workflow', run: e.runId });
+    `INSERT INTO outbound_outcomes (tenant_id, project_id, call_id, outcome, callback_day, callback_hour, callback_tz) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+    [call.tenant_id, call.project_id, e.callId, e.contact, e.callback?.day ?? null, e.callback?.hour ?? null, e.callback?.timeZone ?? null])).rows[0];
+  await audit(c, null, 'outbound.outcome', 'call', e.callId, { outcome: e.contact, callback: Boolean(e.callback), source: 'workflow', run: e.runId });
   return row;
 }
 
@@ -89,7 +88,7 @@ export async function outboundAnalytics(c: pg.PoolClient, e: { tenantId?: string
     `WITH latest AS (SELECT DISTINCT ON (call_id) call_id, callback_day, callback_hour, callback_tz FROM outbound_outcomes ORDER BY call_id, id DESC)
      SELECT l.callback_day AS day, l.callback_hour AS hour, l.callback_tz AS time_zone, count(*)::int AS requests
        FROM calls c JOIN latest l ON l.call_id = c.id
-      WHERE ${where} AND l.callback_hour IS NOT NULL
+      WHERE ${where} AND c.status = 'completed' AND l.callback_hour IS NOT NULL   -- counted once the call has completed, as outcomes are
       GROUP BY 1, 2, 3 ORDER BY requests DESC, day, hour, time_zone LIMIT 10`, params)).rows;
   return {
     period: { from: e.from.toISOString(), to: e.to.toISOString() },

@@ -10,7 +10,8 @@ export interface Scenario {
   /** Canned answers for the integrations the workflow calls: simulations never touch a real system. */
   integrations?: Record<string, Json>;
   /** `contact`: the call outcome the end it finishes at records (`none` for an end that records none). */
-  expect?: { outcome?: string; says?: string[]; doesNotSay?: string[]; handoff?: string; contact?: string };
+  /** `callback`: the callback time the end records (`none` for none). */
+  expect?: { outcome?: string; says?: string[]; doesNotSay?: string[]; handoff?: string; contact?: string; callback?: { day: number; hour: number } | 'none' };
 }
 
 export interface ScenarioResult { name: string; passed: boolean; outcome: string | null; failures: string[]; runId?: string }
@@ -51,6 +52,15 @@ export function evaluateScenario(s: Scenario, result: { state: RunState; records
   const contact = end?.payload.contact ?? 'none';
   if (s.expect?.contact !== undefined && (!end || contact !== s.expect.contact)) {
     failures.push(end ? `Expected the call to end as "${s.expect.contact}" but it ended as "${String(contact)}".` : `Expected the call to end as "${s.expect.contact}" but it had not ended.`);
+  }
+  if (s.expect?.callback !== undefined) {
+    const got = end?.payload.callback as { day: number; hour: number } | undefined;
+    const want = s.expect.callback;
+    const say = (t: { day: number; hour: number } | undefined) => (t ? `day ${t.day} at ${t.hour}:00` : 'none');
+    if (!end) failures.push(`Expected a callback time of ${say(want === 'none' ? undefined : want)} but the call had not ended.`);
+    else if (want === 'none' ? got !== undefined : !got || got.day !== want.day || got.hour !== want.hour) {
+      failures.push(`Expected a callback time of ${say(want === 'none' ? undefined : want)} but got ${say(got)}.`);
+    }
   }
   return { name: s.name, passed: failures.length === 0, outcome: state.outcome ?? null, failures };
 }

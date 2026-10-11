@@ -24,11 +24,10 @@ import { randomBytes } from 'node:crypto';
 import { appendFileSync, mkdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { PROCESSES, isAgentId, readConfig, scrub, sessionIds, spoolFile } from '../.claude/hooks/devlog.mjs';
+import { PROCESSES, isAgentId, isTaskId, readConfig, scrub, sessionIds, spoolFile } from '../.claude/hooks/devlog.mjs';
 
 export const STATUSES = ['planned', 'in_progress', 'testing', 'review', 'blocked', 'done', 'abandoned'];
 export const INCIDENT_TYPES = ['agent_regression', 'test_failure', 'review_finding', 'process', 'scope', 'security', 'stop_loss', 'other'];
-const ID = /^[A-Za-z][\w.-]{0,39}$/;
 
 export class UsageError extends Error {}
 
@@ -71,7 +70,7 @@ export function eventFor(argv, now = new Date(), env = process.env) {
 
   if (command === 'start' || command === 'update' || command === 'done') {
     const id = pos[0];
-    if (!id || !ID.test(id)) throw new UsageError('Give a task id: letters, digits, "-", "_" or ".", starting with a letter (e.g. DCT-2).');
+    if (!id || !isTaskId(id)) throw new UsageError('Give a task id: letters, digits, "-", "_" or ".", starting with a letter, fewer than 7 digits (e.g. DCT-2).');
     known(command === 'start' ? ['title', 'epic', 'workstream', 'phase', 'owner', 'pr', 'status', 'branch']
       : command === 'update' ? ['status', 'progress', 'attempt', 'tests', 'blocker', 'next', 'phase', 'pr', 'title', 'branch']
         : ['pr', 'next']);
@@ -93,7 +92,7 @@ export function eventFor(argv, now = new Date(), env = process.env) {
     known(['type', 'title', 'severity', 'impact', 'detected-by', 'action', 'lesson', 'policy-updated', 'task']);
     if (!opts.title) throw new UsageError('incident needs --title.');
     if (opts.lesson !== undefined && !/^L-\d{3}$/.test(opts.lesson)) throw new UsageError('--lesson must look like L-016.');
-    if (opts.task !== undefined && !ID.test(opts.task)) throw new UsageError('--task is not a valid task id.');
+    if (opts.task !== undefined && !isTaskId(opts.task)) throw new UsageError('--task is not a valid task id.');
     const day = base.ts.slice(0, 10).replace(/-/g, '');
     return strip({
       ...base, event: 'Incident', id: `INC-${day}-${randomBytes(2).toString('hex')}`,
@@ -107,7 +106,7 @@ export function eventFor(argv, now = new Date(), env = process.env) {
   if (command === 'decision') {
     known(['title', 'on', 'by', 'ref', 'task']);
     if (!opts.title) throw new UsageError('decision needs --title.');
-    if (opts.task !== undefined && !ID.test(opts.task)) throw new UsageError('--task is not a valid task id.');
+    if (opts.task !== undefined && !isTaskId(opts.task)) throw new UsageError('--task is not a valid task id.');
     // The day the decision was made, which can be earlier than the day it is recorded; never in the future.
     const on = opts.on ?? base.ts.slice(0, 10);
     if (!/^\d{4}-\d\d-\d\d$/.test(on) || Number.isNaN(new Date(`${on}T00:00:00Z`).getTime()) || new Date(`${on}T00:00:00Z`).toISOString().slice(0, 10) !== on) throw new UsageError('--on must be a real date, like 2026-10-11.');
@@ -122,7 +121,7 @@ export function eventFor(argv, now = new Date(), env = process.env) {
   if (command === 'outcome') {
     known(['process', 'result', 'agent', 'shadow-of', 'round']);
     const task = pos[0];
-    if (!task || !ID.test(task)) throw new UsageError('Give a task id: letters, digits, "-", "_" or ".", starting with a letter (e.g. DCT-2).');
+    if (!task || !isTaskId(task)) throw new UsageError('Give a task id: letters, digits, "-", "_" or ".", starting with a letter, fewer than 7 digits (e.g. DCT-2).');
     if (!opts.process) throw new UsageError('outcome needs --process.');
     if (!opts.result) throw new UsageError('outcome needs --result.');
     for (const k of ['agent', 'shadow-of']) {

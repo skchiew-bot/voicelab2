@@ -217,7 +217,7 @@ footer { font-size: 13px; color: var(--ink-muted); }
   <div class="view" id="v-routing" hidden>
     <section class="card" aria-labelledby="rl-h"><div class="head"><h2 id="rl-h">Routing and escalation</h2><span id="rt-state"></span></div><p class="sub" id="rt-legend"></p><div id="rt-off"></div></section>
     <section aria-labelledby="ld-h"><div class="head"><h2 id="ld-h">Ladder by process</h2><span class="note" id="rt-since"></span></div><div class="tbox" id="ladder"></div></section>
-    <section aria-labelledby="rn-h"><div class="head"><h2 id="rn-h">Routing notes</h2><span class="note">Breaches and odd starts are counted apart, never as escalations</span></div><div class="tbox" id="rt-notes"></div></section>
+    <section aria-labelledby="rn-h"><div class="head"><h2 id="rn-h">Routing notes</h2><span class="note">Counts the ladder has no column for: breaches, odd starts, first-pass reviews and the weekly trend</span></div><div class="tbox" id="rt-notes"></div></section>
     <section aria-labelledby="el-h"><div class="head"><h2 id="el-h">Escalation log</h2><span class="note">The last 50 climbs up a tier</span></div><div class="tbox" id="esc-log"></div></section>
     <section aria-labelledby="ra-h"><div class="head"><h2 id="ra-h">Recent helper agents</h2><span class="note">The last 20 tagged agents, with why each ran on its tier</span></div><div class="tbox" id="rt-agents"></div></section>
     <div class="g2">
@@ -433,14 +433,15 @@ function render(r) {
     : h('p', { class: 'empty' }, `Unavailable: ${rt.error ?? 'the routing policy in devlog/control-tower.json could not be read'}.`),
     h('p', { class: 'sub', style: 'padding: 10px 12px' }, led.length ? `Sessions led by each model: ${led.map(([m, n]) => `${m.replace('claude-', '')} ${n}`).join(', ')}.` : 'No session has been priced yet.'));
   const UNREC = 'Unavailable (not recorded)';
-  fill('pc-note', [rt.since ? `Helper-agent records begin ${day(rt.since)}; ${num(rt.agentsBefore)} helper agents have no record of their own (model and tokens unavailable, not recorded). ` : `${UNREC}. `,
+  fill('pc-note', [rt.since ? `Helper-agent records begin ${day(rt.since)}; ${num(rt.agentsBefore)} helper agents started with no record of their own: their model and tokens are unavailable (not recorded), and their sessions' tokens are in the rows marked not split. ` : `No helper agent recorded on its own yet: ${num(rt.agentsBefore)} started before recording; their tokens are in the rows marked not split. `,
     'These rows are priced from the transcripts, so they can differ from Spend, which uses Claude Code\'s own checkpoints.']);
   // The main session's and the earlier sessions' rows have no helper-agent count to give: not applicable, not missing.
-  const noAgents = (x) => x.process === 'main session' || String(x.process).startsWith('sessions before recording');
-  const cell = (v, show, notApplicable) => h('td', { class: 'num' }, v === null ? na(notApplicable ? 'Not applicable' : UNREC) : show(v));
+  const noAgents = (x) => x.process === 'main session' || x.unsplit === true;
+  const SPLIT = 'Unavailable (could not be split)'; const NOPRICE = 'Unavailable (no price)';
+  const cell = (v, show, notApplicable, why = UNREC) => h('td', { class: 'num' }, v === null ? na(notApplicable ? 'Not applicable' : why) : show(v));
   fill('proc-cost', table(['Process', 'Model', { t: 'Helper agents', cls: 'num' }, { t: 'Tokens', cls: 'num' }, { t: 'Median per agent', cls: 'num' }, { t: 'Cost', cls: 'num' }],
     (r.processCost ?? []).map((x) => h('tr', null, h('td', null, x.process), h('td', null, String(x.model ?? '').replace('claude-', '')),
-      cell(x.agents, num, noAgents(x)), cell(x.tokens, num, false), cell(x.medianTokens, num, noAgents(x)), cell(x.cost === null ? null : x.cost.usd, fmtMoney, false))), UNREC));
+      cell(x.agents, num, noAgents(x)), cell(x.tokens, num, false, x.process === 'main session' ? SPLIT : UNREC), cell(x.medianTokens, num, noAgents(x)), cell(x.cost === null ? null : x.cost.usd, fmtMoney, false, x.tokens === null ? (x.process === 'main session' ? SPLIT : UNREC) : NOPRICE))), UNREC));
   fill('registry', table(['Model', 'Tier', { t: 'Sessions', cls: 'num' }, { t: 'Output tokens', cls: 'num' }, { t: 'Cache read', cls: 'num' }, { t: 'Cost', cls: 'num' }, { t: 'Per session', cls: 'num' }, { t: 'Tool failures', cls: 'num' }, { t: 'Tests passing', cls: 'num' }],
     r.registry.map((m) => h('tr', null, h('td', null, m.model), h('td', null, m.tier), h('td', { class: 'num' }, num(m.sessions)), h('td', { class: 'num' }, num(m.output)), h('td', { class: 'num' }, num(m.cacheRead)), h('td', { class: 'num' }, fmtMoney(m.cost.usd)), h('td', { class: 'num' }, fmtMoney(m.costPerSession.usd)), h('td', { class: 'num' }, pctText(m.toolFailureRate)), h('td', { class: 'num' }, pctText(m.testPassRate))))));
 

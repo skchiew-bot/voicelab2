@@ -730,6 +730,9 @@ describe('flushing the log for a commit', () => {
     const rows = [
       { ...base, event: 'AgentRun', agentId: id, agentType: 'general-purpose', requested: 'opus', process: 'build', task: 'T-1', trigger: 'suite_failed', shadow: true, first: '2026-10-10T00:01:00+08:00', last: '2026-10-10T00:02:00Z', tokens, sig: '2|x', description: 'free text' },
       { ...base, event: 'AgentRun', agentId: id, requested: 'gpt', process: 'deploy', task: 'not a task!', trigger: 'other', shadow: 'yes', first: 'soon', tokens: {} },
+      { ...base, event: 'AgentRun', agentId: id, process: 'build', task: fake('p', '60123456789'), tokens: {} }, // a task id that is a phone number's worth of digits
+      { ...base, event: 'Outcome', task: fake('p', '60123456789'), process: 'review', result: 'passed' },
+      { ...base, event: 'Task', action: 'start', id: fake('p', '60123456789'), title: 'x' },
       { ...base, event: 'AgentRun', agentType: 'general-purpose', process: 'build' }, // no id
       { ...base, event: 'AgentRun', agentId: '[redacted]', process: 'build' }, // not an id
       { ...base, event: 'AgentRun', agentId: id, process: 'review', task: 'T-1', shadow: true, tokens: {} }, // a shadow review keeps its flag
@@ -748,6 +751,7 @@ describe('flushing the log for a commit', () => {
     expect(got).toEqual([
       { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'AgentRun', agentId: id, agentType: 'general-purpose', requested: 'opus', process: 'build', task: 'T-1', trigger: 'suite_failed', first: '2026-10-09T16:01:00.000Z', last: '2026-10-10T00:02:00.000Z', tokens: t }, // shadow dropped: it is a build
       { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'AgentRun', agentId: id, tokens: {} },
+      { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'AgentRun', agentId: id, process: 'build', tokens: {} }, // its task id was dropped, the record kept
       { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'AgentRun', agentId: id, process: 'review', task: 'T-1', shadow: true, tokens: {} },
       { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'Outcome', task: 'T-1', process: 'build', result: 'failed', agent: id },
       { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'Outcome', task: 'T-1', process: 'review', result: 'failed', agent: id, shadowOf: id, round: 2 },
@@ -1588,7 +1592,7 @@ describe('routing and escalation', () => {
     expect(row(seven, 'build').escalation).toMatchObject({ state: 'amber', escalated: 7, window: 20 });
     expect(check(seven)).toMatchObject({ state: 'amber' });
     expect(seven.routing.state).toBe('amber');
-    expect(attention(seven)).toContain('Build: 7 of the last 20 items that started at the floor climbed above it, over 30%: the floor may be too low; routing changes only on your decision.');
+    expect(attention(seven)).toContain('Build: 7 of the last 20 items that started at or escalated from the floor climbed above it, over 30%: the floor may be too low; routing changes only on your decision.');
     const few = scenario(19, [0, 1, 2, 3, 4, 5, 6]); // seven of 19 would be 36%, but 19 items is too few to judge
     expect(row(few, 'build').escalation).toMatchObject({ state: 'collecting', escalated: 7, window: 19, need: 20 });
     expect(check(few)).toMatchObject({ state: 'green' });
@@ -1710,6 +1714,7 @@ describe('routing and escalation', () => {
       const r = task(...args);
       expect([r.status, r.stderr]).toEqual([1, expect.stringContaining(message)]);
     };
+    refused(['start', fake('p', '60123456789'), '--title', 'x'], 'Give a task id');
     refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed'], "T-1 is not on this branch's board. Start it first");
     expect(task('start', 'T-1', '--title', 'Routing work').status).toBe(0);
     refused(['outcome', 'T-1', '--process', 'deploy', '--result', 'passed'], '--process must be one of: plan, review, security-review, build, fix, check.');
@@ -1803,6 +1808,7 @@ describe('routing and escalation', () => {
     seed(dir, [
       // ADR-0014's own case: built on Sonnet, the review failed, the fix runs on Opus and says why.
       ...task('T-1', 0, 200), agent('b1', 'build', 'T-1', SONNET, 1), outcome(10, { task: 'T-1', process: 'review', result: 'failed', round: 1 }),
+      agent('rv1', 'review', 'T-1', OPUS, 12), // the Opus review in between never climbs, so the fix reads from the Sonnet build
       agent('f1', 'fix', 'T-1', OPUS, 20, { trigger: 'review_failed' }),
       // The same, with a failed test run between the build and the fix (recorded), and with nothing to support it.
       ...task('T-3', 0, 210), agent('b3', 'build', 'T-3', SONNET, 31), testRun(35, false), agent('f3', 'fix', 'T-3', OPUS, 40, { trigger: 'suite_failed' }),
@@ -1814,13 +1820,30 @@ describe('routing and escalation', () => {
     expect(row(r, 'fix')).toMatchObject({ items: 4, startedAtFloor: 0, startedAbove: 1, enteredByEscalation: 3, escalatedItems: 3, aboveCeiling: 0 });
     expect(row(r, 'fix').escalation).toMatchObject({ state: 'collecting', escalated: 3, window: 3, need: 20 });
     expect(r.routing.log.map((c: any) => [c.task, c.process, c.fromModel, c.toModel, c.trigger, c.support]).sort()).toEqual([
-      ['T-1', 'fix', SONNET, OPUS, 'review_failed', 'declared'],
+      ['T-1', 'fix', SONNET, OPUS, 'review_failed', 'declared'], // from the build (mid to high), not from the review (high to high)
       ['T-3', 'fix', SONNET, OPUS, 'suite_failed', 'recorded'],
       ['T-4', 'fix', SONNET, OPUS, 'suite_failed', 'none'],
     ]);
+    expect(r.routing.log.find((c: any) => c.task === 'T-1')).toMatchObject({ fromTier: 'mid', toTier: 'high' });
     expect(r.routing.consistency).toMatchObject({ climbsWithoutTrigger: 0, triggersWithoutClimb: 0, unsupported: 1 });
     expect(attention(r)).toContain('1 fix item(s) started above their floor tier');
     expect(attention(r)).not.toContain('3 fix item(s)');
+  }, REPO_TIMEOUT);
+
+  it('never counts a declared trigger alone as a climb: the agent before it must have run on a lower tier', () => {
+    const { dir } = makeRepo();
+    seed(dir, [
+      // (a) built on Opus with no trigger, then fixed on Opus with a trigger: nothing climbed.
+      ...task('T-A', 0, 100), agent('a1', 'build', 'T-A', OPUS, 1), agent('a2', 'fix', 'T-A', OPUS, 10, { trigger: 'review_failed' }),
+      // (b) the item's very first agent is on Opus and claims an escalation: there was nothing to climb from.
+      ...task('T-B', 0, 110), agent('b1', 'build', 'T-B', OPUS, 20, { trigger: 'review_failed' }),
+    ]);
+    const r = reportOf(dir);
+    expect(row(r, 'fix')).toMatchObject({ items: 1, startedAbove: 1, enteredByEscalation: 0, escalatedItems: 0 });
+    expect(row(r, 'build')).toMatchObject({ items: 2, startedAbove: 2, enteredByEscalation: 0, escalatedItems: 0 });
+    expect(row(r, 'fix').escalation).toMatchObject({ escalated: 0, window: 0 });
+    expect(r.routing.log).toEqual([]);
+    expect(r.routing.consistency).toMatchObject({ climbsWithoutTrigger: 0, triggersWithoutClimb: 2 });
   }, REPO_TIMEOUT);
 
   it('keeps a weekly trend from the week recording began, and counts items below the floor, above the ceiling and unrated apart', async () => {
@@ -1850,6 +1873,19 @@ describe('routing and escalation', () => {
     expect(auditRow(u, 'build').finishedAtFloor).toEqual({ n: 1, of: 1 });
     expect(u.unrated).toBe(1);
     expect(u.agents.find((x: any) => x.agentId === 'u2')).toMatchObject({ reason: null, tier: 'other' });
+  });
+
+  it('starts the weekly trend at the earliest agent, not at the first Stop that wrote a record, and counts an item that entered by escalation', async () => {
+    const day = 1440;
+    // Both agents began Tue 2026-10-06 (week 41), but the Stop that recorded them came on Tue 10-20 (week 43).
+    const a = await auditOf([
+      ...task('T-1', 1 * day, 16 * day),
+      agent('b1', 'build', 'T-1', SONNET, 1 * day, { ts: iso(15 * day) }), agent('f1', 'fix', 'T-1', OPUS, 1 * day + 30, { ts: iso(15 * day), trigger: 'suite_failed' }),
+    ]);
+    expect(auditRow(a, 'build').weeks).toEqual([{ week: '2026-W41', items: 1, escalated: 0 }, { week: '2026-W42', items: 0, escalated: 0 }, { week: '2026-W43', items: 0, escalated: 0 }]);
+    // The fix entered by escalation from the build (mid to high): it is an item from the floor, escalated, in its week.
+    expect(auditRow(a, 'fix').weeks[0]).toEqual({ week: '2026-W41', items: 1, escalated: 1 });
+    expect(a.since).toBe(iso(15 * day)); // for display only
   });
 
   it('keeps the last 50 climbs in the log, the newest, and the last 100 helper agents', async () => {
@@ -1893,19 +1929,23 @@ describe('routing and escalation', () => {
       // Sessions C and D both have agents. C's agent used more Haiku than C's whole total; D has plenty over.
       { ...agent('c1', 'check', 'T-C', HAIKU, 20), session: 'session_01C', tokens: { [HAIKU]: tok(1000) } }, usage('session_01C', { [HAIKU]: tok(100) }),
       { ...agent('d1', 'check', 'T-D', HAIKU, 30), session: 'session_01D', tokens: { [HAIKU]: tok(100) } }, usage('session_01D', { [HAIKU]: tok(5000) }),
+      // Session E has one agent, recorded, and no other start: its remainder is the main session.
+      { ...agent('e1', 'build', 'T-E', SONNET, 40), session: 'session_01E', tokens: { [SONNET]: tok(1000) } }, usage('session_01E', { [SONNET]: tok(5000) }),
     ]);
     const r = reportOf(dir);
     // a1 has its record, so it is not "before recording"; the agent with no record and the start with no id are.
     expect(r.routing).toMatchObject({ since: iso(22), agentsBefore: 2 }); // a1 started before `since` and is still not "before recording"
     expect(r.routing.consistency.startedNoRecord).toBe(1);
     const rows = Object.fromEntries(r.processCost.map((x: { process: string; model: string }) => [`${x.process}|${x.model}`, x]));
-    expect(rows[`build|${SONNET}`]).toMatchObject({ agents: 1, tokens: 1000 });
+    expect(rows[`build|${SONNET}`]).toMatchObject({ agents: 2, tokens: 2000 }); // a1 and e1
     expect(rows[`not recorded|${SONNET}`]).toBeUndefined(); // an agent that began before the first Stop is not "not recorded"
-    // Session A's own remainder: 5000 less its agent's 1000 output tokens, at $10 per million.
+    // Session E's own remainder: 5000 less its agent's 1000 output tokens, at $10 per million.
     expect(rows[`main session|${SONNET}`]).toEqual({ process: 'main session', model: SONNET, agents: null, tokens: 4000, medianTokens: null, cost: { usd: '0.04000000' } });
-    // Session B is not a "main session": its agents are in the total, so it is its own row, saying so.
-    const label = 'sessions before recording: main session and helper agents together';
-    expect(rows[`${label}|${OPUS}`]).toEqual({ process: label, model: OPUS, agents: null, tokens: 2000, medianTokens: null, cost: { usd: '0.04000000' } });
+    // Session B has no record at all, and session A holds two agents that have none: their totals cannot be split, so
+    // they are rows of their own, saying so, and A's 5000 never lands in a main-session remainder.
+    const label = 'not split: main session and helper agents together';
+    expect(rows[`${label}|${OPUS}`]).toEqual({ process: label, model: OPUS, agents: null, tokens: 2000, medianTokens: null, cost: { usd: '0.04000000' }, unsplit: true });
+    expect(rows[`${label}|${SONNET}`]).toEqual({ process: label, model: SONNET, agents: null, tokens: 5000, medianTokens: null, cost: { usd: '0.05000000' }, unsplit: true });
     expect(rows[`main session|${OPUS}`]).toBeUndefined();
     // C is negative for Haiku (1000 used, 100 held): unavailable for the model, though C and D together come to a positive 4000.
     expect(rows[`main session|${HAIKU}`]).toMatchObject({ tokens: null, cost: null });

@@ -369,7 +369,13 @@ export function agentRuns(events, cfg) {
 }
 
 /** The row label for sessions that have no helper-agent record: their totals hold the main session and any helper agents together. */
-export const BEFORE_RECORDING = 'sessions before recording: main session and helper agents together';
+export const BEFORE_RECORDING = 'not split: main session and helper agents together';
+
+/** The helper-agent starts with no AgentRun of their own (by session and agent id); a start with no id never has one. */
+export const unrecordedStarts = (subagentStarts, runs) => {
+  const have = new Set(runs.map((r) => `${r.session}|${r.agentId}`));
+  return subagentStarts.filter((s) => !s.agentId || !have.has(`${s.session}|${s.agentId}`));
+};
 
 /** The routing settings from the config, or the first thing wrong with them. Never a default (lesson L-034). */
 function routingConfig(cfg) {
@@ -396,7 +402,7 @@ function routingConfig(cfg) {
  * the session totals. Money is exact (lesson L-004); a model with no price, or a remainder that comes out negative, is
  * unavailable, never zero or clamped (lesson L-005). Never added to the session's spend: this is a breakdown of it.
  */
-export function processCost(runs, sessionRows, cfg) {
+export function processCost(runs, sessionRows, cfg, unrecordedSessions = new Set()) {
   const groups = new Map();
   for (const r of runs) {
     const process = r.process ?? 'not recorded';
@@ -422,7 +428,9 @@ export function processCost(runs, sessionRows, cfg) {
   // The main session: what a session's total holds beyond its own helper agents'. Worked out per session, and only for
   // sessions that have an AgentRun: for any other session the total still holds helper agents nobody recorded, so the
   // remainder is not "the main session". A negative remainder in one session makes that model's figure unavailable.
-  const recorded = new Set(runs.map((r) => r.session));
+  // A session that holds any helper agent with no record of its own cannot be split either: the tokens of that agent
+  // would land in its remainder as if the main session had used them.
+  const recorded = new Set(runs.map((r) => r.session).filter((id) => !unrecordedSessions.has(id)));
   const restByModel = {}; const poisoned = new Set();
   for (const s of sessionRows.filter((x) => recorded.has(x.id))) {
     const agentTotals = {};
@@ -444,7 +452,7 @@ export function processCost(runs, sessionRows, cfg) {
   for (const s of sessionRows.filter((x) => !recorded.has(x.id))) for (const [m, t] of Object.entries(s.models)) { const acc = before[m] ??= bucket(); const b = bucket(t); for (const k of Object.keys(acc)) acc[k] += b[k]; }
   const beforeRows = Object.keys(before).sort().map((model) => {
     const cost = price(model, before[model]);
-    return { process: BEFORE_RECORDING, model, agents: null, tokens: tokenTotal(before[model]), medianTokens: null, cost: cost === null ? null : money(cost, cfg), costUnits: cost };
+    return { process: BEFORE_RECORDING, model, agents: null, tokens: tokenTotal(before[model]), medianTokens: null, cost: cost === null ? null : money(cost, cfg), costUnits: cost, unsplit: true };
   });
   return [...rows.sort((a, b) => order(a.process) - order(b.process) || a.model.localeCompare(b.model)), ...main, ...beforeRows];
 }
@@ -460,8 +468,7 @@ export function routingAudit({ runs, outcomes, toolEvents, subagentStarts, board
   // `since` is for display only: the time of the first AgentRun, which is when a Stop wrote it, not when its agents
   // began. A helper agent is "unrecorded" only when it has no AgentRun of its own, whatever the dates say.
   const since = runs.reduce((m, r) => (m === null || at(r.ts) < at(m) ? r.ts : m), null);
-  const recordedIds = new Set(runs.map((r) => `${r.session}|${r.agentId}`));
-  const unrecorded = subagentStarts.filter((s) => !s.agentId || !recordedIds.has(`${s.session}|${s.agentId}`));
+  const unrecorded = unrecordedStarts(subagentStarts, runs);
   const agentsBefore = unrecorded.length;
   // A start with a real id and no record, from the last day, in a session that is no longer active: its Stop never
   // came or never wrote a record, so Claude Code's record of it is missing and nobody was told.
@@ -510,19 +517,23 @@ export function routingAudit({ runs, outcomes, toolEvents, subagentStarts, board
       });
       const first = agents[0].rank;
       const above = (a) => a.rank !== null && a.rank > floor;
-      // Escalation across stages. A process's first agent for an item that runs above the floor and carries a declared
-      // trigger is an escalation INTO that process (the build ran on Sonnet, its review failed, the fix runs on Opus
-      // with esc:review_failed). It counts as escalated for the process, its support is judged against the item's
-      // previous agent of any process, and it is logged; it is neither "started above floor" nor a trigger without a
-      // climb. A first agent above the floor with no trigger stays "started above floor".
-      const entered = first !== null && first > floor && Boolean(agents[0].trigger);
+      // Escalation across stages. A process's first agent for an item is an escalation INTO that process only when
+      // something climbed: this agent is above the floor, carries a declared trigger, and the item's previous agent in
+      // a laddered process (build, fix, check: not plan or the reviews, which never climb) ran on a lower tier. (The
+      // build ran on Sonnet, its review on Opus, and the fix runs on Opus with esc:review_failed: Sonnet to Opus.) It
+      // counts as escalated for this process, is logged from that agent, and is not "started above floor". A trigger
+      // alone is never a climb, so a self-declared tag cannot raise the rate (lesson L-024): any other first agent above
+      // the floor stays a start above the floor, and its trigger, if any, is a trigger with no climb.
+      const ladderedProcess = (q) => !conf.processes[q].neverLaddered && rankOf(conf.processes[q].floor) !== rankOf(conf.processes[q].ceiling);
+      const priorLaddered = (a) => primary.filter((x) => x.task === task && ladderedProcess(x.process) && byStart(x, a) < 0).sort(byStart).pop() ?? null;
+      const entryFrom = laddered && first !== null && first > floor && agents[0].trigger ? priorLaddered(agents[0]) : null;
+      const entered = entryFrom !== null && rankOf(entryFrom.tier) !== null && rankOf(entryFrom.tier) < first;
       const started = first === null ? 'unknown' : entered ? 'entered' : first === floor ? 'floor' : first > floor ? 'above' : 'below';
       const t = boardById.get(task);
       if (!t) consistency.unknownTasks.add(task);
       agents.forEach((a, i) => {
         agentLog.push({ agentId: a.agentId, session: a.session, process: p, task, round: a.round, model: a.model, tier: a.tier, reason: a.reason, trigger: a.trigger, first: startOf(a) });
-        const prevAny = primary.filter((x) => x.task === task && x !== a && byStart(x, a) < 0).sort(byStart).pop() ?? null;
-        const prev = i === 0 ? prevAny : agents[i - 1];
+        const prev = i === 0 ? entryFrom : agents[i - 1];
         const climbed = i > 0 && a.rank !== null && prev.rank !== null && a.rank > prev.rank;
         if (climbed || (i === 0 && entered)) {
           const sup = support(a, prev);
@@ -563,9 +574,9 @@ export function routingAudit({ runs, outcomes, toolEvents, subagentStarts, board
       row.topTriggers = Object.entries(counts).map(([trigger, n]) => ({ trigger, n })).sort((a, b) => b.n - a.n || a.trigger.localeCompare(b.trigger));
       row.tokensByTier = {};
       for (const r of mine) row.tokensByTier[r.tier ?? 'unknown'] = (row.tokensByTier[r.tier ?? 'unknown'] ?? 0) + Object.values(r.tokens).reduce((n, t) => n + tokenTotal(t), 0);
-      // The last 8 ISO weeks, from the week recording began (earlier weeks are unknown, not empty).
+      // The last 8 ISO weeks, from the week of the earliest recorded agent (earlier weeks are unknown, not empty).
       const atFloor = items.filter((i) => i.started === 'floor' || i.started === 'entered');
-      const sinceWeek = isoWeek(new Date(since));
+      const sinceWeek = isoWeek(new Date(Math.min(...runs.map((r) => at(startOf(r)))))); // the earliest agent, not the first Stop that wrote a record
       row.weeks = [];
       for (let k = 7; k >= 0; k--) {
         const w = isoWeek(new Date(now - k * 7 * 864e5));
@@ -790,7 +801,7 @@ export function build(opts = {}) {
     subagentStarts: events.filter((e) => e.event === 'SubagentStart'), board, cfg, now,
     isActive: (id) => sessionRows.find((x) => x.id === id)?.active ?? false,
   });
-  const pcRows = processCost(runs, sessionRows, cfg);
+  const pcRows = processCost(runs, sessionRows, cfg, new Set(unrecordedStarts(events.filter((e) => e.event === 'SubagentStart'), runs).map((x) => x.session)));
   // A process's cost is the sum of its rows: one definition (lesson L-033). Unavailable when any model has no price.
   for (const row of routing.processes) {
     const mine = pcRows.filter((r) => r.process === row.process);
@@ -921,7 +932,7 @@ export function build(opts = {}) {
   // Routing: the owner's threshold decides amber; the owner decides any change of floor (ADR-0014).
   if (routing.state === 'unavailable') attention.push({ level: 'warning', text: `The routing view is unavailable: ${routing.error ?? 'the escalation threshold in devlog/control-tower.json is not usable'}.` });
   for (const r of routing.processes) {
-    if (r.escalation.state === 'amber') attention.push({ level: 'warning', text: `${r.label}: ${r.escalation.escalated} of the last ${r.escalation.need} items that started at the floor climbed above it, over ${r.escalation.overPercent}%: the floor may be too low; routing changes only on your decision.` });
+    if (r.escalation.state === 'amber') attention.push({ level: 'warning', text: `${r.label}: ${r.escalation.escalated} of the last ${r.escalation.need} items that started at or escalated from the floor climbed above it, over ${r.escalation.overPercent}%: the floor may be too low; routing changes only on your decision.` });
     if (r.aboveCeiling > 0) attention.push({ level: 'warning', text: `${r.aboveCeiling} ${r.label.toLowerCase()} item(s) ran an agent above the process's ceiling tier: a breach of the routing policy, for you to look at.` });
     if (r.startedAbove > 0) attention.push({ level: 'info', text: `${r.startedAbove} ${r.label.toLowerCase()} item(s) started above their floor tier; they are counted apart, not as escalations.` });
   }

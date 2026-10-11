@@ -61,10 +61,11 @@ function fixedReport() {
     },
     processCost: [
       { process: 'build', model: 'claude-sonnet-5-5', agents: 3, tokens: 1000, medianTokens: 300, cost: money('0.50') },
+      { process: 'build', model: 'claude-mystery-1', agents: 1, tokens: 400, medianTokens: 400, cost: null },
       { process: 'check', model: 'claude-haiku-5-5', agents: null, tokens: null, medianTokens: null, cost: null },
       { process: 'main session', model: 'claude-opus-5-5', agents: null, tokens: 5000, medianTokens: null, cost: money('2.00') },
       { process: 'main session', model: 'claude-haiku-5-5', agents: null, tokens: null, medianTokens: null, cost: null },
-      { process: 'sessions before recording: main session and helper agents together', model: 'claude-opus-5-5', agents: null, tokens: 7000, medianTokens: null, cost: money('3.00') },
+      { process: 'not split: main session and helper agents together', model: 'claude-opus-5-5', agents: null, tokens: 7000, medianTokens: null, cost: money('3.00'), unsplit: true },
     ],
     throttle: {
       state: 'off', reason: 'No runner: nothing reads usage or starts items', error: null, thresholds: null,
@@ -105,9 +106,11 @@ describe.skipIf(!run)('dev Control Tower page', () => {
     // The main session's remainder keeps its tokens; its absent agent figures are unavailable, not 0.
     expect(await page.locator('#proc-cost tbody tr', { hasText: /^main sessionopus/ }).locator('td').allTextContents()).toEqual(['main session', 'opus-5-5', 'Not applicable', '5,000', 'Not applicable', '$2.00']);
     // A main session whose remainder came out negative is unavailable (its tokens), though it has no agents to count.
-    expect(await page.locator('#proc-cost tbody tr', { hasText: /^main sessionhaiku/ }).locator('td').allTextContents()).toEqual(['main session', 'haiku-5-5', 'Not applicable', UNREC, 'Not applicable', UNREC]);
-    expect(await page.locator('#proc-cost tbody tr', { hasText: 'sessions before recording' }).locator('td').allTextContents()).toEqual(['sessions before recording: main session and helper agents together', 'opus-5-5', 'Not applicable', '7,000', 'Not applicable', '$3.00']);
-    expect(await page.locator('#pc-note').textContent()).toBe(`Helper-agent records begin 2026-10-09; 51 helper agents have no record of their own (model and tokens unavailable, not recorded). These rows are priced from the transcripts, so they can differ from Spend, which uses Claude Code's own checkpoints.`);
+    expect(await page.locator('#proc-cost tbody tr', { hasText: /^main sessionhaiku/ }).locator('td').allTextContents()).toEqual(['main session', 'haiku-5-5', 'Not applicable', 'Unavailable (could not be split)', 'Not applicable', 'Unavailable (could not be split)']);
+    // A model with no price: its tokens show, its cost says so.
+    expect(await page.locator('#proc-cost tbody tr', { hasText: /^buildmystery/ }).locator('td').nth(5).textContent()).toBe('Unavailable (no price)');
+    expect(await page.locator('#proc-cost tbody tr', { hasText: 'not split' }).locator('td').allTextContents()).toEqual(['not split: main session and helper agents together', 'opus-5-5', 'Not applicable', '7,000', 'Not applicable', '$3.00']);
+    expect(await page.locator('#pc-note').textContent()).toBe(`Helper-agent records begin 2026-10-09; 51 helper agents started with no record of their own: their model and tokens are unavailable (not recorded), and their sessions' tokens are in the rows marked not split. These rows are priced from the transcripts, so they can differ from Spend, which uses Claude Code's own checkpoints.`);
     // On the routing view, a process with nothing recorded shows the same words in its items and finished-at-floor cells.
     await page.goto(`file://${fixedPage}#routing`);
     const check = await page.locator('#ladder tbody tr', { hasText: 'Check' }).locator('td').allTextContents();
@@ -134,6 +137,26 @@ describe.skipIf(!run)('dev Control Tower page', () => {
     expect(await page.locator('#ladder .pill svg').count()).toBe(4);
     expect(await page.locator('#esc-log tbody tr .pill').allTextContents()).toEqual(['Recorded', 'No record']);
     expect(await page.locator('#esc-log tbody tr').nth(1).locator('td').nth(6).textContent()).toBe('Not declared');
+    expect(errors).toEqual([]);
+    await page.close();
+  });
+
+  it('shows the saving from helper agents alone beside the saving overall', async () => {
+    const { page, errors } = await open(fixedPage, 1280, '#cost');
+    const saving = await page.locator('#saving').textContent();
+    expect(saving).toContain('Helper agents only: $0.25 (50% of the $0.50 they would have cost at opus-5-5 prices).');
+    expect(saving).toContain('$1.00');
+    expect(errors).toEqual([]);
+    await page.close();
+  });
+
+  it('says what the cost rows hold when no helper agent has a record of its own yet', async () => {
+    const none = fixedReport();
+    none.routing.since = null as unknown as string;
+    none.routing.agentsBefore = 4;
+    const file = await buildPage(none, 'none.html');
+    const { page, errors } = await open(file, 1280, '#cost');
+    expect(await page.locator('#pc-note').textContent()).toBe("No helper agent recorded on its own yet: 4 started before recording; their tokens are in the rows marked not split. These rows are priced from the transcripts, so they can differ from Spend, which uses Claude Code's own checkpoints.");
     expect(errors).toEqual([]);
     await page.close();
   });

@@ -8,7 +8,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { PROCESSES, TRIGGERS, failureKind, scrub } from '../.claude/hooks/devlog.mjs';
+import { PROCESSES, TRIGGERS, failureKind, isTaskId, scrub } from '../.claude/hooks/devlog.mjs';
 
 const EVENTS = new Set(['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
   'Usage', 'Alert', 'SubagentStart', 'SubagentStop', 'AgentRun', 'Outcome', 'Task', 'Incident', 'Decision']);
@@ -19,7 +19,7 @@ const INCIDENT_TYPES = new Set(['agent_regression', 'test_failure', 'review_find
 const REQUESTED = new Set(['opus', 'sonnet', 'haiku', 'inherit']);
 const isoTime = (v) => { const d = typeof v === 'string' ? new Date(v) : null; return d && !Number.isNaN(d.getTime()) ? d.toISOString() : undefined; };
 const id = (v) => (typeof v === 'string' && /^[\w-]{1,80}$/.test(v) ? v : undefined);
-const taskId = (v) => (typeof v === 'string' && /^[A-Za-z][\w.-]{0,39}$/.test(v) ? v : undefined);
+const taskId = (v) => (isTaskId(v) ? v : undefined);
 const decimal = (v) => (typeof v === 'string' && /^\d{1,12}\.\d{1,8}$/.test(v) ? v : undefined);
 const nat = (v, max = Number.MAX_SAFE_INTEGER) => (Number.isInteger(v) && v >= 0 && v <= max ? v : undefined);
 const text = (v, max) => (typeof v === 'string' ? scrub(v, max) : undefined);

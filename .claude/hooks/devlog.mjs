@@ -127,6 +127,13 @@ export const TRIGGERS = ['review_failed', 'suite_failed', 'builder_blocked', 'de
 /** A helper agent's id as Claude Code writes it. Anything else is left out, never scrubbed into a lookalike. */
 export const isAgentId = (v) => typeof v === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(v);
 
+/**
+ * A task id as the board and the tags use it: letters, digits, "-", "_" and ".", starting with a letter, that scrubbing
+ * would not change (a key, an email, a long mixed run) and holding fewer than 7 digits (a phone number's worth).
+ * The one definition: the tag, the flush and the task command all use it.
+ */
+export const isTaskId = (v) => typeof v === 'string' && /^[A-Za-z][\w.-]{0,39}$/.test(v) && scrub(v, 40) === v && (v.match(/\d/g) ?? []).length < 7;
+
 const TAG = /^\[(plan|review|security-review|build|fix|check) ([A-Za-z][\w.-]{0,39})(?: (esc:(review_failed|suite_failed|builder_blocked|deny_path_touched)|shadow))?\](?:\s|$)/;
 
 /**
@@ -140,9 +147,8 @@ export function parseTag(description) {
   if (!m) return null;
   const [, process, task, extra, trigger] = m;
   if (extra === 'shadow' && process !== 'review') return null;
-  // The task id is the one free-form part: refuse one that scrubbing would change (a key, an email, a long mixed run)
-  // or that holds a phone-number's worth of digits, so such a tag is no tag and nothing of it is recorded.
-  if (scrub(task, 40) !== task || (task.match(/\d/g) ?? []).length >= 7) return null;
+  // The task id is the one free-form part: a tag whose id is not a plain task id is no tag, and nothing of it is recorded.
+  if (!isTaskId(task)) return null;
   const out = { process, task };
   if (trigger) out.trigger = trigger;
   if (extra === 'shadow') out.shadow = true;

@@ -18,7 +18,7 @@ const notMet = (text: string): Criterion => ({ text, state: 'not_met', proof: 'n
 export const PHASES: PhaseProgress[] = [
   {
     id: '0', name: 'Foundations', status: 'in_progress',
-    summary: 'The shared backbone that every later phase plugs into. Built and tested, with a tenant switcher, read-only staff, user management (a new admin needs another admin to approve them) and an install path run end to end, and scheduled jobs that the app runs itself on Postgres.',
+    summary: 'The shared backbone that every later phase plugs into. Built and tested, with a tenant switcher, read-only staff, user management (a new admin needs another admin to approve them) and an install path run end to end, scheduled jobs that the app runs itself on Postgres, and a client portal where a client sees its own credits and calls and its admins manage its users.',
     criteria: [
       { text: 'An operator can add a provider through the UI and enter its parameters and charging mechanism, without a code change.', state: 'met', proof: 'tests', note: 'Driven in a real browser.' },
       { text: 'A rate change creates a new version, and old records keep their original rate.', state: 'met', proof: 'tests' },
@@ -26,7 +26,6 @@ export const PHASES: PhaseProgress[] = [
     ],
     open: [
       'The install was run end to end only in a cloud sandbox (with the sandbox\'s certificate added to the image build), not on a real host',
-      'Client admins and client users can do the same things: the client portal only reads credits and projects so far',
     ],
   },
   {

@@ -520,15 +520,19 @@ export async function recordPromise(c: pg.PoolClient, actorId: string | null, ca
  * (an open case, not more than the balance, one open promise at a time); one the checks refuse is recorded on the case
  * with the reason, and never fails the step it comes from (L-006).
  */
-export async function recordPromiseFromCall(c: pg.PoolClient, e: { callId: string; runId: string; amount: string; days: number }) {
+export async function recordPromiseFromCall(c: pg.PoolClient, e: { callId: string; runId: string; amount: string; days?: number; weekday?: number }, now = new Date()) {
   const caseId = (await c.query('SELECT case_id FROM calls WHERE id = $1', [e.callId])).rows[0]?.case_id as string | undefined;
   if (!caseId) return null;
   await c.query('SAVEPOINT workflow_promise');
   try {
     const cs = await caseRow(c, caseId);
-    const parsed = promiseSchema.safeParse({ amount: e.amount, dueOn: addDays(localParts(new Date(), cs.time_zone).date, e.days) });
+    // One clock for "today": the same moment works out the date and is checked against it.
+    const local = localParts(now, cs.time_zone);
+    const days = e.weekday !== undefined ? (e.weekday - local.dow + 7) % 7 : e.days ?? 0;   // the next such weekday, today included
+    const parsed = promiseSchema.safeParse({ amount: e.amount, dueOn: addDays(local.date, days) });
     if (!parsed.success) throw new AppError(400, 'The amount from the call is not an exact amount.');
-    const r = await recordPromise(c, null, caseId, parsed.data);
+    if (toScaled(parsed.data.amount) <= 0n) throw new AppError(400, 'A promise is for an amount above nothing.');
+    const r = await recordPromise(c, null, caseId, parsed.data, now);
     await c.query('RELEASE SAVEPOINT workflow_promise');
     return r;
   } catch (err) {

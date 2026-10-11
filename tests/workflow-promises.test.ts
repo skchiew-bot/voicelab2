@@ -10,12 +10,12 @@ import { validateDefinition } from '../src/workflows/validate.js';
 
 // A workflow can record the promise to pay a person makes on a call, on the call's case, never guessed.
 const KL = 'Asia/Kuala_Lumpur';
-const promise = { amount: { var: 'case_balance' }, due: { var: 'when_intent', map: { today: 0, friday: 3 } } };
+const promise = { amount: { var: 'case_balance' }, due: { var: 'when_intent', map: { monday: 1, friday: 5 }, as: 'weekday' as const } };
 const flow: WorkflowDefinition = {
   start: 'when', variables: ['case_balance'],
   nodes: {
-    when: { type: 'speak', speech: 'fixed', text: 'Can you pay the balance today, or on Friday?',
-      listen: { captureAs: 'when', intents: { today: ['today', 'hari ini'], friday: ['friday', 'jumaat'] } }, transitions: [{ to: 'done' }] },
+    when: { type: 'speak', speech: 'fixed', text: 'Can you pay the balance on Monday, or on Friday?',
+      listen: { captureAs: 'when', intents: { monday: ['monday', 'isnin'], friday: ['friday', 'jumaat'] } }, transitions: [{ to: 'done' }] },
     done: { type: 'end', outcome: 'promised', contact: 'contacted', promise },
   },
 };
@@ -34,8 +34,14 @@ describe('a promise to pay read from the call', () => {
     expect(errs(withPromise({ amount: { var: 'case_balance' } }))).toEqual([['bad_promise', 'done']]);
     expect(errs(withPromise({ amount: { var: 'case_balance' }, due: { days: 61 } }))).toEqual([['bad_promise', 'done']]);
     expect(errs(withPromise({ amount: { var: 'case_balance' }, due: { days: 1.5 } }))).toEqual([['bad_promise', 'done']]);
-    expect(errs(withPromise({ amount: { var: 'case_balance' }, due: { days: 0, var: 'when_intent', map: { today: 0 } } }))).toEqual([['bad_promise', 'done']]);
-    expect(errs(withPromise({ amount: { var: 'case_balance' }, due: { var: 'when_intent', map: { unknown: 0 } } }))).toEqual([['bad_promise', 'done']]);
+    expect(errs(withPromise({ amount: { var: 'case_balance' }, due: { days: 0, var: 'when_intent', map: { monday: 1 }, as: 'weekday' } }))).toEqual([['bad_promise', 'done']]);
+    expect(errs(withPromise({ amount: { var: 'case_balance' }, due: { var: 'when_intent', map: { unknown: 0 }, as: 'weekday' } }))).toEqual([['bad_promise', 'done']]);
+    // A map must say what its numbers are: days from today, or a weekday (which a fixed number of days cannot stand for).
+    expect(errs(withPromise({ amount: { var: 'case_balance' }, due: { var: 'when_intent', map: { friday: 5 } } }))).toEqual([['bad_promise', 'done']]);
+    expect(errs(withPromise({ amount: { var: 'case_balance' }, due: { var: 'when_intent', map: { friday: 7 }, as: 'weekday' } }))).toEqual([['bad_promise', 'done']]);
+    // A bad callback on the same end does not stop the promise being checked.
+    expect(errs({ ...withPromise({ amount: { var: 'case_balance' } }), nodes: { ...flow.nodes, done: { type: 'end', outcome: 'promised', contact: 'contacted', callback: 'soon', promise: { amount: { var: 'case_balance' } } } } }))
+      .toEqual([['bad_callback', 'done'], ['bad_promise', 'done']]);
     expect(errs(withPromise({ amount: { var: 'nowhere' }, due: { days: 0 } }))).toEqual([['unknown_variable', 'done']]);
     // A sensitive value is never recorded with the call, in this workflow or across workflows.
     expect(errs({ ...flow, sensitiveVariables: ['case_balance'] })).toEqual([['sensitive_in_record', 'done']]);
@@ -44,20 +50,21 @@ describe('a promise to pay read from the call', () => {
     expect(checkReferences('parent', parent, (n) => (n === 'child' ? child : 'absent')).map((i) => i.code)).toEqual(['sensitive_across_workflows']);
   });
 
-  it('records an exact amount, due as many days ahead as the answer maps to', async () => {
-    expect(await play({ case_balance: '500.00' }, 'jumaat')).toEqual({ outcome: 'promised', contact: 'contacted', promise: { amount: '500.00', days: 3 } });
-    expect(await play({ case_balance: '120' }, 'today please')).toEqual({ outcome: 'promised', contact: 'contacted', promise: { amount: '120', days: 0 } });
+  it('records an exact amount, due on the weekday the answer names, or as many days ahead as a relative answer maps to', async () => {
+    expect(await play({ case_balance: '500.00' }, 'jumaat')).toEqual({ outcome: 'promised', contact: 'contacted', promise: { amount: '500.00', weekday: 5 } });
+    const relative = withPromise({ amount: { var: 'case_balance' }, due: { var: 'when_intent', map: { monday: 0, friday: 1 }, as: 'days' } }) as WorkflowDefinition;
+    expect(await play({ case_balance: '120' }, 'friday please', relative)).toEqual({ outcome: 'promised', contact: 'contacted', promise: { amount: '120', days: 1 } });
   });
 
   it('records no promise, never a guess, when the amount is not exact or the day was not understood', async () => {
-    for (const amount of ['about 200', '1,500.00', '200 ringgit', '']) expect((await play({ case_balance: amount }, 'today'))?.promise, amount).toBeUndefined();
+    for (const amount of ['about 200', '1,500.00', '200 ringgit', '']) expect((await play({ case_balance: amount }, 'friday'))?.promise, amount).toBeUndefined();
     expect((await play({ case_balance: '500.00' }, 'next month maybe'))?.promise).toBeUndefined();
     // A map whose inherited entry would give a day is not read: only the map's own entries count.
-    const inherited = withPromise({ amount: { var: 'case_balance' }, due: { var: 'when_intent', map: Object.create({ today: 0 }) } }) as WorkflowDefinition;
-    expect((await play({ case_balance: '500.00' }, 'today', inherited))?.promise).toBeUndefined();
+    const inherited = withPromise({ amount: { var: 'case_balance' }, due: { var: 'when_intent', map: Object.create({ friday: 5 }), as: 'weekday' } }) as WorkflowDefinition;
+    expect((await play({ case_balance: '500.00' }, 'friday', inherited))?.promise).toBeUndefined();
     // A version saved before promises were checked cannot reach past the furthest a promise may fall due.
     const far = withPromise({ amount: { var: 'case_balance' }, due: { days: 61 } }) as WorkflowDefinition;
-    expect((await play({ case_balance: '500.00' }, 'today', far))?.promise).toBeUndefined();
+    expect((await play({ case_balance: '500.00' }, 'friday', far))?.promise).toBeUndefined();
   });
 });
 
@@ -107,14 +114,18 @@ async function talk(callId: string, answer: string, o: { environment?: string; k
 }
 const promisesOf = async (caseId: string) => (await env.pool.query(`SELECT amount::text, due_on::text, status, created_by FROM promises WHERE case_id = $1 ORDER BY created_at`, [caseId])).rows;
 const caseEvents = async (caseId: string) => ((await must(get(`/internal/cases/${caseId}`))).json().events as { kind: string; detail: Record<string, unknown> }[]);
-const inDays = (n: number, tz = KL) => addDays(localParts(new Date(), tz).date, n);
+/** The next such weekday (today included) in a zone, read before and after the call, so a run across midnight still agrees. */
+const nextWeekday = (dow: number, tz = KL) => { const l = localParts(new Date(), tz); return addDays(l.date, (dow - l.dow + 7) % 7); };
 
 describe('a live call on a case whose workflow ends with a promise', () => {
   it('records the promise on the case, for the case\'s balance, due on the day the person chose in the case\'s time zone', async () => {
     const cs = await caseWith('500');
+    const before = nextWeekday(5);
     const view = await talk(await liveCall(cs), 'friday');
     expect(view).toMatchObject({ status: 'ended', outcome: 'promised' });
-    expect(await promisesOf(cs)).toEqual([{ amount: '500.00000000', due_on: inDays(3), status: 'open', created_by: null }]);
+    const [p] = await promisesOf(cs);
+    expect(p).toMatchObject({ amount: '500.00000000', status: 'open', created_by: null });
+    expect([before, nextWeekday(5)]).toContain(p.due_on);                                       // the coming Friday, whatever today is
     expect((await caseEvents(cs)).map((e) => e.kind)).toContain('promise.recorded');
   });
 
@@ -122,19 +133,50 @@ describe('a live call on a case whose workflow ends with a promise', () => {
     // At any moment one of these two zones is on a different date from UTC, so a count from the server's day shows.
     for (const tz of ['Pacific/Kiritimati', 'Pacific/Pago_Pago']) {
       const cs = await caseWith('500', tz);
+      const before = nextWeekday(5, tz);
       await talk(await liveCall(cs), 'friday');
-      expect((await promisesOf(cs)).map((p) => p.due_on), tz).toEqual([inDays(3, tz)]);
+      expect([before, nextWeekday(5, tz)], tz).toContain((await promisesOf(cs))[0].due_on);
     }
   });
 
   it('records a promise the case refuses as refused, with the reason, and the call still ends as it should', async () => {
     const cs = await caseWith('500');
-    await talk(await liveCall(cs), 'today');                                                      // the first promise is open
+    await talk(await liveCall(cs), 'monday');                                                     // the first promise is open
     const second = await talk(await liveCall(cs), 'friday');
     expect(second).toMatchObject({ status: 'ended', outcome: 'promised' });
-    expect((await promisesOf(cs)).map((p) => p.due_on)).toEqual([inDays(0)]);
+    expect(await promisesOf(cs)).toHaveLength(1);
     const refused = (await caseEvents(cs)).filter((e) => e.kind === 'promise.not_recorded');
     expect(refused.map((e) => e.detail)).toEqual([expect.objectContaining({ source: 'workflow', reason: 'There is already an open promise on this case. Let it settle first.' })]);
+  });
+
+  it('refuses, with a clear reason, a promise of nothing or of more than the balance, and the call still ends as it should', async () => {
+    const { recordPromiseFromCall } = await import('../src/store/cases.js');
+    for (const [amount, reason] of [['0', 'A promise is for an amount above nothing.'], ['900.00', 'A promise cannot be for more than the balance.']] as [string, string][]) {
+      const cs = await caseWith('500');
+      const callId = await liveCall(cs);
+      const client = await env.pool.connect();
+      try {
+        await client.query('BEGIN');
+        expect(await recordPromiseFromCall(client, { callId, runId: randomUUID(), amount, days: 0 })).toBeNull();
+        await client.query('SELECT 1');                                                              // the transaction carries on afterwards
+        await client.query('COMMIT');
+      } finally { client.release(); }
+      expect(await promisesOf(cs)).toEqual([]);
+      expect((await caseEvents(cs)).filter((e) => e.kind === 'promise.not_recorded').map((e) => e.detail.reason)).toEqual([reason]);
+    }
+  });
+
+  it('records a promise on a call whose workflow reaches its end without a reply', async () => {
+    const direct: WorkflowDefinition = { start: 'done', variables: ['case_balance'], nodes: { done: { type: 'end', outcome: 'promised', promise: { amount: { var: 'case_balance' }, due: { days: 2 } } } } };
+    const c = (await must(post(`/internal/tenants/${tenantId}/workflows`, { name: 'direct_promise', definition: direct }))).json();
+    await must(post(`/internal/workflows/${c.workflow.id}/deploy`, { versionId: c.version.id, environment: 'staging' }));
+    await must(post(`/internal/workflows/${c.workflow.id}/simulate`, { scenarios: [{ name: 'x', variables: { case_balance: '10' }, expect: { outcome: 'promised' } }] }));
+    await must(post(`/internal/workflows/${c.workflow.id}/deploy`, { versionId: c.version.id, environment: 'production' }));
+    const cs = await caseWith('500');
+    const callId = await liveCall(cs);
+    const before = addDays(localParts(new Date(), KL).date, 2);
+    await startRunSpoken(runs(), null, { workflowId: c.workflow.id, environment: 'production', kind: 'live', variables: {}, callId });
+    expect([before, addDays(localParts(new Date(), KL).date, 2)]).toContain((await promisesOf(cs))[0]?.due_on);
   });
 
   it('records nothing for a call without a case, or a staging test on a case', async () => {

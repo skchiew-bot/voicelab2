@@ -225,9 +225,11 @@ export function validateDefinition(input: unknown): ValidationResult {
         if (n.callback !== undefined) {
           const cb = n.callback as unknown;
           if (n.contact === undefined || n.contact === 'wrong_number') nodeErr('bad_callback', 'A callback time needs a call outcome on the same end, and a wrong number has none.');
-          if (!isObj(cb)) { nodeErr('bad_callback', 'callback must be { day, hour, timeZone }.'); break; }
-          if (!validTimeZone(cb.timeZone)) nodeErr('bad_callback', 'callback.timeZone must be a time zone name, such as Asia/Kuala_Lumpur.');
-          for (const [part, max] of [['day', 6], ['hour', 23]] as const) mappedPart(`callback.${part}`, cb[part], max, 'bad_callback', 'callback_never_matches');
+          if (!isObj(cb)) nodeErr('bad_callback', 'callback must be { day, hour, timeZone }.');   // and the promise is still checked
+          else {
+            if (!validTimeZone(cb.timeZone)) nodeErr('bad_callback', 'callback.timeZone must be a time zone name, such as Asia/Kuala_Lumpur.');
+            for (const [part, max] of [['day', 6], ['hour', 23]] as const) mappedPart(`callback.${part}`, cb[part], max, 'bad_callback', 'callback_never_matches');
+          }
         }
         if (n.promise !== undefined) {
           const pr = n.promise as unknown;
@@ -238,7 +240,9 @@ export function validateDefinition(input: unknown): ValidationResult {
             if (pr.due.var !== undefined || !Number.isInteger(pr.due.days) || (pr.due.days as number) < 0 || (pr.due.days as number) > MAX_PROMISE_DAYS) {
               nodeErr('bad_promise', `promise.due.days must be a whole number of days from 0 (today) to ${MAX_PROMISE_DAYS}, on its own.`);
             }
-          } else mappedPart('promise.due', pr.due, MAX_PROMISE_DAYS, 'bad_promise', 'promise_never_matches');
+          } else if (pr.due.as !== 'days' && pr.due.as !== 'weekday') {
+            nodeErr('bad_promise', 'promise.due.as must say what the map gives: "days" from today, or a "weekday" (0 Sunday to 6).');
+          } else mappedPart('promise.due', pr.due, pr.due.as === 'weekday' ? 6 : MAX_PROMISE_DAYS, 'bad_promise', 'promise_never_matches');
         }
         break;
       default: nodeErr('unknown_node_type', `"${String((n as { type: unknown }).type)}" is not a node type (speak, api, subflow, handoff, end).`);

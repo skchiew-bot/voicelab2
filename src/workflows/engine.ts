@@ -199,17 +199,21 @@ function promiseFrom(pr: PromiseAsked | undefined, state: RunState): PromiseMade
   if (!readable(state, pr.amount.var)) return undefined;
   const amount = state.vars[pr.amount.var];
   if (typeof amount !== 'string' || !EXACT_AMOUNT.test(amount.trim())) return undefined;
-  let days: unknown;
-  if (own(pr.due, 'days')) days = (pr.due as { days: unknown }).days;
-  else {
-    const due = pr.due as { var: string; map: Record<string, number> };
-    if (!readable(state, due.var) || !due.map || typeof due.map !== 'object') return undefined;
-    const v = state.vars[due.var];
-    if (typeof v !== 'string' && typeof v !== 'number') return undefined;
-    if (!own(due.map, String(v))) return undefined;
-    days = due.map[String(v)];
+  const whole = (n: unknown, max: number): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= max;
+  if (own(pr.due, 'days')) {
+    const days = (pr.due as { days: unknown }).days;
+    return whole(days, MAX_PROMISE_DAYS) ? { amount: amount.trim(), days } : undefined;
   }
-  return typeof days === 'number' && Number.isInteger(days) && days >= 0 && days <= MAX_PROMISE_DAYS ? { amount: amount.trim(), days } : undefined;
+  const due = pr.due as { var: string; map: Record<string, number>; as: unknown };
+  if (!readable(state, due.var) || !due.map || typeof due.map !== 'object') return undefined;
+  const v = state.vars[due.var];
+  if (typeof v !== 'string' && typeof v !== 'number') return undefined;
+  if (!own(due.map, String(v))) return undefined;
+  const n = due.map[String(v)];
+  // A weekday is turned into a date only when the promise is recorded, in the case's own time zone.
+  if (due.as === 'weekday') return whole(n, 6) ? { amount: amount.trim(), weekday: n } : undefined;
+  if (due.as === 'days') return whole(n, MAX_PROMISE_DAYS) ? { amount: amount.trim(), days: n } : undefined;
+  return undefined;
 }
 
 function withoutSensitive(state: RunState): Vars {

@@ -164,9 +164,10 @@ async function recordContact(c: pg.PoolClient, kind: string, callId: string | nu
 /** A live call whose run ends at an end that records a promise puts it on the call's case, in the same step. */
 async function recordPromiseMade(c: pg.PoolClient, kind: string, callId: string | null, runId: string, records: StepRecord[]) {
   if (kind !== 'live' || !callId) return;
-  const p = records.find((r) => r.type === 'end')?.payload.promise as { amount?: unknown; days?: unknown } | undefined;
-  if (!p || typeof p.amount !== 'string' || !Number.isInteger(p.days)) return;
-  await recordPromiseFromCall(c, { callId, runId, amount: p.amount, days: p.days as number });
+  const p = records.find((r) => r.type === 'end')?.payload.promise as { amount?: unknown; days?: unknown; weekday?: unknown } | undefined;
+  if (!p || typeof p.amount !== 'string') return;
+  const when = Number.isInteger(p.days) ? { days: p.days as number } : Number.isInteger(p.weekday) ? { weekday: p.weekday as number } : null;
+  if (when) await recordPromiseFromCall(c, { callId, runId, amount: p.amount, ...when });
 }
 
 /** As startRun, and also the lines to say, for the live call voice link. */

@@ -146,8 +146,56 @@ describe('a carrier blocking the number we showed', () => {
     const inbound = { call_control_id: 'cc_in_lock', direction: 'incoming', from: '+60123451007', to: TX1 };
     await telnyxPost({ data: { id: randomUUID(), event_type: 'call.initiated', occurred_at: new Date().toISOString(), record_type: 'event', payload: inbound } });
     await telnyxPost({ data: { id: randomUUID(), event_type: 'call.hangup', occurred_at: new Date().toISOString(), record_type: 'event', payload: { ...inbound, hangup_cause: 'call_rejected', sip_hangup_cause: '608' } } });
-    const row = (await env.pool.query(`SELECT id, status FROM calls WHERE provider_call_id = 'cc_in_lock'`)).rows[0];
-    expect(row.status).not.toBe('ringing');
+    const row = (await env.pool.query(`SELECT id, status, end_reason FROM calls WHERE provider_call_id = 'cc_in_lock'`)).rows[0];
+    expect(row).toMatchObject({ status: 'unanswered', end_reason: 'rejected' });
     expect(await locks(row.id)).toEqual([]);
+  });
+
+  it('locks nothing for a call that was answered, whatever code its end carries, or for another leg carrying our call id', async () => {
+    const tx = await dial('+60123451008', telnyxId);
+    const cs = Buffer.from(tx.callId).toString('base64');
+    const at = (ms: number) => new Date(Date.now() + ms).toISOString();
+    await telnyxPost({ data: { id: randomUUID(), event_type: 'call.answered', occurred_at: at(0), record_type: 'event', payload: { call_control_id: tx.providerCallId, client_state: cs } } });
+    await telnyxPost({ data: { id: randomUUID(), event_type: 'call.hangup', occurred_at: at(30_000), record_type: 'event', payload: { call_control_id: tx.providerCallId, client_state: cs, hangup_cause: 'normal_clearing', sip_hangup_cause: '608' } } });
+    expect((await env.pool.query('SELECT status FROM calls WHERE id = $1', [tx.callId])).rows[0].status).toBe('completed');
+    expect(await locks(tx.callId)).toEqual([]);
+
+    const tw = await dial('+60123451009', twilioId);
+    expect((await twilioPost({ CallSid: tw.providerCallId, CallStatus: 'completed', Direction: 'outbound-api', CallDuration: '42', SipResponseCode: '607' })).statusCode).toBeLessThan(300);
+    expect(await locks(tw.callId)).toEqual([]);
+
+    // A leg Telnyx made from ours keeps our client_state; its end is not our dial being blocked.
+    const other = await dial('+60123451010', telnyxId);
+    await telnyxPost({ data: { id: randomUUID(), event_type: 'call.hangup', occurred_at: at(0), record_type: 'event', payload: { call_control_id: 'cc_another_leg', client_state: Buffer.from(other.callId).toString('base64'), hangup_cause: 'call_rejected', sip_hangup_cause: '608' } } });
+    expect(await locks(other.callId)).toEqual([]);
+  });
+
+  it('locks on a block however the provider files the end: Twilio calling it busy, or Telnyx sending the code as a number', async () => {
+    const tw = await dial('+60123451011', twilioId);
+    expect((await twilioPost({ CallSid: tw.providerCallId, CallStatus: 'busy', Direction: 'outbound-api', CallDuration: '0', SipResponseCode: '608' })).statusCode).toBeLessThan(300);
+    expect(await locks(tw.callId)).toEqual([{ reason: 'carrier_blocked', recorded_by: null }]);
+    const tx = await dial('+60123451012', telnyxId);
+    await telnyxPost({ data: { id: randomUUID(), event_type: 'call.hangup', occurred_at: new Date().toISOString(), record_type: 'event', payload: { call_control_id: tx.providerCallId, client_state: Buffer.from(tx.callId).toString('base64'), hangup_cause: 'call_rejected', sip_hangup_cause: 607 } } });
+    expect(await locks(tx.callId)).toEqual([{ reason: 'spam_flagged', recorded_by: null }]);
+  });
+
+  it('still ends and costs the call once when the lock cannot be written, and raises an alert until a person locks it by hand', async () => {
+    const call = await dial('+60123451013', telnyxId);
+    const hash = (await env.pool.query('SELECT contact_hash FROM calls WHERE id = $1', [call.callId])).rows[0].contact_hash as string;
+    // The database refuses a lock for this one contact, as a failure would.
+    await env.pool.query(`CREATE FUNCTION refuse_lock() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN
+      IF NEW.contact_hash = '${hash}' THEN RAISE EXCEPTION 'lock refused for the test'; END IF; RETURN NEW; END $f$`);
+    await env.pool.query('CREATE TRIGGER refuse_lock BEFORE INSERT ON did_failures FOR EACH ROW EXECUTE FUNCTION refuse_lock()');
+    try { await ended(call, '608'); }
+    finally { await env.pool.query('DROP TRIGGER refuse_lock ON did_failures'); await env.pool.query('DROP FUNCTION refuse_lock()'); }
+    const row = (await env.pool.query('SELECT status, cost_status FROM calls WHERE id = $1', [call.callId])).rows[0];
+    // The end stands, priced as any rejected dial is: ended, with its one cost record.
+    expect(row).toEqual({ status: 'unanswered', cost_status: 'recorded' });
+    expect((await env.pool.query('SELECT count(*)::int AS n FROM call_costs WHERE call_id = $1', [call.callId])).rows[0].n).toBe(1);
+    expect(await locks(call.callId)).toEqual([]);
+    const alert = async () => (await env.call(env.staffToken, 'GET', '/internal/control-tower')).json().alerts.find((a: { code: string }) => a.code === 'did_lock_failed');
+    expect(await alert()).toMatchObject({ severity: 'high', link: '#/numbers' });
+    expect((await post(`/internal/calls/${call.callId}/did-failure`, { reason: 'carrier_blocked' })).statusCode).toBe(201);
+    expect(await alert()).toBeUndefined();
   });
 });

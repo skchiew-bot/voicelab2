@@ -458,8 +458,11 @@ async function applyEvent(c: pg.PoolClient, provider: ProviderRow, ev: Normalize
       await log('call.ended', { status, reason: ev.endReason ?? 'completed', durationSeconds: seconds });
       await recordCallEnd(c, call, { endReason: ev.endReason, occurredAt: ev.occurredAt, answered });
       // A carrier that answered our dial with a clear block on the number we showed: that DID is never shown to this
-      // contact again. Only an outbound dial from a pooled number to a known contact; a failure here never undoes the end.
-      const lock = call.direction === 'outbound' && call.from_number_id && call.contact_hash ? carrierLockFor(ev.sipCode) : null;
+      // contact again. Only an outbound dial from a pooled number to a known contact that never connected (a call that
+      // was answered was not blocked, whatever code its end carries), and only on the call's own leg, not another leg
+      // carrying our call id. A failure here never undoes the end: it is left as an alert for a person to lock by hand.
+      const ownLeg = !call.provider_call_id || call.provider_call_id === ev.providerCallId;
+      const lock = call.direction === 'outbound' && call.from_number_id && call.contact_hash && !answered && ownLeg ? carrierLockFor(ev.sipCode) : null;
       if (lock) {
         const reason = lock; const id = call.id; const code = ev.sipCode!;
         await c.query('SAVEPOINT did_lock');

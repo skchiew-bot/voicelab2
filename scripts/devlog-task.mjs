@@ -10,6 +10,10 @@
 //                                         [--detected-by "…"] [--action "…"] [--lesson L-NNN] [--policy-updated yes|no] [--task <id>]
 //   node scripts/devlog-task.mjs decision --title "…" [--on YYYY-MM-DD] [--by owner] [--ref "#46"] [--task <id>]
 //                                         (an owner decision, kept in an append-only register beside the incidents)
+//   node scripts/devlog-task.mjs outcome <task> --process plan|review|security-review|build|fix|check --result passed|failed
+//                                         [--agent <agentId>] [--shadow-of <agentId>] [--round N]
+//                                         (a verdict the session declares for a helper agent's work on a task, for the routing view;
+//                                          the task must already be on this branch's board; --shadow-of needs --process review and --agent)
 //   node scripts/devlog-task.mjs board     (prints the current board)
 //
 // Each command appends an event to this session's spool, like the activity hook, so the board
@@ -20,7 +24,7 @@ import { randomBytes } from 'node:crypto';
 import { appendFileSync, mkdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readConfig, scrub, sessionIds, spoolFile } from '../.claude/hooks/devlog.mjs';
+import { PROCESSES, isAgentId, readConfig, scrub, sessionIds, spoolFile } from '../.claude/hooks/devlog.mjs';
 
 export const STATUSES = ['planned', 'in_progress', 'testing', 'review', 'blocked', 'done', 'abandoned'];
 export const INCIDENT_TYPES = ['agent_regression', 'test_failure', 'review_finding', 'process', 'scope', 'security', 'stop_loss', 'other'];
@@ -115,7 +119,23 @@ export function eventFor(argv, now = new Date(), env = process.env) {
       title: text(opts.title, 200), on, by: text(opts.by ?? 'owner', 60), ref: text(opts.ref, 80), task: opts.task,
     });
   }
-  throw new UsageError('Commands: start, update, done, incident, decision, board.');
+  if (command === 'outcome') {
+    known(['process', 'result', 'agent', 'shadow-of', 'round']);
+    const task = pos[0];
+    if (!task || !ID.test(task)) throw new UsageError('Give a task id: letters, digits, "-", "_" or ".", starting with a letter (e.g. DCT-2).');
+    if (!opts.process) throw new UsageError('outcome needs --process.');
+    if (!opts.result) throw new UsageError('outcome needs --result.');
+    for (const k of ['agent', 'shadow-of']) {
+      if (opts[k] !== undefined && !isAgentId(opts[k])) throw new UsageError(`--${k} must be a helper agent's id: letters, digits, "-" or "_", up to 40.`);
+    }
+    // A shadow review is a second opinion on one primary review: it must say which, and be a review (lesson L-034).
+    if (opts['shadow-of'] !== undefined && (opts.process !== 'review' || opts.agent === undefined)) throw new UsageError('--shadow-of needs --process review and --agent.');
+    return strip({
+      ...base, event: 'Outcome', task, process: oneOf('process', opts.process, PROCESSES),
+      result: oneOf('result', opts.result, ['passed', 'failed']), agent: opts.agent, shadowOf: opts['shadow-of'], round: int('round', opts.round, 1, 99),
+    });
+  }
+  throw new UsageError('Commands: start, update, done, incident, decision, outcome, board.');
 }
 
 function append(event) {
@@ -142,8 +162,13 @@ if (invoked && invoked === pathToFileURL(realpathSync(fileURLToPath(import.meta.
         const had = buildBoard().find((t) => t.id === event.id);
         if (had?.title && !sameWork(had.title, event.title)) throw new UsageError(`${event.id} is already "${had.title}". Choose a new id.`);
       }
+      if (event.event === 'Outcome') {
+        // A verdict for a task nobody started would fill the routing view with work the board does not know.
+        const { buildBoard } = await import('./devlog-report.mjs');
+        if (!buildBoard().some((t) => t.id === event.task)) throw new UsageError(`${event.task} is not on this branch's board. Start it first (start ${event.task} --title …).`);
+      }
       append(event);
-      console.log(event.event === 'Task' ? `Task ${event.id}: ${event.action} recorded.` : `Recorded ${event.id}.`);
+      console.log(event.event === 'Task' ? `Task ${event.id}: ${event.action} recorded.` : event.event === 'Outcome' ? `Outcome for ${event.task} (${event.process}: ${event.result}) recorded.` : `Recorded ${event.id}.`);
       const max = readConfig().stopLoss?.maxTaskAttempts;
       if (event.event === 'Task' && max && event.attempt > max) {
         // One alert per task and attempt, however often the attempt is updated.

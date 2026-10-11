@@ -779,7 +779,7 @@ describe('dashboard report', () => {
 /** A throwaway copy of the tooling in its own git repository, so reports run on known data. */
 function makeRepo(config?: (c: Record<string, any>) => void) {
   const dir = freshDir('repo');
-  for (const f of ['.claude/hooks/devlog.mjs', 'scripts/devlog-flush.mjs', 'scripts/devlog-report.mjs', 'scripts/devlog-task.mjs', 'scripts/devlog-secrets.mjs', 'devlog/lessons.md', 'devlog/dashboard.html']) {
+  for (const f of ['.claude/hooks/devlog.mjs', 'scripts/devlog-flush.mjs', 'scripts/devlog-report.mjs', 'scripts/devlog-task.mjs', 'scripts/devlog-secrets.mjs', 'scripts/devlog-throttle.mjs', 'devlog/lessons.md', 'devlog/dashboard.html']) {
     mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
     writeFileSync(path.join(dir, f), read(f));
   }
@@ -1504,4 +1504,290 @@ export const QUESTIONS = ['Not an open item', 'Nor this'];
     for (const token of ['--d3-purple: #5D3FD3', '--d3-red: #C8102E', '--ink-muted: #6B6C70', '"Source Sans 3"']) expect(template).toContain(token);
     expect(template).not.toMatch(/text-transform:\s*(uppercase|capitalize)/); // sentence case only
   });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Model routing by process (ADR-0014): what Claude Code recorded about each helper agent, what the session declared, and
+// the owner's escalation threshold. Timestamps are fixed, so nothing here depends on when the suite runs (lesson L-037).
+describe('routing and escalation', () => {
+  type Line = Record<string, unknown>;
+  const T0 = Date.parse('2026-10-05T00:00:00Z');
+  const iso = (min: number) => new Date(T0 + min * 60_000).toISOString();
+  const OPUS = 'claude-opus-5-5';
+  const SONNET = 'claude-sonnet-5-5';
+  const HAIKU = 'claude-haiku-5-5';
+  const tok = (output: number, input = 0, extra: Record<string, number> = {}) => ({ messages: 1, input, output, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, ...extra });
+  const task = (id: string, start: number, done?: number): Line[] => [
+    { ts: iso(start), event: 'Task', action: 'start', id, title: `Work ${id}`, status: 'in_progress' },
+    ...(done === undefined ? [] : [{ ts: iso(done), event: 'Task', action: 'done', id, status: 'done', progress: 100 }]),
+  ];
+  const agent = (agentId: string, process: string, taskId: string, model: string, min: number, extra: Line = {}): Line => ({
+    ts: iso(min + 2), event: 'AgentRun', agentId, agentType: 'general-purpose', requested: 'sonnet', process, task: taskId,
+    first: iso(min), last: iso(min + 1), tokens: { [model]: tok(1000) }, ...extra,
+  });
+  const outcome = (min: number, o: Line): Line => ({ ts: iso(min), event: 'Outcome', ...o });
+  const tool = (min: number, o: Line): Line => ({ ts: iso(min), event: 'PostToolUse', tool: 'Bash', target: 'Run tests', ...o });
+  const testRun = (min: number, ok: boolean, extra: Line = {}): Line => tool(min, { event: ok ? 'PostToolUse' : 'PostToolUseFailure', kind: 'test', ...(ok ? {} : { failure: 'exit 1' }), ...extra });
+  const seed = (dir: string, lines: Line[]) => {
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), lines.map((l) => JSON.stringify({ session: 'session_01A', ...l })).join('\n') + '\n');
+  };
+  const reportOf = (dir: string) => {
+    const out = path.join(dir, 'r.json');
+    const r = run(dir, 'scripts/devlog-report.mjs', ['--json', out]);
+    expect(r.status, r.stderr).toBe(0);
+    return JSON.parse(readFileSync(out, 'utf8'));
+  };
+  const row = (r: any, process: string) => r.routing.processes.find((p: { process: string }) => p.process === process);
+  const check = (r: any) => r.health.checks.find((c: { name: string }) => c.name === 'Routing');
+  const attention = (r: any) => r.attention.map((a: { text: string }) => a.text).join('\n');
+
+  it('counts an item as escalated only when a later agent of the same process ran above the floor it started at, by the model Claude Code recorded', () => {
+    const { dir } = makeRepo();
+    seed(dir, [
+      ...task('T-A', 0, 100), agent('a1', 'build', 'T-A', SONNET, 1), agent('a2', 'build', 'T-A', OPUS, 10, { trigger: 'suite_failed' }), testRun(5, false),
+      ...task('T-B', 0, 110), agent('b1', 'build', 'T-B', SONNET, 2),
+      // Started above the floor: counted apart, never as an escalation.
+      ...task('T-C', 0, 120), agent('c1', 'build', 'T-C', OPUS, 3, { requested: 'opus' }), agent('c2', 'build', 'T-C', OPUS, 12),
+      // Asked for opus the second time and was served sonnet: the record is the served model.
+      ...task('T-E', 0, 130), agent('e1', 'build', 'T-E', SONNET, 4), agent('e2', 'build', 'T-E', SONNET, 14, { requested: 'opus' }),
+    ]);
+    const r = reportOf(dir);
+    expect(row(r, 'build')).toMatchObject({
+      items: 4, startedAtFloor: 3, startedAbove: 1, startedBelow: 0, escalatedItems: 1, finishedAtFloor: { n: 2, of: 4 },
+      escalation: { state: 'collecting', escalated: 1, window: 3, need: 20 },
+    });
+    expect(r.routing.log).toEqual([expect.objectContaining({ task: 'T-A', round: 2, fromModel: SONNET, toModel: OPUS, fromTier: 'mid', toTier: 'high', trigger: 'suite_failed' })]);
+    expect(r.routing.log).toHaveLength(1);
+  }, REPO_TIMEOUT);
+
+  it('turns amber only past the owner\'s threshold over 20 finished items, and is collecting before that', () => {
+    // N finished items that started on Sonnet (the build floor); the listed ones then went to Opus.
+    const scenario = (total: number, climbed: number[]) => {
+      const { dir } = makeRepo();
+      seed(dir, Array.from({ length: total }, (_, i) => [
+        ...task(`T-${i}`, 0, 1000 + i), agent(`s${i}`, 'build', `T-${i}`, SONNET, 1 + i * 10),
+        ...(climbed.includes(i) ? [agent(`o${i}`, 'build', `T-${i}`, OPUS, 5 + i * 10, { trigger: 'suite_failed' })] : []),
+      ]).flat());
+      return reportOf(dir);
+    };
+    const six = scenario(20, [0, 1, 2, 3, 4, 5]); // 600 is not over 30% of 20 (600)
+    expect(row(six, 'build').escalation).toMatchObject({ state: 'green', escalated: 6, window: 20, need: 20, overPercent: 30 });
+    expect(check(six)).toMatchObject({ state: 'green' });
+    const seven = scenario(20, [0, 1, 2, 3, 4, 5, 6]); // 700 is over 600
+    expect(row(seven, 'build').escalation).toMatchObject({ state: 'amber', escalated: 7, window: 20 });
+    expect(check(seven)).toMatchObject({ state: 'amber' });
+    expect(seven.routing.state).toBe('amber');
+    expect(attention(seven)).toContain('Build: 7 of the last 20 items that started at the floor climbed above it, over 30%: the floor may be too low; routing changes only on your decision.');
+    const few = scenario(19, [0, 1, 2, 3, 4, 5, 6]); // seven of 19 would be 36%, but 19 items is too few to judge
+    expect(row(few, 'build').escalation).toMatchObject({ state: 'collecting', escalated: 7, window: 19, need: 20 });
+    expect(check(few)).toMatchObject({ state: 'green' });
+    expect(check(few).detail).toContain('collecting 19 of 20');
+    expect(attention(few)).not.toContain('climbed above it');
+    // Only the last 20 finished items count: the oldest climbed, so the window holds six.
+    const older = scenario(21, [0, 1, 2, 3, 4, 5, 6]);
+    expect(row(older, 'build').escalation).toMatchObject({ state: 'green', escalated: 6, window: 20 });
+  }, 30_000);
+
+  it('shows a trigger as the session declared it, and says whether a record supports it', () => {
+    const { dir } = makeRepo();
+    // Each task has a window of its own, so one task's tool records never support another's trigger.
+    const climb = (id: string, base: number, trigger?: string) => [
+      ...task(id, base, base + 90), agent(`${id}-1`, 'build', id, SONNET, base + 1), agent(`${id}-2`, 'build', id, OPUS, base + 20, trigger ? { trigger } : {}),
+    ];
+    seed(dir, [
+      ...climb('T-S1', 0, 'suite_failed'), testRun(10, false),
+      ...climb('T-S2', 100, 'suite_failed'), testRun(110, false, { expectRed: true }), testRun(111, true), // a run expected to fail, and one that passed
+      ...climb('T-D1', 200, 'deny_path_touched'), tool(210, { tool: 'Edit', target: 'src/money.ts' }),
+      ...climb('T-D2', 300, 'deny_path_touched'), tool(310, { tool: 'Edit', target: 'src/other.ts' }),
+      ...climb('T-R', 400, 'review_failed'), outcome(410, { task: 'T-R', process: 'review', result: 'failed', round: 1 }),
+      ...climb('T-B', 500, 'builder_blocked'), outcome(510, { task: 'T-B', process: 'review', result: 'failed', round: 1 }), // a review does not block a builder
+      ...climb('T-N', 600),
+      ...task('T-X', 700, 790), agent('X-1', 'build', 'T-X', SONNET, 701), agent('X-2', 'build', 'T-X', SONNET, 720, { trigger: 'builder_blocked' }),
+    ]);
+    const r = reportOf(dir);
+    const log = new Map<string, any>(r.routing.log.map((c: { task: string }) => [c.task, c]));
+    expect([...log.keys()].sort()).toEqual(['T-B', 'T-D1', 'T-D2', 'T-N', 'T-R', 'T-S1', 'T-S2']);
+    expect(Object.fromEntries([...log].map(([t, c]) => [t, [c.trigger, c.support]]))).toEqual({
+      'T-S1': ['suite_failed', 'recorded'], 'T-S2': ['suite_failed', 'none'],
+      'T-D1': ['deny_path_touched', 'recorded'], 'T-D2': ['deny_path_touched', 'none'],
+      'T-R': ['review_failed', 'declared'], 'T-B': ['builder_blocked', 'none'], 'T-N': [null, 'none'],
+    });
+    expect(r.routing.consistency).toMatchObject({ climbsWithoutTrigger: 1, triggersWithoutClimb: 1, unsupported: 3, unknownTasks: 0, tagged: 16, untagged: 0 });
+    expect(row(r, 'build').topTriggers.find((t: { trigger: string }) => t.trigger === 'not declared')).toEqual({ trigger: 'not declared', n: 1 });
+  }, REPO_TIMEOUT);
+
+  it('says unavailable, not zero, for a process no helper agent has recorded, and counts helper agents from before recording began', () => {
+    const { dir } = makeRepo();
+    const start = (min: number, agentId: string): Line => ({ ts: iso(min), event: 'SubagentStart', agentType: 'general-purpose', agentId });
+    seed(dir, [start(0, 'p1'), start(1, 'p2'), start(2, 'p3'), ...task('T-A', 5), agent('a1', 'build', 'T-A', SONNET, 10), start(15, 'p4')]);
+    const r = reportOf(dir);
+    expect(r.routing).toMatchObject({ since: iso(12), agentsBefore: 3, state: 'green' });
+    expect(row(r, 'build')).toMatchObject({ recorded: true, items: 1 });
+    expect(row(r, 'fix')).toMatchObject({
+      recorded: false, items: null, startedAtFloor: null, startedAbove: null, finishedAtFloor: null, tokensByTier: null, topTriggers: null, cost: null,
+      escalation: { state: 'unavailable', reason: 'not_recorded' },
+    });
+    expect(row(r, 'plan')).toMatchObject({ items: null, escalation: { state: 'not_laddered' } });
+    // Before any agent was recorded: everything is unknown and the view is off, never green.
+    const empty = makeRepo();
+    seed(empty.dir, [start(0, 'p1'), start(1, 'p2')]);
+    const e = reportOf(empty.dir);
+    expect(e.routing).toMatchObject({ since: null, agentsBefore: 2, state: 'off' });
+    expect(e.routing.processes.every((p: { items: unknown }) => p.items === null)).toBe(true);
+    expect(check(e)).toMatchObject({ state: 'off' });
+  }, REPO_TIMEOUT);
+
+  it('prices each process\'s tokens exactly and never adds them to the session\'s spend', () => {
+    const { dir } = makeRepo();
+    // Worked by hand at the configured prices (USD per million tokens). Sonnet: input 2, output 10, cache read 0.20,
+    // cache write 2.50 (5 minutes) and 4 (1 hour). Opus: input 4, output 20.
+    // Build agent 1 on Sonnet: 123,456 in = 0.246912; 654,321 out = 6.54321; 1,000,000 read = 0.20; 400,000 w5m = 1.00;
+    // 250,000 w1h = 1.00; total 8.990122. Build agent 2: 1,000,000 in + 1,000,000 out = 2 + 10 = 12.
+    // Both: 20.990122. Median of their token totals (2,427,777 and 2,000,000), the lower middle: 2,000,000.
+    // Review on Opus: 1,000,000 in + 100,000 out = 4 + 2 = 6.00. Untagged on Opus: 50,000 out = 1.00.
+    // The session also holds 1,000,000 Sonnet input (2.00) and 1,000,000 Opus output (20.00) of its own.
+    seed(dir, [
+      ...task('T-A', 0),
+      agent('b1', 'build', 'T-A', SONNET, 1, { tokens: { [SONNET]: tok(654321, 123456, { cacheRead: 1_000_000, cacheWrite5m: 400_000, cacheWrite1h: 250_000 }) } }),
+      agent('b2', 'build', 'T-A', SONNET, 5, { tokens: { [SONNET]: tok(1_000_000, 1_000_000) } }),
+      agent('r1', 'review', 'T-A', OPUS, 9, { tokens: { [OPUS]: tok(100_000, 1_000_000) } }),
+      agent('u1', 'build', 'T-A', OPUS, 12, { process: undefined, task: undefined, tokens: { [OPUS]: tok(50_000) } }),
+      agent('c1', 'check', 'T-A', 'claude-unknown-9', 15),
+      agent('c2', 'check', 'T-A', HAIKU, 17),
+      { ts: iso(30), event: 'Usage', at: 'Stop', costUSD: '50.00000000', costBasis: 'checkpoint+since', tokens: {
+        [SONNET]: tok(1_654_321, 2_123_456, { messages: 3, cacheRead: 1_000_000, cacheWrite5m: 400_000, cacheWrite1h: 250_000 }),
+        [OPUS]: tok(1_150_000, 1_000_000, { messages: 3 }),
+      } },
+    ]);
+    const r = reportOf(dir);
+    const rows = Object.fromEntries(r.processCost.map((x: { process: string; model: string }) => [`${x.process}|${x.model}`, x]));
+    expect(rows[`build|${SONNET}`]).toEqual({ process: 'build', model: SONNET, agents: 2, tokens: 4_427_777, medianTokens: 2_000_000, cost: { usd: '20.99012200' } });
+    expect(rows[`review|${OPUS}`]).toEqual({ process: 'review', model: OPUS, agents: 1, tokens: 1_100_000, medianTokens: 1_100_000, cost: { usd: '6.00000000' } });
+    expect(rows[`not recorded|${OPUS}`]).toEqual({ process: 'not recorded', model: OPUS, agents: 1, tokens: 50_000, medianTokens: 50_000, cost: { usd: '1.00000000' } });
+    // A model with no price is unavailable, not free.
+    expect(rows['check|claude-unknown-9']).toMatchObject({ cost: null });
+    // The main session is what the session totals hold beyond its helper agents; the exact remainders are priced.
+    expect(rows[`main session|${SONNET}`]).toMatchObject({ tokens: 1_000_000, cost: { usd: '2.00000000' } });
+    expect(rows[`main session|${OPUS}`]).toMatchObject({ tokens: 1_000_000, cost: { usd: '20.00000000' } });
+    // Helper agents with more tokens than their session recorded (Haiku, unknown model): unavailable, never clamped to zero.
+    expect(rows[`main session|${HAIKU}`]).toMatchObject({ tokens: null, cost: null });
+    expect(row(r, 'build').cost).toEqual({ usd: '20.99012200' });
+    expect(row(r, 'check').cost).toBeNull();
+    expect(r.economics.spend.usd).toBe('50.00000000'); // Claude Code's own figure for the session, unchanged by the breakdown
+  }, REPO_TIMEOUT);
+
+  it('keeps every helper agent\'s record from one stop, not just the first', () => {
+    const { dir } = makeRepo();
+    // One Stop writes one record per helper agent, all at the same moment.
+    seed(dir, [
+      ...task('T-A', 0),
+      agent('a1', 'build', 'T-A', SONNET, 1, { ts: iso(5) }), agent('a2', 'build', 'T-A', SONNET, 2, { ts: iso(5) }), agent('a3', 'fix', 'T-A', SONNET, 3, { ts: iso(5) }),
+      outcome(6, { task: 'T-A', process: 'review', result: 'passed', agent: 'a1', round: 1 }), outcome(6, { task: 'T-A', process: 'review', result: 'failed', agent: 'a2', round: 1 }),
+    ]);
+    const r = reportOf(dir);
+    expect(r.routing.agents.map((a: { agentId: string }) => a.agentId).sort()).toEqual(['a1', 'a2', 'a3']);
+    expect(row(r, 'build')).toMatchObject({ agents: 2 });
+    expect(row(r, 'review').firstPass).toEqual({ n: 1, of: 2 });
+  }, REPO_TIMEOUT);
+
+  it('records a review outcome only for a known task, process and result, and refuses anything else', () => {
+    const { dir } = makeRepo();
+    const task = (...a: string[]) => run(dir, 'scripts/devlog-task.mjs', a);
+    const outcomes = () => spoolLines(dir).filter((l) => l.event === 'Outcome');
+    const refused = (args: string[], message: string) => {
+      const r = task(...args);
+      expect([r.status, r.stderr]).toEqual([1, expect.stringContaining(message)]);
+    };
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed'], "T-1 is not on this branch's board. Start it first");
+    expect(task('start', 'T-1', '--title', 'Routing work').status).toBe(0);
+    refused(['outcome', 'T-1', '--process', 'deploy', '--result', 'passed'], '--process must be one of: plan, review, security-review, build, fix, check.');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'ok'], '--result must be one of: passed, failed.');
+    refused(['outcome', 'T-1', '--process', 'review'], 'outcome needs --result.');
+    refused(['outcome', 'T-1', '--result', 'passed'], 'outcome needs --process.');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed', '--agent', 'not an id'], '--agent must be a helper agent\'s id');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed', '--agent', 'x'.repeat(41)], '--agent must be a helper agent\'s id');
+    refused(['outcome', 'T-1', '--process', 'build', '--result', 'passed', '--agent', 's1', '--shadow-of', 'a1'], '--shadow-of needs --process review and --agent.');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed', '--shadow-of', 'a1'], '--shadow-of needs --process review and --agent.');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed', '--round', '0'], '--round must be a whole number from 1 to 99.');
+    refused(['outcome', 'T-1', '--process', 'review', '--result', 'passed', '--escalate', 'yes'], 'Unknown option: --escalate.');
+    expect(outcomes()).toEqual([]); // every refusal recorded nothing
+    expect(task('outcome', 'T-1', '--process', 'review', '--result', 'passed', '--agent', 'a1', '--round', '1').status).toBe(0);
+    expect(task('outcome', 'T-1', '--process', 'review', '--result', 'failed', '--agent', 's1', '--shadow-of', 'a1').status).toBe(0);
+    expect(outcomes()).toEqual([
+      expect.objectContaining({ task: 'T-1', process: 'review', result: 'passed', agent: 'a1', round: 1 }),
+      expect.objectContaining({ task: 'T-1', process: 'review', result: 'failed', agent: 's1', shadowOf: 'a1' }),
+    ]);
+  }, 30_000);
+
+  it('reads the ladder and thresholds from control-tower.json, every process and trigger in the code\'s lists, and calls a malformed threshold unavailable', async () => {
+    // @ts-expect-error a plain ES module with no type declarations
+    const { PROCESSES, TRIGGERS } = await import('../.claude/hooks/devlog.mjs');
+    const cfg = JSON.parse(read('devlog/control-tower.json'));
+    expect(Object.keys(cfg.routing.processes).sort()).toEqual([...PROCESSES].sort());
+    expect(Object.keys(cfg.routing.triggers).sort()).toEqual([...TRIGGERS].sort());
+    expect(cfg.routing.escalationAlert).toMatchObject({ overPercent: 30, items: 20 });
+    // Four finished items, two of them climbed: 2 of 4 is 50%.
+    const lines = Array.from({ length: 4 }, (_, i) => [
+      ...task(`T-${i}`, 0, 100 + i), agent(`s${i}`, 'build', `T-${i}`, SONNET, 1 + i * 10),
+      ...(i < 2 ? [agent(`o${i}`, 'build', `T-${i}`, OPUS, 5 + i * 10)] : []),
+    ]).flat();
+    const withAlert = (alert: unknown) => { const r = makeRepo((c) => { c.routing.escalationAlert = alert; }); seed(r.dir, lines); return reportOf(r.dir); };
+    // The threshold in the file decides: the same four items are green at 50% and amber at 40%, and 3 items are too few for 4.
+    expect(row(withAlert({ overPercent: 50, items: 4 }), 'build').escalation).toMatchObject({ state: 'green', escalated: 2, need: 4, overPercent: 50 });
+    expect(row(withAlert({ overPercent: 40, items: 4 }), 'build').escalation).toMatchObject({ state: 'amber', escalated: 2, need: 4, overPercent: 40 });
+    expect(row(withAlert({ overPercent: 40, items: 5 }), 'build').escalation).toMatchObject({ state: 'collecting', window: 4, need: 5 });
+    // A threshold that does not parse is unavailable, never 30 and 20 (lesson L-034).
+    for (const bad of [{ overPercent: '30', items: 20 }, { overPercent: 30.5, items: 20 }, { overPercent: 0, items: 20 }, { overPercent: 30, items: 0 }, { overPercent: 130, items: 20 }, { items: 20 }, null]) {
+      const r = withAlert(bad);
+      expect(r.routing.state, JSON.stringify(bad)).toBe('unavailable');
+      expect(row(r, 'build').escalation).toMatchObject({ state: 'unavailable', reason: 'config' });
+      expect(check(r)).toMatchObject({ state: 'unavailable' });
+      expect(attention(r)).toContain('The routing view is unavailable');
+    }
+    // A process missing from the file, or a floor above its ceiling, is unavailable too.
+    for (const edit of [(c: any) => { delete c.routing.processes.fix; }, (c: any) => { c.routing.processes.build.floor = 'high'; c.routing.processes.build.ceiling = 'low'; }, (c: any) => { delete c.routing.triggers.suite_failed; }]) {
+      const r = makeRepo(edit); seed(r.dir, lines);
+      const out = reportOf(r.dir);
+      expect(out.routing).toMatchObject({ state: 'unavailable', processes: [] });
+      expect(out.routing.error).toEqual(expect.any(String));
+    }
+  }, 60_000);
+
+  it('counts shadow reviews against the review they shadow: agreement, misses and false alarms', () => {
+    const { dir } = makeRepo((c) => { c.routing.shadowReview = { enabled: true, every: 2, excludes: ['security-review'] }; });
+    const primary = (id: string, taskId: string, min: number) => agent(id, 'review', taskId, OPUS, min, { requested: 'opus' });
+    const shadow = (id: string, taskId: string, min: number) => agent(id, 'review', taskId, SONNET, min, { shadow: true, tokens: { [SONNET]: tok(500, 100) } });
+    seed(dir, [
+      ...['T-1', 'T-2', 'T-3', 'T-4', 'T-5'].flatMap((t, i) => [...task(t, 0, 500), primary(`r${i + 1}`, t, 1 + i * 10), shadow(`s${i + 1}`, t, 5 + i * 10)]),
+      agent('x1', 'security-review', 'T-1', OPUS, 60), // excluded from the sample by the owner's setting
+      // Primary verdicts: passed, failed, passed, failed, failed. Shadow verdicts: passed, passed, failed, failed, passed.
+      ...['passed', 'failed', 'passed', 'failed', 'failed'].map((v, i) => outcome(100 + i, { task: `T-${i + 1}`, process: 'review', result: v, agent: `r${i + 1}`, round: 1 })),
+      ...['passed', 'passed', 'failed', 'failed', 'passed'].map((v, i) => outcome(110 + i, { task: `T-${i + 1}`, process: 'review', result: v, agent: `s${i + 1}`, shadowOf: `r${i + 1}` })),
+    ]);
+    const r = reportOf(dir);
+    // Agree on tasks 1 and 4; misses on tasks 2 and 5 (the primary failed them, the cheaper tier passed them); a false
+    // alarm on task 3 (the primary passed it, the cheaper tier failed it). Five primary reviews at one in 2 make 2 due.
+    expect(r.routing.shadow).toEqual({ enabled: true, every: 2, error: null, sample: 5, agree: 2, misses: 2, falseAlarms: 1, due: 2, done: 5, tokens: 3000 });
+    // The shadow agents are not primary reviews: they do not count as items or as first-pass reviews.
+    expect(row(r, 'review')).toMatchObject({ items: 5, firstPass: { n: 2, of: 5 } });
+  }, REPO_TIMEOUT);
+
+  it('shows throttle bands as not in use, with the configured thresholds and no reading', async () => {
+    // @ts-expect-error a plain ES module with no type declarations
+    const { throttleTable } = await import('../scripts/devlog-throttle.mjs');
+    const cfg = JSON.parse(read('devlog/control-tower.json'));
+    const r = reportOf(makeRepo().dir);
+    expect(r.throttle).toEqual({
+      state: 'off', reason: 'No runner: nothing reads usage or starts items', bands: throttleTable(cfg.throttle).bands, error: null,
+      thresholds: { fiveHour: { low: 70, crawl: 85, stop: 95 }, weeklyStop: 80, todayLow: 40 },
+    });
+    expect(r.throttle.bands.map((b: { band: string }) => b.band)).toEqual(['Full', 'Normal', 'Low', 'Crawl', 'Stopped']);
+    expect(r.throttle.bands.find((b: { band: string }) => b.band === 'Low').when).toContain('70% to 84%');
+    expect(r.utilisation).toEqual({ state: 'off', reason: expect.stringContaining('No runner') });
+    // Thresholds that make no sense give no table and say why; there is still no reading.
+    const bad = reportOf(makeRepo((c) => { c.throttle.fiveHour = { low: 90, crawl: 85, stop: 95 }; }).dir);
+    expect(bad.throttle).toMatchObject({ state: 'off', bands: null, thresholds: null, error: expect.stringContaining('low < crawl < stop') });
+    expect(Object.keys(bad.throttle).sort()).toEqual(['bands', 'error', 'reason', 'state', 'thresholds']);
+  }, REPO_TIMEOUT);
 });

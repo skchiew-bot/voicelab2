@@ -16,7 +16,7 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<T> {
+export async function api<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
     headers: { authorization: `Bearer ${getToken() ?? ''}`, ...(body ? { 'content-type': 'application/json' } : {}) },
@@ -134,6 +134,7 @@ export interface OutboundReport {
 
 export interface HealthRow { provider_id: string; name: string; kind: string; status: string; state: 'healthy' | 'failed' | 'unfunded'; reason: string | null; since: string | null; ok_streak: number }
 export interface FailoverRow { id: number; scope: string; call_id: string | null; from_name: string | null; to_name: string | null; trigger: string; detail: Record<string, unknown>; at: string }
+export interface TransferSettingRow { tenantId: string; tenant: string; agentNumber: string; ringSeconds: number; whisper: boolean; updatedAt: string }
 export interface CapacityRow { providerId: string; name: string; active: number; ceiling: number | null }
 export interface FundingRow { providerId: string; provider: string; providerStatus: string; currency: string; balance: string; level: 'ok' | 'warn' | 'critical' | 'empty'; warnBelow: string | null; criticalBelow: string | null }
 export interface PolicyView { errorThreshold: number; errorWindowMs: number; latencyThresholdMs: number; latencyWindowMs: number; latencyMinSamples: number; deadAirMs: number; recoveryOkSamples: number; recoveryDwellMs: number }

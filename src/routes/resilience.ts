@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type pg from 'pg';
 import { z } from 'zod';
 import { withActor, type Actor } from '../db.js';
-import { hangUpCalls, type CallDeps } from '../store/calls.js';
+import { hangUpCalls, promoteWaiting, type CallDeps } from '../store/calls.js';
 import { chargeExtraChannels, expireQueued, getEntitlement, providerLoad, setEntitlement } from '../store/concurrency.js';
 import { fundingStatus, setThresholds } from '../store/funding-monitor.js';
 import { clearTransferSettings, getTransferSettings, listTransferSettings, setTransferSettings } from '../store/transfer.js';
@@ -87,7 +87,10 @@ export function registerResilienceRoutes(app: FastifyInstance, ctx: Ctx): void {
       inboundChannels: z.number().int().min(0).max(100_000), extraChannels: z.number().int().min(0).max(100_000).optional(),
       extraChannelCredits: z.string().regex(/^\d{1,10}(\.\d{1,4})?$/).optional(), overburstMultiplier: z.string().regex(/^\d{1,3}(\.\d{1,3})?$/).refine((v) => Number(v) >= 1, 'At least 1.').nullable().optional(),
     }).parse(req.body);
-    return run(req, (c, u) => setEntitlement(c, u, tenantId, b));
+    const out = await run(req, (c, u) => setEntitlement(c, u, tenantId, b));
+    // More channels: callers already waiting are served now, not when the next call ends.
+    await promoteWaiting(ctx.callDeps, [tenantId]);
+    return out;
   });
   app.get('/internal/tenants/:tenantId/entitlement', async (req) => {
     const { tenantId } = z.object({ tenantId: id }).parse(req.params);
@@ -99,7 +102,9 @@ export function registerResilienceRoutes(app: FastifyInstance, ctx: Ctx): void {
     return run(req, (c, u) => chargeExtraChannels(c, u, tenantId, b.month));
   });
   app.post('/internal/queue/expire', async (req) => {
+    await ctx.internal(req);                                      // who is asking is checked before anything changes
     const b = z.object({ maxWaitSeconds: z.number().int().min(1).max(86_400).default(300) }).parse(req.body ?? {});
+    await promoteWaiting(ctx.callDeps);                          // a free channel goes to a waiting caller before anyone is timed out
     const out = await run(req, (c, u) => expireQueued(c, u, b.maxWaitSeconds));
     // Their lines are ended outside the transaction; the provider's report of the end then costs the time they were held.
     const hungUp = await hangUpCalls(ctx.callDeps, out.hangups);

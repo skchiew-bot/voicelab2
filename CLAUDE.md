@@ -9,6 +9,7 @@ Provider-agnostic voice orchestration platform. The blueprint is the source of t
 - **Before each commit:** run the checks you changed things for and chain them to the commit with `&&`, so a failing check stops the commit. **After each push,** check that the remote branch holds the commit you pushed (`git ls-remote`), and give review and other helper agents their own worktree, so none moves your checkout.
 - **Before each PR:** tests and typecheck green, then an **independent Opus review**: a helper agent on Opus, given the diff and the invariants but not my conclusions, asked for bugs, invariant violations and missing tests. Treat its findings as claims to verify, fix the real ones, and list findings and outcomes in the PR description.
 - **The owner merges.** Never merge a PR unless told to in that message.
+- **Ask for decisions as options** (owner's decision, 2026-10-11): when the owner must decide, put it to them as options to select (the question tool), with my recommendation first and marked, so it shows as an alert they can act on fast. Never bury a decision in a long report.
 - Be honest in PR descriptions about what was only tested against fakes.
 - **Keep `src/progress.ts` current**: when a phase's state or an exit criterion changes, update it in the same PR. It drives the Control Tower's progress view, and a test ties it to `BUILD_PLAN.md`. Never mark something met without proof, or proven live when it was only tested against fakes.
 

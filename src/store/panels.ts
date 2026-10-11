@@ -141,7 +141,8 @@ async function modules(c: pg.PoolClient) {
 
 async function funding(c: pg.PoolClient) {
   const balances = (await c.query(
-    `SELECT f.provider_id, p.name, p.status, f.currency, sum(f.amount)::text AS balance, max(f.created_at) AS recorded_at
+    `SELECT f.provider_id, p.name, p.status, f.currency, sum(f.amount)::text AS balance,
+            max(f.created_at) FILTER (WHERE f.call_id IS NULL) AS recorded_at
        FROM provider_funding_entries f JOIN providers p ON p.id = f.provider_id GROUP BY f.provider_id, p.name, p.status, f.currency ORDER BY p.name, f.currency`)).rows;
   // What each provider charged in the last 7 days, in its own currency, counting each call once (its reconciled record if there is one).
   const spend = (await c.query(

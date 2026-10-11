@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // A costed call draws its providers' funding down by exactly what it cost them, once, and a balance it empties fails the
@@ -23,6 +23,7 @@ async function providers() {
     components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.0140', currency: 'USD' }] }));
   await must(post(`/internal/providers/${voice}/charging`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, components: [
     { component: 'llm', unit: 'per_1m_tokens', rate: '2.50', currency: 'USD', billingLine: 'input' },
+    { component: 'llm', unit: 'per_1m_tokens', rate: '10.00', currency: 'USD', billingLine: 'output' },
     { component: 'tts', unit: 'per_1k_characters', rate: '0.30', currency: 'EUR' },
   ] }));
   return { tel, voice };
@@ -47,16 +48,17 @@ describe('provider funding drawn down as calls are costed', () => {
     const { tel, voice } = await providers();
     await topUp(tel, '10'); await topUp(voice, '5'); await topUp(voice, '2', 'EUR');
     const call = randomUUID();
-    await must(cost(call, [{ providerId: tel, usage: { seconds: 61 } }, { providerId: voice, usage: { inputTokens: 1_003, characters: 333 } }]));
-    // 61 s billed as 66 s: 1.1 min x 0.014 = 0.0154 USD. 1003 tokens x 2.50/1M = 0.0025075 USD. 333 chars x 0.30/1k = 0.0999 EUR.
+    await must(cost(call, [{ providerId: tel, usage: { seconds: 61 } }, { providerId: voice, usage: { inputTokens: 1_003, outputTokens: 200, characters: 333 } }]));
+    // 61 s billed as 66 s: 1.1 min x 0.014 = 0.0154 USD. The voice provider's two USD lines are drawn as one entry:
+    // 1003 input tokens x 2.50/1M = 0.0025075 plus 200 output tokens x 10/1M = 0.002, so 0.0045075 USD. 333 chars x 0.30/1k = 0.0999 EUR.
     expect(await drawn(call)).toEqual(expect.arrayContaining([
       { provider_id: tel, kind: 'usage', amount: '-0.01540000', currency: 'USD', ref: `call:${call}` },
-      { provider_id: voice, kind: 'usage', amount: '-0.00250750', currency: 'USD', ref: `call:${call}` },
+      { provider_id: voice, kind: 'usage', amount: '-0.00450750', currency: 'USD', ref: `call:${call}` },
       { provider_id: voice, kind: 'usage', amount: '-0.09990000', currency: 'EUR', ref: `call:${call}` },
     ]));
     expect(await drawn(call)).toHaveLength(3);
     expect(await balances(tel)).toEqual({ USD: '9.98460000' });
-    expect(await balances(voice)).toEqual({ EUR: '1.90010000', USD: '4.99749250' });
+    expect(await balances(voice)).toEqual({ EUR: '1.90010000', USD: '4.99549250' });
   });
 
   it('draws nothing from a provider, or a currency, whose balance nobody keeps, so it never looks empty and fails over', async () => {
@@ -111,7 +113,51 @@ describe('provider funding drawn down as calls are costed', () => {
     const log = (await env.pool.query(`SELECT trigger, detail FROM failover_events WHERE from_provider = $1 ORDER BY id`, [tel])).rows;
     expect(log).toEqual([{ trigger: 'funding', detail: { from: 'healthy', to: 'unfunded', reason: 'The funding balance has run out.' } }]);
     await topUp(tel, '5');
-    expect(await health(tel)).not.toBe('unfunded');
+    // Funded again, it is on probation (failed until it proves itself), never straight back to healthy.
+    expect(await health(tel)).toBe('failed');
+    expect((await env.pool.query(`SELECT trigger FROM failover_events WHERE from_provider = $1 ORDER BY id`, [tel])).rows.map((r) => r.trigger)).toEqual(['funding', 'funded_again']);
+  });
+
+  it('fails the provider over once when two different calls, costed at the same moment, empty its balance between them', async () => {
+    const { tel } = await providers();
+    await topUp(tel, '0.02');                                                     // each call costs 0.014: one fits, two do not
+    const rs = await Promise.all([randomUUID(), randomUUID()].map((id) => cost(id, [{ providerId: tel, usage: { seconds: 60 } }])));
+    expect(rs.map((r) => r.statusCode)).toEqual([201, 201]);
+    expect(await balances(tel)).toEqual({ USD: '-0.00800000' });
+    expect(await health(tel)).toBe('unfunded');
+    expect((await env.pool.query(`SELECT trigger FROM failover_events WHERE from_provider = $1`, [tel])).rows).toEqual([{ trigger: 'funding' }]);
+  });
+
+  it('draws a call down once through the provider\'s own end-of-call callback, however many times it arrives', async () => {
+    const { tel } = await providers();
+    await topUp(tel, '1');
+    const call = randomUUID(); const sid = `CA_fund_hook_${call.slice(0, 8)}`;
+    await env.pool.query(
+      `INSERT INTO calls (id, tenant_id, provider_id, provider_call_id, direction, status, country, started_at, answered_at, cost_status)
+       VALUES ($1,$2,$3,$4,'outbound','in_progress','MY', now() - interval '2 minutes', now() - interval '1 minute', 'pending')`, [call, tenantId, tel, sid]);
+    const path = `/webhooks/twilio/${tel}/status?callId=${call}`;
+    const params = { CallSid: sid, CallStatus: 'completed', Direction: 'outbound-api', CallDuration: '45' };
+    // Twilio's signing, written out here: HMAC-SHA1 of the full URL and the sorted parameters, with the provider's Auth Token.
+    const sig = createHmac('sha1', 't').update('https://voicelab.test' + path + Object.keys(params).sort().map((k) => k + params[k as keyof typeof params]).join('')).digest('base64');
+    const send = () => env.app.inject({ method: 'POST', url: path, payload: new URLSearchParams(params).toString(),
+      headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': sig } });
+    const rs = await Promise.all([send(), send(), send()]);
+    expect(rs.map((r) => r.statusCode)).toEqual([204, 204, 204]);
+    expect((await send()).statusCode).toBe(204);                                // and once more, late
+    // 45 s billed as 48 s in 6-second steps: 0.8 min x 0.014 = 0.0112 USD.
+    expect(await drawn(call)).toEqual([{ provider_id: tel, kind: 'usage', amount: '-0.01120000', currency: 'USD', ref: `call:${call}` }]);
+    expect(await balances(tel)).toEqual({ USD: '0.98880000' });
+  });
+
+  it('dates the Control Tower\'s balance from the last entry staff recorded, not from the latest call drawn from it', async () => {
+    const { tel } = await providers();
+    await topUp(tel, '2');
+    const recorded = (await env.pool.query(`SELECT max(created_at) AS at FROM provider_funding_entries WHERE provider_id = $1`, [tel])).rows[0].at as Date;
+    await new Promise((r) => setTimeout(r, 20));
+    await must(cost(randomUUID(), [{ providerId: tel, usage: { seconds: 60 } }]));
+    const panel = (await must(get('/internal/control-tower/panels'))).json().funding.providers.find((f: { providerId: string }) => f.providerId === tel);
+    expect(panel).toMatchObject({ balance: '1.98600000' });
+    expect(new Date(panel.recordedAt).toISOString()).toBe(new Date(recorded).toISOString());
   });
 
   it('still takes funding a person records by hand, with any reference, and never mistakes it for a call\'s draw-down', async () => {

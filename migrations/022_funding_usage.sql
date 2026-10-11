@@ -7,3 +7,7 @@ ALTER TABLE provider_funding_entries ALTER COLUMN amount TYPE numeric(20,8);
 -- provider and currency.
 ALTER TABLE provider_funding_entries ADD COLUMN call_id uuid;
 CREATE UNIQUE INDEX provider_funding_once_per_call ON provider_funding_entries (call_id, provider_id, currency) WHERE call_id IS NOT NULL;
+
+-- Every costed call now reads a provider's balance (to see whether it is kept, and whether it has run out), and the ledger
+-- grows by a row per call, so the balance is read by provider and currency from an index, not by scanning the ledger.
+CREATE INDEX provider_funding_by_provider ON provider_funding_entries (provider_id, currency) INCLUDE (amount);

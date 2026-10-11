@@ -263,7 +263,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('carries on the same run when the relay reconnects, and starts the workflow once when two connections arrive together', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const { callSid, callId } = await ring();
     const [a, b] = await Promise.all([connect(), connect()]);
     a.send(setup(callSid, callId)); b.send(setup(callSid, callId));
@@ -284,7 +284,7 @@ describe('a live call through the speech relay', () => {
   });
 
   it('asks the question again, and does not apply the caller\'s words, on a connection that carries on a call another is still serving', async () => {
-    await must(put(`/internal/numbers/${numberId}/workflow`, { workflowId: wfId }));
+    await must(put(`/internal/numbers/${numberId}/workflow`, { reason: 'Set up for this test.', workflowId: wfId }));
     const { callSid, callId } = await ring();
     const [a, b] = await Promise.all([connect(), connect()]);
     a.send(setup(callSid, callId));

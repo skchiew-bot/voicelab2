@@ -179,7 +179,7 @@ export interface LearningOverview {
   summary: { inReview: number; approved: number; promoted: number; demoted: number; rejected: number };
   threshold: number; clusters: LearningCluster[];
 }
-export interface Promotion { id: string; workflow: string; node: string; language: string; context_kind: string; context_topic: string; script: string; support: number; variants: number; status: 'in_review' | 'approved' | 'promoted' | 'demoted' | 'rejected'; distilled_by: string; created_at: string }
+export interface Promotion { id: string; workflow: string; node: string; language: string; context_kind: string; context_topic: string; script: string; support: number; variants: number; status: 'in_review' | 'approved' | 'promoted' | 'demoted' | 'rejected'; distilled_by: string; created_at: string; mine: boolean; reviewed: boolean }
 export interface PromotionEvent { id: number; kind: string; reason: string; created_at: string; detail: Record<string, unknown> }
 export interface PromotionFinancial {
   direction: 'promote' | 'demote';

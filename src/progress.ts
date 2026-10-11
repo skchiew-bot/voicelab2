@@ -127,9 +127,9 @@ export const PHASES: PhaseProgress[] = [
       'The frequency, similarity, confidence and drift thresholds are conservative defaults and have not been tuned',
       'Drift compares how callers reacted before and after promotion; a change in the caller population over the same period would look like drift',
       'A promoted script is a layer over the workflow, not a part of its version: promoting or demoting changes what an in-flight call says at its next line',
-      'Only live calls are evidence (staging test calls and rehearsals are not); a promoted script is still spoken in every environment of the client, so a staging test hears what live callers hear while the node is unchanged',
+      'Only live calls that really happened are evidence (staging test calls, rehearsals and runs started by hand are not); a promoted script is still spoken in every environment of the client, so a staging test hears what live callers hear while the node is unchanged',
       'Simulations do not use promoted scripts, so the production gate does not exercise what live calls will say; the cluster report is recomputed on each view and will need caching on a busy client',
-      'A person deciding a script must not be the one who drew it up; a script drawn up by the scheduled sweep has no author, so any admin may decide it, and the councils\' review does not count as a person',
+      'The person who drew a script up may turn it down but not approve it, and the councils are asked once per script; approval by a second person relies on that person being a separately approved admin',
     ],
   },
   {

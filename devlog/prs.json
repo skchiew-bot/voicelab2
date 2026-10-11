@@ -985,23 +985,21 @@
  {
   "number": 25,
   "title": "Control Tower workstream: hardening tests from the last two reviews",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/25",
   "created_at": "2026-10-10T08:43:36Z",
-  "merged_at": null,
+  "merged_at": "2026-10-10T13:47:13Z",
+  "findings": [],
   "head": "claude/phase-CT-hardening",
-  "head_sha": "a66ecacb976b0f9f21db8660c1ad3ad6fbc96d63",
-  "findings": []
+  "head_sha": "a66ecacb976b0f9f21db8660c1ad3ad6fbc96d63"
  },
  {
   "number": 26,
   "title": "Phase 0: tenant switcher, read-only staff, user management, install run end to end",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/26",
   "created_at": "2026-10-10T08:48:36Z",
-  "merged_at": null,
-  "head": "claude/phase-0-roles-switcher",
-  "head_sha": "a7257f47dcfaaf59fa5ab97abd415e013ffbf141",
+  "merged_at": "2026-10-10T13:47:08Z",
   "findings": [
    {
     "severity": "High",
@@ -1039,17 +1037,700 @@
     "severity": "Low",
     "fixed": true
    }
-  ]
+  ],
+  "head": "claude/phase-0-roles-switcher",
+  "head_sha": "e52c2981d5584d574e0366370e3d0b697f0b5706"
  },
  {
   "number": 27,
   "title": "Control Tower workstream: dev Control Tower data refresh (PRs #14–#23) and lesson counts",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/27",
   "created_at": "2026-10-10T09:07:31Z",
   "merged_at": null,
+  "findings": [],
   "head": "claude/phase-CT-devlog-refresh",
-  "head_sha": "534377f7d559ea5b474b1657b3ae40be46434b63",
-  "findings": []
+  "head_sha": "534377f7d559ea5b474b1657b3ae40be46434b63"
+ },
+ {
+  "number": 28,
+  "title": "Phase 0: deploy plan for a Malaysian region (cloud comparison and steps)",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/28",
+  "created_at": "2026-10-10T13:38:37Z",
+  "merged_at": "2026-10-10T13:47:18Z",
+  "findings": [],
+  "head": "claude/phase-0-deploy-plan",
+  "head_sha": "d8266ab094b992b9aab550761c7a391a85b7fd08"
+ },
+ {
+  "number": 29,
+  "title": "Phase 7: make the gate quiet-hours test independent of the time of day",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/29",
+  "created_at": "2026-10-10T13:49:58Z",
+  "merged_at": "2026-10-10T15:31:48Z",
+  "findings": [],
+  "head": "claude/phase-7-clock-test",
+  "head_sha": "dab02231cdb2dd05068d558c701da9f700019ca1"
+ },
+ {
+  "number": 30,
+  "title": "Control Tower workstream: alerts by email",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/30",
+  "created_at": "2026-10-10T15:47:16Z",
+  "merged_at": "2026-10-10T19:37:15Z",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   }
+  ],
+  "head": "claude/phase-CT-email-alerts",
+  "head_sha": "a534c72cc39f0ac2836b07d82b08d6b9ea1dff59"
+ },
+ {
+  "number": 31,
+  "title": "Phase 1: live call voice link through Twilio's speech relay",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/31",
+  "created_at": "2026-10-10T20:12:37Z",
+  "merged_at": "2026-10-10T20:13:11Z",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-1-voice-relay",
+  "head_sha": "cb9ab8a6b7dc44bad3c4aa0e3ea5860c4d9d151e"
+ },
+ {
+  "number": 32,
+  "title": "Dev Control Tower: record usage missed while hooks were not loaded",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/32",
+  "created_at": "2026-10-10T20:16:41Z",
+  "merged_at": "2026-10-10T20:21:18Z",
+  "findings": [],
+  "head": "claude/elegant-hopper-6mid2t",
+  "head_sha": "16d5df70a2c95f2202da6fea4e299900b2c97fc0"
+ },
+ {
+  "number": 33,
+  "title": "Phase 0: scheduled jobs run by the app itself, on Postgres",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/33",
+  "created_at": "2026-10-10T20:31:29Z",
+  "merged_at": "2026-10-10T20:37:27Z",
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Tests",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-0-scheduler",
+  "head_sha": "fd374b0819556b596a97936cacabb9dab67eaa43"
+ },
+ {
+  "number": 34,
+  "title": "Phase 0: scheduler fixes from the lease review, and a time-dependent test",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/34",
+  "created_at": "2026-10-10T20:41:28Z",
+  "merged_at": "2026-10-10T21:11:15Z",
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Info",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-0-scheduler",
+  "head_sha": "24a94601f7a327bbba259ea3459a6719c3423a22"
+ },
+ {
+  "number": 35,
+  "title": "Phase 1: harden the live call voice link (reconnects, takeovers, fallbacks)",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/35",
+  "created_at": "2026-10-10T20:53:09Z",
+  "merged_at": "2026-10-10T20:58:28Z",
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Tests",
+    "fixed": true
+   },
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Tests",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Tests",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-1-voice-relay-hardening",
+  "head_sha": "6150d67bda9587e665e339a99465763b3ec4c7c9"
+ },
+ {
+  "number": 36,
+  "title": "Phase 1: put a caller passed to a person through to the client's agent phone",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/36",
+  "created_at": "2026-10-10T20:54:31Z",
+  "merged_at": "2026-10-10T21:35:59Z",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-1-human-transfer",
+  "head_sha": "7982e6f9a8f75f2b0060b88cece3b9f9010507ae"
+ },
+ {
+  "number": 37,
+  "title": "Dev Control Tower: log sessions opened outside the repository (user-level fallback hook)",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/37",
+  "created_at": "2026-10-10T20:54:37Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium-low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium-low",
+    "fixed": true
+   },
+   {
+    "severity": "Low-medium",
+    "fixed": true
+   }
+  ],
+  "head": "claude/keen-bohr-z9h8p7",
+  "head_sha": "48406b5cdb10b93285082cd71ed962c82d554b96"
+ },
+ {
+  "number": 38,
+  "title": "Phase 0: client portal, with client admins and client users",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/38",
+  "created_at": "2026-10-10T21:52:49Z",
+  "merged_at": "2026-10-11T00:05:30Z",
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low–Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low (tests)",
+    "fixed": true
+   },
+   {
+    "severity": "Low (tests)",
+    "fixed": false
+   },
+   {
+    "severity": "Info",
+    "fixed": false
+   },
+   {
+    "severity": "Info",
+    "fixed": false
+   },
+   {
+    "severity": "Not confirmed",
+    "fixed": false
+   }
+  ],
+  "head": "claude/phase-0-client-portal",
+  "head_sha": "bbadc40d84ef8b77f310a3a06593411c5e64d0ce"
+ },
+ {
+  "number": 39,
+  "title": "Phase 1: callbacks after a hang-up, agent lines in the client's countries, both transfer legs costed",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/39",
+  "created_at": "2026-10-10T21:55:32Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-1-human-transfer",
+  "head_sha": "1e972756793189fea55dcdad070baec8ded65b5c"
+ },
+ {
+  "number": 40,
+  "title": "Phase 3: record outbound outcomes from a workflow's end",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/40",
+  "created_at": "2026-10-10T21:56:25Z",
+  "merged_at": "2026-10-11T00:04:07Z",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-3-workflow-outcomes",
+  "head_sha": "1f208c3e1448cc8afc0bd42b885e1a607ffcb054"
+ },
+ {
+  "number": 41,
+  "title": "Phase 1: live transfer follow-ups (callback on hang-up, +60 agent numbers, agent leg costed and counted, console)",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/41",
+  "created_at": "2026-10-10T22:15:44Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-1-transfer-followups",
+  "head_sha": "cbd45abb6a9f6696bdb7508fafe6b6d63e058134"
+ },
+ {
+  "number": 42,
+  "title": "Phase 0: tests work in a fresh cloud container",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/42",
+  "created_at": "2026-10-10T22:41:19Z",
+  "merged_at": "2026-10-11T00:02:15Z",
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   }
+  ],
+  "head": "claude/phase-0-fresh-test-setup",
+  "head_sha": "a118b87d9a5d951af22d8ff656135c3e34ac74c4"
  }
 ]

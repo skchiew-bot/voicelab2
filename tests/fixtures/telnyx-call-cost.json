@@ -1,0 +1,28 @@
+{
+  "source": "The `callCost` webhook in Telnyx's own published API description (github.com/team-telnyx/openapi, openapi/spec3.json, info.version 2.0.0, fetched 2026-10-11): schemas CallCost and CallCostPart, with the examples given there. Telnyx signs it like every other call-control webhook (Ed25519 over `<timestamp>|<body>`). The ids are the spec's examples; client_state is replaced by the test. Not yet checked against a live call (lesson L-016): replace this with a captured request from the first live Telnyx call.",
+  "callCost": {
+    "data": {
+      "record_type": "event",
+      "event_type": "call.cost",
+      "id": "0ccc7b54-4df3-4bca-a65a-3da1ecc777f0",
+      "occurred_at": "2018-02-02T22:25:27.521992Z",
+      "payload": {
+        "call_control_id": "v3:MdI91X4lWFEs7IgbBEOT9M4AigoY08M0WWZFISt1Yw2axZ_IiE4pqg",
+        "connection_id": "7267xxxxxxxxxxxxxx",
+        "call_leg_id": "428c31b6-7af4-4bcb-b7f5-5013ef9657c1",
+        "call_session_id": "428c31b6-abf3-3bc1-b7f4-5013ef9657c1",
+        "client_state": "aGF2ZSBhIG5pY2UgZGF5ID1d",
+        "billing_group_id": "f5586561-8ff0-4291-a0ac-84fe544797bd",
+        "status": "success",
+        "total_cost": "0.0106",
+        "billed_duration_secs": 120,
+        "cost_parts": [
+          { "call_part": "sip-trunking", "rate": "0.0050", "cost": "0.0050", "currency": "USD", "billed_duration_secs": 60 },
+          { "call_part": "call-recording", "rate": "0.00190", "cost": "0.0038", "currency": "USD", "billed_duration_secs": 120 },
+          { "call_part": "call-control", "rate": "0.00180", "cost": "0.0018", "currency": "USD", "billed_duration_secs": 60 }
+        ],
+        "occurred_at": "2018-02-02T22:25:27.521992Z"
+      }
+    }
+  }
+}

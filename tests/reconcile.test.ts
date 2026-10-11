@@ -189,7 +189,7 @@ describe('reconciling against the provider', () => {
 
   it('refuses what it cannot check', async () => {
     const tx = await mkCall({ providerId: telnyxId, seconds: 61 });
-    expect((await recon(tx.id, { source: 'provider_api' })).statusCode).toBe(400); // no automatic check for Telnyx yet
+    expect((await recon(tx.id, { source: 'provider_api' })).json().outcome).toBe('pending'); // Telnyx has sent no cost report for it
     expect((await recon(tx.id, { source: 'manual' })).statusCode).toBe(400);       // no figures given
     expect((await recon(randomUUID(), { source: 'manual', reportedCost: '1' })).statusCode).toBe(404);
     const open = randomUUID();

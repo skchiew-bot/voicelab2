@@ -198,9 +198,10 @@ const gitIn = (dir, args, input) => {
  * caught too. A file not committed yet is new, not a failure. When git cannot be read the result is "unavailable",
  * never a pass (lesson L-005).
  */
-export function activityIntegrity(dir = root, accepted = {}) {
+export function activityIntegrity(dir = root, accepted = {}, decisions = []) {
   const none = { state: 'unavailable', checked: 0, changed: [], deleted: [], accepted: [], pending: 0 };
-  const log = gitIn(dir, ['log', '--diff-filter=A', '--no-renames', '--raw', '--no-abbrev', '--format=', '--', 'devlog/activity']);
+  // -m: a file first added while resolving a merge shows only in the merge commit's own diff (review of DCT-11).
+  const log = gitIn(dir, ['log', '-m', '--diff-filter=A', '--no-renames', '--raw', '--no-abbrev', '--format=', '--', 'devlog/activity']);
   if (log === null) return none;
   const added = new Map(); // path -> its blob when first added; the log runs newest first, so the oldest add is kept
   for (const line of log.split('\n')) {
@@ -210,6 +211,11 @@ export function activityIntegrity(dir = root, accepted = {}) {
   const folder = path.join(dir, 'devlog', 'activity');
   const present = existsSync(folder) ? readdirSync(folder).filter((f) => f.endsWith('.jsonl')).map((f) => `devlog/activity/${f}`) : [];
   const tracked = present.filter((f) => added.has(f));
+  // A file git tracks but whose add cannot be found (a shallow clone, say) cannot be judged: never "new" (lesson L-005).
+  const listed = gitIn(dir, ['ls-files', '--', 'devlog/activity']);
+  if (listed === null) return none;
+  const unknown = listed.split('\n').filter((f) => f.endsWith('.jsonl') && !added.has(f) && present.includes(f));
+  if (unknown.length) return { ...none, unknown };
   const out = tracked.length ? gitIn(dir, ['hash-object', '--stdin-paths'], tracked.join('\n') + '\n') : '';
   if (out === null) return none;
   const now = out.split('\n').filter(Boolean);
@@ -218,14 +224,19 @@ export function activityIntegrity(dir = root, accepted = {}) {
   const kept = new Set(present);
   // A change the owner accepted counts only while the file still holds exactly the content accepted (null: deleted),
   // and only with the decision that accepted it. Anything else stays a failure, and every accepted change stays listed.
+  const byId = new Map(decisions.filter((d) => d?.event === 'Decision').map((d) => [d.id, d]));
   const ok = (f) => {
     const a = Object.hasOwn(accepted, f) ? accepted[f] : null;
-    return Boolean(a && typeof a.decision === 'string' && /^DEC-\d{8}-[0-9a-f]{4}$/.test(a.decision) && (a.blob ?? null) === (current.get(f) ?? null));
+    // The decision must be in the register, not merely shaped like an id (lesson L-024).
+    return Boolean(a && typeof a.decision === 'string' && byId.has(a.decision) && (a.blob ?? null) === (current.get(f) ?? null));
   };
   const touched = [...tracked.filter((f) => current.get(f) !== added.get(f)), ...[...added.keys()].filter((f) => !kept.has(f))].sort();
   const changed = touched.filter((f) => kept.has(f) && !ok(f));
   const deleted = touched.filter((f) => !kept.has(f) && !ok(f));
-  const acceptedList = touched.filter(ok).map((f) => ({ file: f, decision: accepted[f].decision, deleted: !kept.has(f) }));
+  const acceptedList = touched.filter(ok).map((f) => {
+    const d = byId.get(accepted[f].decision);
+    return { file: f, decision: d.id, title: d.title, on: d.on, ref: d.ref ?? null, deleted: !kept.has(f) };
+  });
   return { state: changed.length || deleted.length ? 'red' : 'green', checked: tracked.length, changed, deleted, accepted: acceptedList, pending: present.length - tracked.length };
 }
 
@@ -606,20 +617,24 @@ export function build(opts = {}) {
   for (const a of alerts.filter((x) => x.kind === 'waste' && x.ts >= since(2))) attention.push({ level: 'info', text: `Wasted effort in ${a.session.slice(-8)}: ${a.rule} (${a.key}).` });
 
   // ------------------------------------------------------------------ health
-  const integrity = activityIntegrity(root, cfg.integrity?.acceptedChanges ?? {});
+  const integrity = activityIntegrity(root, cfg.integrity?.acceptedChanges ?? {}, decisions);
   const secrets = secretHits(root);
   const lastTest = [...events].reverse().find((e) => e.kind === 'test' && !e.expectRed);
-  const stalled = sessionRows.flatMap((s) => s.subagents.filter((a) => a.paired && a.active && a.started && now - new Date(a.started) > 6 * 36e5));
-  const unpaired = sessionRows.reduce((n, s) => n + s.subagents.filter((a) => !a.paired).length, 0);
+  const testFresh = lastTest && now - new Date(lastTest.ts) <= 24 * 36e5; // an old run says nothing about today's code (lesson L-011)
+  // A helper agent is stalled only while its session is still active; one whose session went quiet (a restart, a killed
+  // session) never logged its end, so whether it still runs is unknown, not a failure (lessons L-005, L-021).
+  const long = (a) => a.paired && a.active && a.started && now - new Date(a.started) > 6 * 36e5;
+  const stalled = sessionRows.filter((s) => s.active).flatMap((s) => s.subagents.filter(long));
+  const unpaired = sessionRows.reduce((n, s) => n + s.subagents.filter((a) => !a.paired || (long(a) && !s.active)).length, 0);
   const recentStop = alerts.filter((a) => a.kind === 'stop-loss' && a.ts >= since(1));
   const guardsTotal = lessons.reduce((n, l) => n + l.guards.length, 0);
   const guardsBroken = lessons.reduce((n, l) => n + l.guards.filter((g) => !g.ok).length, 0);
   const checks = [
     { name: 'Lesson guards', state: guardsBroken ? 'red' : 'green', detail: guardsBroken ? `${guardsBroken} of ${guardsTotal} guards are missing` : `${guardsTotal} of ${guardsTotal} guards in place` },
-    { name: 'Activity log integrity', state: integrity.state, detail: integrity.state === 'unavailable' ? 'Git history could not be read' : integrity.state === 'red' ? `${integrity.changed.length} changed and ${integrity.deleted.length} deleted after being committed, not accepted` : `${integrity.checked} files as committed${integrity.accepted.length ? `, ${integrity.accepted.length} earlier change(s) accepted by the owner` : ''}${integrity.pending ? `, ${integrity.pending} not committed yet` : ''}` },
+    { name: 'Activity log integrity', state: integrity.state, detail: integrity.state === 'unavailable' ? (integrity.unknown?.length ? `${integrity.unknown.length} committed file(s) whose first commit cannot be found (a shallow clone?)` : 'Git history could not be read') : integrity.state === 'red' ? `${integrity.changed.length} changed and ${integrity.deleted.length} deleted after being committed, not accepted` : `${integrity.checked} files as committed${integrity.accepted.length ? `, ${integrity.accepted.length} earlier change(s) accepted by the owner` : ''}${integrity.pending ? `, ${integrity.pending} not committed yet` : ''}` },
     { name: 'Secret scan', state: secrets === null ? 'unavailable' : secrets.length ? 'red' : 'green', detail: secrets === null ? 'Files could not be listed' : secrets.length ? `${secrets.length} file(s) hold a real provider's key format` : "No file holds a real provider's key format (L-015)" },
-    { name: 'Tests', state: !lastTest ? 'unavailable' : lastTest.ok ? 'green' : 'amber', detail: !lastTest ? 'No test run recorded' : `Last recorded run ${lastTest.ok ? 'passed' : 'failed'}, ${lastTest.ts.slice(0, 16).replace('T', ' ')} UTC. No CI runs the suite.` },
-    { name: 'Stalled agents', state: stalled.length ? 'amber' : 'green', detail: `${stalled.length ? `${stalled.length} helper agent(s) active for more than 6 hours` : 'None active for more than 6 hours'}${unpaired ? `; ${unpaired} older start(s) carry no id, so cannot be judged` : ''}` },
+    { name: 'Tests', state: !testFresh ? 'unavailable' : lastTest.ok ? 'green' : 'amber', detail: !lastTest ? 'No test run recorded' : `Last recorded test run, of any scope, ${lastTest.ok ? 'passed' : 'failed'} at ${lastTest.ts.slice(0, 16).replace('T', ' ')} UTC${testFresh ? '' : ', more than a day ago'}. No CI runs the suite.` },
+    { name: 'Stalled agents', state: stalled.length ? 'amber' : 'green', detail: `${stalled.length ? `${stalled.length} helper agent(s) active for more than 6 hours` : 'None active for more than 6 hours'}${unpaired ? `; ${unpaired} older start(s) cannot be judged (no id, or their session went quiet)` : ''}` },
     { name: 'Stop-loss', state: recentStop.length ? 'amber' : 'green', detail: recentStop.length ? `${recentStop.length} in the last 24 hours` : `None in the last 24 hours (${alerts.filter((a) => a.kind === 'stop-loss').length} on record)` },
     { name: 'Logging', state: gaps.length || checked?.fallback === 'missing' ? 'amber' : 'green', detail: [gaps.length ? `${gaps.length} session(s) committed while not logged` : '', checked?.fallback === 'missing' ? 'fallback hook not installed' : ''].filter(Boolean).join('; ') || 'Every committing session was logged' },
     { name: 'Runner heartbeat', state: 'off', detail: 'No runner is built yet' },
@@ -635,7 +650,7 @@ export function build(opts = {}) {
     switch (e.event) {
       case 'SessionStart': return { k: 'start', d: `Session started${e.branch ? ` on ${e.branch}` : ''}${e.via === 'fallback' ? ' (outside the repository)' : ''}` };
       case 'SessionEnd': return { k: 'end', d: 'Session ended' };
-      case 'UserPromptSubmit': return { k: 'prompt', d: 'Message from the owner' };
+      case 'UserPromptSubmit': return { k: 'prompt', d: 'Message received' };
       case 'PostToolUse': case 'PostToolUseFailure': return { k: e.kind && e.kind !== 'other' ? e.kind : 'tool', d: `${e.tool}${e.target ? ` ${e.target}` : ''}`, ok: e.ok, f: e.failure };
       case 'SubagentStart': return { k: 'agent', d: `Helper agent started${e.agentType ? `: ${e.agentType}` : ''}` };
       case 'SubagentStop': return { k: 'agent', d: 'Helper agent finished' };
@@ -650,7 +665,8 @@ export function build(opts = {}) {
   const timeline = [
     ...events.map((e) => { const x = step(e); return x ? { ts: e.ts, s: sid(e.session), ...x } : null; }).filter(Boolean),
     ...realCommits.map((c) => ({ ts: c.date, s: c.session ? sid(c.session) : -1, k: 'commit', d: `Commit ${c.sha}: ${c.subject}` })),
-    ...prs.filter((p) => p.merged).map((p) => ({ ts: new Date(p.merged).toISOString(), s: -1, k: 'merge', d: `PR #${p.number} merged: ${p.title}` })),
+    // A merge time that does not parse is left out, never a reason for the whole report to fail (lesson L-006).
+    ...prs.filter((p) => p.merged && !Number.isNaN(new Date(p.merged).getTime())).map((p) => ({ ts: new Date(p.merged).toISOString(), s: -1, k: 'merge', d: `PR #${p.number} merged: ${p.title}` })),
   ].sort((a, b) => a.ts.localeCompare(b.ts));
 
   return {

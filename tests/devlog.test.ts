@@ -1101,14 +1101,21 @@ describe('audit and playback', () => {
     const { dir } = makeRepo();
     const ok = run(dir, 'scripts/devlog-task.mjs', ['decision', '--title', 'Keep #46 and close #47', '--on', '2026-10-11', '--ref', '#46']);
     expect(ok.stdout).toMatch(/Recorded DEC-\d{8}-[0-9a-f]{4}\./);
+    // Up to a day ahead of UTC is today somewhere (Kuala Lumpur, before 08:00); later than that is refused.
+    const tomorrow = new Date(Date.now() + 864e5).toISOString().slice(0, 10);
+    const later = new Date(Date.now() + 3 * 864e5).toISOString().slice(0, 10);
+    expect(run(dir, 'scripts/devlog-task.mjs', ['decision', '--title', 'Made this morning in Kuala Lumpur', '--on', tomorrow]).status).toBe(0);
+    expect(run(dir, 'scripts/devlog-task.mjs', ['decision', '--title', 'Not yet made', '--on', later]).status).toBe(1);
     for (const bad of [['decision', '--on', '2026-10-11'], ['decision', '--title', 'x', '--on', '2026-02-30'], ['decision', '--title', 'x', '--on', '2999-01-01'], ['decision', '--title', 'x', '--colour', 'red']]) {
       expect(run(dir, 'scripts/devlog-task.mjs', bad).status, bad.join(' ')).toBe(1);
     }
     expect(run(dir, 'scripts/devlog-flush.mjs', []).status).toBe(0);
     const r = report(dir);
-    expect(r.decisions).toEqual([expect.objectContaining({ title: 'Keep #46 and close #47', on: '2026-10-11', by: 'owner', ref: '#46' })]);
-    expect(r.decisions[0].id).toMatch(/^DEC-\d{8}-[0-9a-f]{4}$/);
-    expect(r.timeline.filter((x: { k: string }) => x.k === 'decision')).toHaveLength(1);
+    const kept = r.decisions.find((x: { title: string }) => x.title === 'Keep #46 and close #47');
+    expect(kept).toMatchObject({ on: '2026-10-11', by: 'owner', ref: '#46' });
+    expect(kept.id).toMatch(/^DEC-\d{8}-[0-9a-f]{4}$/);
+    expect(r.decisions).toHaveLength(2);
+    expect(r.timeline.filter((x: { k: string }) => x.k === 'decision')).toHaveLength(2);
   });
 
   it('keeps only known fields of a decision when flushing, and drops one with no title or a malformed id', () => {
@@ -1147,16 +1154,69 @@ describe('audit and playback', () => {
       cfg.integrity = { acceptedChanges: a };
       writeFileSync(path.join(dir, 'devlog/control-tower.json'), JSON.stringify(cfg));
     };
+    // An id shaped like a decision is not enough: it must be in the register (lesson L-024).
     accept({ 'devlog/activity/a.jsonl': { blob, decision: 'DEC-20261011-0a0a' }, 'devlog/activity/b.jsonl': { blob: null, decision: 'DEC-20261011-0a0b' } });
+    expect(report(dir).health.integrity).toMatchObject({ state: 'red', changed: ['devlog/activity/a.jsonl'], deleted: ['devlog/activity/b.jsonl'] });
+    const decide = (title: string) => /Recorded (DEC-\d{8}-[0-9a-f]{4})\./.exec(run(dir, 'scripts/devlog-task.mjs', ['decision', '--title', title, '--on', '2026-10-11', '--ref', 'audit']).stdout)![1]!;
+    const d1 = decide('Accept the edit to a.jsonl'); const d2 = decide('Accept the removal of b.jsonl');
+    accept({ 'devlog/activity/a.jsonl': { blob, decision: d1 }, 'devlog/activity/b.jsonl': { blob: null, decision: d2 } });
     r = report(dir);
     expect(r.health.integrity).toMatchObject({ state: 'green', changed: [], deleted: [] });
-    expect(r.health.integrity.accepted).toEqual([{ file: 'devlog/activity/a.jsonl', decision: 'DEC-20261011-0a0a', deleted: false }, { file: 'devlog/activity/b.jsonl', decision: 'DEC-20261011-0a0b', deleted: true }]);
+    expect(r.health.integrity.accepted).toEqual([
+      { file: 'devlog/activity/a.jsonl', decision: d1, title: 'Accept the edit to a.jsonl', on: '2026-10-11', ref: 'audit', deleted: false },
+      { file: 'devlog/activity/b.jsonl', decision: d2, title: 'Accept the removal of b.jsonl', on: '2026-10-11', ref: 'audit', deleted: true },
+    ]);
     act('a.jsonl', '{"x":"edited again"}\n'); // a later edit is not covered by the earlier acceptance
     expect(report(dir).health.integrity.changed).toEqual(['devlog/activity/a.jsonl']);
     accept({ 'devlog/activity/a.jsonl': { blob: gitAt(dir, ['hash-object', 'devlog/activity/a.jsonl']).trim() } }); // no decision cited
     expect(report(dir).health.integrity.changed).toEqual(['devlog/activity/a.jsonl']);
     rmSync(path.join(dir, '.git'), { recursive: true, force: true });
     expect(report(dir).health.integrity.state).toBe('unavailable');
+  }, REPO_TIMEOUT);
+
+  it('checks a file first committed while resolving a merge, like any other', () => {
+    const { dir, git } = makeRepo();
+    mkdirSync(path.join(dir, 'devlog/activity'), { recursive: true });
+    writeFileSync(path.join(dir, 'base'), '1'); git('add', '-A'); git('commit', '-q', '-m', 'base');
+    git('checkout', '-q', '-b', 'side'); writeFileSync(path.join(dir, 'side'), '1'); git('add', '-A'); git('commit', '-q', '-m', 'side');
+    git('checkout', '-q', 'main'); writeFileSync(path.join(dir, 'main'), '1'); git('add', '-A'); git('commit', '-q', '-m', 'main');
+    git('merge', '-q', '--no-commit', 'side');
+    writeFileSync(path.join(dir, 'devlog/activity/m.jsonl'), '{"x":1}\n'); // added in the merge itself
+    git('add', '-A'); git('commit', '-q', '-m', 'merge side');
+    expect(report(dir).health.integrity).toMatchObject({ state: 'green', checked: 1, pending: 0 });
+    writeFileSync(path.join(dir, 'devlog/activity/m.jsonl'), '{"x":"edited"}\n');
+    git('add', '-A'); git('commit', '-q', '-m', 'edit');
+    expect(report(dir).health.integrity).toMatchObject({ state: 'red', changed: ['devlog/activity/m.jsonl'] });
+  }, REPO_TIMEOUT);
+
+  it('finds every real key format in a file, and cannot scan without git', () => {
+    const dir = freshDir();
+    gitAt(dir, ['init', '-q', '-b', 'main']);
+    // One planted key per format, each built at run time from fake parts (lesson L-015).
+    const keys = [fake('sk', '_live_', 'A'.repeat(12)), fake('xox', 'b-', '1234567-'), fake('A', 'C', 'a'.repeat(32)), fake('gh', 'p_', 'B'.repeat(32)), fake('AK', 'IA', 'C'.repeat(16))];
+    keys.forEach((k, i) => writeFileSync(path.join(dir, `k${i}.txt`), `x ${k} x\n`));
+    expect(secretHits(dir).map((h: string) => h.split(':')[0]).sort()).toEqual(keys.map((_, i) => `k${i}.txt`));
+    expect(secretHits(freshDir())).toBeNull();
+  });
+
+  it('judges the tests only by a run from the last day, says it may be of any scope, and calls a helper agent of a quiet session unknown, not stalled', () => {
+    const { dir } = makeRepo();
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    const ago = (h: number) => new Date(Date.now() - h * 36e5).toISOString();
+    const write = (lines: object[]) => writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), lines.map((l) => JSON.stringify({ session: 'session_01A', ...l })).join('\n') + '\n');
+    const check = (name: string) => report(dir).health.checks.find((c: { name: string }) => c.name === name);
+    write([{ ts: ago(30), event: 'PostToolUse', tool: 'Bash', target: 'Run tests', kind: 'test' }]);
+    expect(check('Tests')).toMatchObject({ state: 'unavailable' }); // passed, but more than a day ago
+    write([{ ts: ago(1), event: 'PostToolUseFailure', tool: 'Bash', target: 'Run tests', kind: 'test', failure: 'exit 1' }]);
+    expect(check('Tests')).toMatchObject({ state: 'amber' });
+    expect(check('Tests').detail).toContain('of any scope');
+    // A helper agent started 8 hours ago with no end: stalled while its session is active, unknown once it went quiet.
+    const agent = [{ ts: ago(8), event: 'SubagentStart', agentId: 'agent1', agentType: 'review' }];
+    write([...agent, { ts: ago(0.1), event: 'PostToolUse', tool: 'Read', target: 'x' }]);
+    expect(check('Stalled agents').state).toBe('amber');
+    write([...agent, { ts: ago(7), event: 'PostToolUse', tool: 'Read', target: 'x' }]);
+    expect(check('Stalled agents')).toMatchObject({ state: 'green' });
+    expect(check('Stalled agents').detail).toContain('cannot be judged');
   }, REPO_TIMEOUT);
 
   it('never calls health green while a check is unavailable, and leaves checks for what is not built out of it', async () => {
@@ -1215,7 +1275,10 @@ export const QUESTIONS = ['Not an open item', 'Nor this'];
     ].join('\n') + '\n');
     writeFileSync(path.join(dir, 'f'), 'x'); git('add', '-A');
     gitAt(dir, ['commit', '-q', '-m', 'Do the work\n\nClaude-Session: https://claude.ai/code/session_01A'], { GIT_AUTHOR_DATE: '2026-10-10T00:00:07Z', GIT_COMMITTER_DATE: '2026-10-10T00:00:07Z' });
-    writeFileSync(path.join(dir, 'prs.json'), JSON.stringify([{ number: 7, title: 'Phase 1: x', state: 'closed', html_url: 'https://github.com/o/r/pull/7', created_at: '2026-10-10T00:00:00Z', merged_at: '2026-10-10T00:00:08Z', findings: [] }]));
+    writeFileSync(path.join(dir, 'prs.json'), JSON.stringify([
+      { number: 7, title: 'Phase 1: x', state: 'closed', html_url: 'https://github.com/o/r/pull/7', created_at: '2026-10-10T00:00:00Z', merged_at: '2026-10-10T00:00:08Z', findings: [] },
+      { number: 8, title: 'Phase 1: y', state: 'closed', html_url: 'https://github.com/o/r/pull/8', created_at: '2026-10-10T00:00:00Z', merged_at: 'not a date', findings: [] }, // left out, never fatal (L-006)
+    ]));
     const out = path.join(dir, 'r.json');
     expect(run(dir, 'scripts/devlog-report.mjs', ['--prs', path.join(dir, 'prs.json'), '--json', out]).status).toBe(0);
     const r = JSON.parse(readFileSync(out, 'utf8'));

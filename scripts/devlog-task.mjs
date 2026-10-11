@@ -107,7 +107,8 @@ export function eventFor(argv, now = new Date(), env = process.env) {
     // The day the decision was made, which can be earlier than the day it is recorded; never in the future.
     const on = opts.on ?? base.ts.slice(0, 10);
     if (!/^\d{4}-\d\d-\d\d$/.test(on) || Number.isNaN(new Date(`${on}T00:00:00Z`).getTime()) || new Date(`${on}T00:00:00Z`).toISOString().slice(0, 10) !== on) throw new UsageError('--on must be a real date, like 2026-10-11.');
-    if (on > base.ts.slice(0, 10)) throw new UsageError('--on cannot be after today.');
+    // Today anywhere: the owner works in Kuala Lumpur, a day ahead of UTC until 08:00 (lesson L-022).
+    if (on > new Date(now.getTime() + 864e5).toISOString().slice(0, 10)) throw new UsageError('--on cannot be after today.');
     const day = base.ts.slice(0, 10).replace(/-/g, '');
     return strip({
       ...base, event: 'Decision', id: `DEC-${day}-${randomBytes(2).toString('hex')}`,

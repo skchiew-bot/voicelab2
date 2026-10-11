@@ -128,7 +128,7 @@ describe('scoring finished calls in batches', () => {
   it('leaves calls alone until the client has criteria, then scores them all, once', async () => {
     const a = await finished(['yes thanks']); const b = await finished(['hmm', 'uh']);
     expect((await post(`/internal/tenants/${tenantId}/qa/score`, {})).json()).toMatchObject({ scored: 0, skipped: 2 });
-    const set = await must(post(`/internal/tenants/${tenantId}/qa-criteria`, { useCase: '*', criteria: [
+    const set = await must(post(`/internal/tenants/${tenantId}/qa-criteria`, { reason: 'Set up for this test.', useCase: '*', criteria: [
       { id: 'outcome', label: 'Reached a promise to pay', type: 'outcome_in', outcomes: ['paid_promise'], weight: 6 },
       { id: 'intro', label: 'Introduced Voice Lab', type: 'must_say', phrases: ['this is voice lab'], weight: 2 },
       { id: 'empathy', label: 'Showed empathy', type: 'judge', question: 'Did the agent show empathy to the caller?', weight: 2 },
@@ -147,8 +147,8 @@ describe('scoring finished calls in batches', () => {
   });
 
   it('uses the model the task is configured for, steps up a tier when unsure, and records both with their tokens', async () => {
-    await must(put('/internal/model-config/qa_judge', { tier: 'haiku', modelId: 'haiku-model', escalateTo: 'sonnet' }));
-    await must(put('/internal/model-config/speak_dynamic', { tier: 'sonnet', modelId: 'sonnet-model', escalateTo: null }));
+    await must(put('/internal/model-config/qa_judge', { reason: 'Set up for this test.', tier: 'haiku', modelId: 'haiku-model', escalateTo: 'sonnet' }));
+    await must(put('/internal/model-config/speak_dynamic', { reason: 'Set up for this test.', tier: 'sonnet', modelId: 'sonnet-model', escalateTo: null }));
     const run = await finished(['yes thanks']);
     const out = (await post(`/internal/tenants/${tenantId}/qa/score`, {})).json();
     expect(out).toMatchObject({ scored: 1, usedModel: true });
@@ -164,13 +164,13 @@ describe('scoring finished calls in batches', () => {
   });
 
   it('keeps old scores on the criteria they used, takes a changed set from the next batch, and prefers a workflow\'s own set', async () => {
-    await must(post(`/internal/tenants/${tenantId}/qa-criteria`, { useCase: 'qa_flow', criteria: [{ id: 'calm', label: 'No escalation', type: 'no_escalation', weight: 1 }] }));
+    await must(post(`/internal/tenants/${tenantId}/qa-criteria`, { reason: 'Set up for this test.', useCase: 'qa_flow', criteria: [{ id: 'calm', label: 'No escalation', type: 'no_escalation', weight: 1 }] }));
     const run = await finished(['yes thanks']);
     await post(`/internal/tenants/${tenantId}/qa/score`, {});
     const s = (await get(`/internal/qa/scores?runId=${run}`)).json()[0];
     expect(s).toMatchObject({ use_case: 'qa_flow', criteria_version: 1 });
     expect(s.results.results.map((r: { id: string }) => r.id)).toEqual(['calm']);
-    const v2 = await must(post(`/internal/tenants/${tenantId}/qa-criteria`, { useCase: 'qa_flow', criteria: [{ id: 'calm', label: 'No escalation', type: 'no_escalation', weight: 1 }, { id: 'fault', label: 'No drop', type: 'no_fault', weight: 1 }] }));
+    const v2 = await must(post(`/internal/tenants/${tenantId}/qa-criteria`, { reason: 'Set up for this test.', useCase: 'qa_flow', criteria: [{ id: 'calm', label: 'No escalation', type: 'no_escalation', weight: 1 }, { id: 'fault', label: 'No drop', type: 'no_fault', weight: 1 }] }));
     expect(v2.json().version).toBe(2);
     expect((await get(`/internal/tenants/${tenantId}/qa-criteria`)).json().find((x: { use_case: string }) => x.use_case === 'qa_flow').version).toBe(2);
     const old = (await get(`/internal/qa/scores?tenantId=${tenantId}&limit=200`)).json().find((x: { run_id: string }) => x.run_id === run);
@@ -188,17 +188,17 @@ describe('scoring finished calls in batches', () => {
   });
 
   it('refuses criteria that cannot be checked, and a task that escalates downwards', async () => {
-    const bad = (criteria: unknown) => post(`/internal/tenants/${tenantId}/qa-criteria`, { useCase: 'x', criteria });
+    const bad = (criteria: unknown) => post(`/internal/tenants/${tenantId}/qa-criteria`, { reason: 'Set up for this test.', useCase: 'x', criteria });
     expect((await bad([])).statusCode).toBe(400);
     expect((await bad([{ id: 'a', label: 'a', type: 'telepathy', weight: 1 }])).statusCode).toBe(400);
     expect((await bad([{ id: 'a', label: 'a', type: 'no_fault', weight: 11 }])).statusCode).toBe(400);
     expect((await bad([{ id: 'a', label: 'a', type: 'no_fault', weight: 1 }, { id: 'a', label: 'b', type: 'no_escalation', weight: 1 }])).statusCode).toBe(400);
     expect((await bad([{ id: 'a', label: 'a', type: 'must_say', phrases: [], weight: 1 }])).statusCode).toBe(400);
-    expect((await put('/internal/model-config/qa_judge', { tier: 'sonnet', modelId: 'm', escalateTo: 'haiku' })).statusCode).toBe(400);
+    expect((await put('/internal/model-config/qa_judge', { reason: 'Set up for this test.', tier: 'sonnet', modelId: 'm', escalateTo: 'haiku' })).statusCode).toBe(400);
     void withActor;
   });
   it('keeps scoring the rest of a batch when the model fails on one call, and tries the failed one again next time', async () => {
-    await must(post(`/internal/tenants/${tenantId}/qa-criteria`, { useCase: 'qa_flow', criteria: [{ id: 'empathy', label: 'Showed empathy', type: 'judge', question: 'Did the agent show empathy?', weight: 1 }] }));
+    await must(post(`/internal/tenants/${tenantId}/qa-criteria`, { reason: 'Set up for this test.', useCase: 'qa_flow', criteria: [{ id: 'empathy', label: 'Showed empathy', type: 'judge', question: 'Did the agent show empathy?', weight: 1 }] }));
     const one = await finished(['yes thanks']); const two = await finished(['yes thanks']);
     let calls = 0;
     const flaky: Judge = { tier: 'haiku', model: 'h', judge: async () => { if (++calls === 1) throw new Error('model unavailable'); return { passed: true, confidence: 1, reason: 'ok', inputTokens: 1, outputTokens: 1 }; } };
@@ -209,7 +209,7 @@ describe('scoring finished calls in batches', () => {
     expect(await scoreBatch({ pool: env.pool, judges: { haiku: flaky } }, null, { tenantId })).toMatchObject({ scored: 1, failed: 0 });
   });
   it('stores no score at all when nothing could be scored, and scores the call once a model is connected', async () => {
-    await must(post(`/internal/tenants/${tenantId}/qa-criteria`, { useCase: 'qa_flow', criteria: [{ id: 'tone', label: 'Polite tone', type: 'judge', question: 'Was the agent polite?', weight: 1 }] }));
+    await must(post(`/internal/tenants/${tenantId}/qa-criteria`, { reason: 'Set up for this test.', useCase: 'qa_flow', criteria: [{ id: 'tone', label: 'Polite tone', type: 'judge', question: 'Was the agent polite?', weight: 1 }] }));
     const run = await finished(['yes thanks']);
     const { scoreBatch } = await import('../src/store/qa.js');
     const none = await scoreBatch({ pool: env.pool, judges: {} }, null, { tenantId });

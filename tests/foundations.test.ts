@@ -26,6 +26,7 @@ async function makeProvider(name: string) {
 }
 
 const charging = (effectiveFrom: string, rate: string) => ({
+  reason: 'Set up for this test.',
   effectiveFrom,
   billingIncrementSeconds: 6,
   components: [{ component: 'telephony_leg', unit: 'per_minute', rate, currency: 'USD' }],
@@ -35,7 +36,7 @@ describe('exit criterion 1: add a provider through the API without a code change
   it('lists adapters with their parameter declarations for the form', async () => {
     const res = await env.call(env.staffToken, 'GET', '/internal/adapters');
     const adapters = res.json();
-    expect(adapters.map((a: { key: string }) => a.key).sort()).toEqual(['elevenlabs', 'openai', 'telnyx', 'twilio']);
+    expect(adapters.map((a: { key: string }) => a.key).sort()).toEqual(['anthropic', 'elevenlabs', 'openai', 'telnyx', 'twilio']);
     expect(adapters.find((a: { key: string }) => a.key === 'telnyx').params.length).toBeGreaterThan(0);
   });
 
@@ -60,7 +61,7 @@ describe('exit criterion 1: add a provider through the API without a code change
 
   it('lets an operator reclassify a capability', async () => {
     const p = await makeProvider('twilio-cap');
-    const res = await env.call(env.staffToken, 'PUT', `/internal/providers/${p.id}/capabilities/stt`, {
+    const res = await env.call(env.staffToken, 'PUT', `/internal/providers/${p.id}/capabilities/stt`, { reason: 'Set up for this test.', 
       support: 'composable', notes: 'built from recording + voice provider',
     });
     expect(res.statusCode).toBe(200);
@@ -176,7 +177,7 @@ describe('exit criterion 3: a client cannot read internal-ledger data', () => {
 
   it('keeps the funding ledger readable for staff', async () => {
     const res = await env.call(env.staffToken, 'GET', `/internal/providers/${providerId}/funding`);
-    expect(res.json()).toEqual([{ currency: 'USD', balance: '500.000000' }]);
+    expect(res.json()).toEqual([{ currency: 'USD', balance: '500.00000000' }]);   // kept to the cost record's eight places
   });
 
   it('keeps both ledgers append-only', async () => {

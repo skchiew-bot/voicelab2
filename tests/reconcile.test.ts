@@ -49,7 +49,7 @@ beforeAll(async () => {
     adapterKey: 'telnyx', name: 'tx', params: { apiKey: 'k', webhookUrl: 'https://x.example/h' },
   }))).json().id;
   for (const id of [twilioId, telnyxId]) {
-    await must(env.call(st, 'POST', `/internal/providers/${id}/charging/reference`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60 }));
+    await must(env.call(st, 'POST', `/internal/providers/${id}/charging/reference`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60 }));
   }
   await must(env.call(st, 'POST', '/internal/fx', { currency: 'MYR', perUsd: '4.5', effectiveFrom: '2026-01-01T00:00:00Z' }));
   await must(env.call(st, 'POST', '/internal/fx', { currency: 'EUR', perUsd: '0.8', effectiveFrom: '2026-01-01T00:00:00Z' }));
@@ -92,12 +92,12 @@ describe('the blueprint\'s reference rates', () => {
   });
 
   it('do not guess a billing increment', async () => {
-    expect((await env.call(env.staffToken, 'POST', `/internal/providers/${twilioId}/charging/reference`, { effectiveFrom: '2027-01-01T00:00:00Z' })).statusCode).toBe(400);
+    expect((await env.call(env.staffToken, 'POST', `/internal/providers/${twilioId}/charging/reference`, { reason: 'Set up for this test.', effectiveFrom: '2027-01-01T00:00:00Z' })).statusCode).toBe(400);
   });
 
   it('carry ElevenLabs\' overburst doubling', async () => {
     const el = (await must(env.call(env.staffToken, 'POST', '/internal/providers', { adapterKey: 'elevenlabs', name: 'el', params: { apiKey: 'k' } }))).json().id;
-    const v = (await must(env.call(env.staffToken, 'POST', `/internal/providers/${el}/charging/reference`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1 }))).json();
+    const v = (await must(env.call(env.staffToken, 'POST', `/internal/providers/${el}/charging/reference`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1 }))).json();
     expect(v.burst_premium_multiplier).toBe('2.000');
   });
 });
@@ -189,7 +189,7 @@ describe('reconciling against the provider', () => {
 
   it('refuses what it cannot check', async () => {
     const tx = await mkCall({ providerId: telnyxId, seconds: 61 });
-    expect((await recon(tx.id, { source: 'provider_api' })).statusCode).toBe(400); // no automatic check for Telnyx yet
+    expect((await recon(tx.id, { source: 'provider_api' })).json().outcome).toBe('pending'); // Telnyx has sent no cost report for it
     expect((await recon(tx.id, { source: 'manual' })).statusCode).toBe(400);       // no figures given
     expect((await recon(randomUUID(), { source: 'manual', reportedCost: '1' })).statusCode).toBe(404);
     const open = randomUUID();
@@ -341,7 +341,7 @@ describe('numbers that do not fit', () => {
 
 describe('a rate version that would charge a call twice', () => {
   let day = 0; // each version must start later than the one before it
-  const version = (components: object[]) => env.call(env.staffToken, 'POST', `/internal/providers/${telnyxId}/charging`, {
+  const version = (components: object[]) => env.call(env.staffToken, 'POST', `/internal/providers/${telnyxId}/charging`, { reason: 'Set up for this test.', 
     effectiveFrom: new Date(Date.UTC(2040, 0, 1) + 86_400_000 * ++day).toISOString(), billingIncrementSeconds: 1, components,
   });
   const line = (direction: string, billingLine = 'main') => ({ component: 'telephony_leg', unit: 'per_minute', rate: '0.01', currency: 'USD', billingLine, direction });

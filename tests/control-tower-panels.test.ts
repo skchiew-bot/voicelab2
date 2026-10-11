@@ -45,7 +45,7 @@ beforeAll(async () => {
   tenantId = (await must(env.call(st(), 'POST', '/internal/tenants', { name: 'Panel Co' }))).json().id;
   providerId = (await must(env.call(st(), 'POST', '/internal/providers', { adapterKey: 'twilio', name: 'tw-panel',
     params: { accountSid: 'AC1', authToken: 'tok', twimlAppVoiceUrl: 'https://x.example/v' } }))).json().id;
-  const v = (await must(env.call(st(), 'POST', `/internal/providers/${providerId}/charging/reference`, { effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60 }))).json();
+  const v = (await must(env.call(st(), 'POST', `/internal/providers/${providerId}/charging/reference`, { reason: 'Set up for this test.', effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 60 }))).json();
   await must(env.call(st(), 'POST', `/internal/charging/${v.id}/confirm`, { sourceUrl: 'https://example.com/pricing' }));
   await must(env.call(st(), 'POST', '/internal/fx', { currency: 'MYR', perUsd: '4.5', effectiveFrom: '2026-01-01T00:00:00Z' }));
 });
@@ -67,7 +67,7 @@ describe('the change log', () => {
   it('says why, from the record the change made, and scrubs any number from it', async () => {
     const mk = async (email: string) => (await withActor(env.pool, { kind: 'internal' }, (c) => createUser(c, null, { tenantId: null, email, role: 'internal_admin' }))).token;
     const b = await mk('cl-b@daythree.test'); const c = await mk('cl-c@daythree.test'); const d = await mk('cl-d@daythree.test');
-    await must(env.call(st(), 'PUT', `/internal/tenants/${tenantId}/policy/levels`, { levels: ['Owner', 'Compliance'] }));
+    await must(env.call(st(), 'PUT', `/internal/tenants/${tenantId}/policy/levels`, { reason: 'Compliance signs off every policy now.', levels: ['Owner', 'Compliance'] }));
     const p = (await must(env.call(st(), 'POST', `/internal/tenants/${tenantId}/policy/proposals`, { rules: [{ id: 'r', kind: 'must_not_say', phrases: ['we will sue'] }], summary: 'Stop threats on calls.' }))).json();
     await must(env.call(b, 'POST', `/internal/policy-versions/${p.id}/decision`, { decision: 'approved', note: 'Reads right.' }));
     await must(env.call(c, 'POST', `/internal/policy-versions/${p.id}/decision`, { decision: 'approved', note: 'Second look done.' }));
@@ -78,7 +78,7 @@ describe('the change log', () => {
       ['policy.decide', 'cl-c@daythree.test', 'Second look done.'],                  // each approver's own note, not the other's
       ['policy.decide', 'cl-b@daythree.test', 'Reads right.'],
       ['policy.propose', 'staff@daythree.test', 'Stop threats on calls.'],
-      ['policy.levels', 'staff@daythree.test', null],                                  // no reason was given, and none is made up
+      ['policy.levels', 'staff@daythree.test', 'Compliance signs off every policy now.'],   // a settings change says why too
     ]);
     expect(pol[0]!.link).toBe('#/knowledge');
     await env.pool.query(`INSERT INTO audit_log (actor_id, action, entity, entity_id, detail) VALUES (NULL, 'dnc.add', 'dnc', NULL, $1)`, [{ reason: 'asked by +60 12-345 6789 to stop' }]);
@@ -131,8 +131,9 @@ describe('the panels', () => {
        VALUES ($1,$2,$3,'CA_panel','outbound','completed', now() - interval '5 minutes', now() - interval '3 minutes', 61, 'recorded')`, [call, tenantId, providerId]);
     await must(env.call(st(), 'POST', `/internal/calls/${call}/cost`, { tenantId, direction: 'outbound', occurredAt: new Date(Date.now() - 300_000).toISOString(), usage: [{ providerId, usage: { seconds: 61 } }] }));
     await must(env.call(st(), 'POST', `/internal/calls/${call}/reconcile`, { source: 'manual', reportedCost: '0.028' }));
-    // 61 seconds billed as two minutes at 0.014 = 0.028; 0.028 over 7 days is 0.004 a day; 10 ÷ 0.004 = 2500 days.
-    expect((await panels()).funding.providers[0]).toMatchObject({ spent7d: '0.02800000', perDay: '0.00400000', runwayDays: '2500.0', runway: 'measured' });
+    // 61 seconds billed as two minutes at 0.014 = 0.028, drawn from the balance once (the reconciled record draws nothing more):
+    // 10 - 0.028 = 9.972 left. 0.028 over 7 days is 0.004 a day; 9.972 ÷ 0.004 = 2493 days.
+    expect((await panels()).funding.providers[0]).toMatchObject({ balance: '9.97200000', spent7d: '0.02800000', perDay: '0.00400000', runwayDays: '2493.0', runway: 'measured' });
     // A balance kept in MYR cannot be set against spend in USD: unknown, and it says why, never "no spend".
     await must(env.call(st(), 'POST', `/internal/providers/${providerId}/funding`, { kind: 'topup', amount: '50', currency: 'MYR' }));
     expect((await panels()).funding.providers.find((f: { currency: string }) => f.currency === 'MYR')).toMatchObject({
@@ -205,7 +206,7 @@ describe('the panels', () => {
     try {
       const p = await panels();
       expect(p.unavailable).toEqual(['deliverability']); expect(p.deliverability).toBeNull();
-      expect(p.funding.providers.find((f: { provider: string; currency: string }) => f.provider === 'tw-panel' && f.currency === 'USD')).toMatchObject({ runwayDays: '2500.0' }); expect(p.stitching.recordedPercent).toBe('40.00');      // 300 recorded of 750, once the 25 child workflows have spoken
+      expect(p.funding.providers.find((f: { provider: string; currency: string }) => f.provider === 'tw-panel' && f.currency === 'USD')).toMatchObject({ runwayDays: '2493.0' }); expect(p.stitching.recordedPercent).toBe('40.00');      // 300 recorded of 750, once the 25 child workflows have spoken
     } finally { await env.pool.query('ALTER TABLE outbound_outcomes_away RENAME TO outbound_outcomes'); }
   });
 });

@@ -40,7 +40,7 @@ export type ValidationResult =
 
 export interface Adapter {
   key: string;
-  kind: 'telephony' | 'voice';
+  kind: 'telephony' | 'voice' | 'model';
   displayName: string;
   docsUrl: string;
   params: ParamDef[];

@@ -32,7 +32,7 @@ beforeAll(async () => {
     adapterKey: 'telnyx', name: 'tx', params: { apiKey: 'KEY', webhookUrl: `${BASE}/h`, connectionId: 'conn-1', webhookPublicKey: pubB64 },
   }))).json().id;
   for (const [id, rate] of [[twilioId, '0.0140'], [telnyxId, '0.0070']] as const) {
-    await must(env.call(st, 'POST', `/internal/providers/${id}/charging`, {
+    await must(env.call(st, 'POST', `/internal/providers/${id}/charging`, { reason: 'Set up for this test.', 
       effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 6,
       components: [{ component: 'telephony_leg', unit: 'per_minute', rate, currency: 'USD' }],
     }));
@@ -338,7 +338,7 @@ describe('robustness', () => {
     expect((await callRow(call.id)).cost_error).toContain('no charging version');
     expect(await events(call.id)).toContain('call.cost_failed');
 
-    await must(env.call(st, 'POST', `/internal/providers/${bare}/charging`, {
+    await must(env.call(st, 'POST', `/internal/providers/${bare}/charging`, { reason: 'Set up for this test.', 
       effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1,
       components: [{ component: 'telephony_leg', unit: 'per_minute', rate: '0.01', currency: 'USD' }],
     }));

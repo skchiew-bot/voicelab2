@@ -31,7 +31,8 @@ export function registerLearningRoutes(app: FastifyInstance, ctx: Ctx): void {
   app.get('/internal/tenants/:tenantId/learning/promotions', async (req) => {
     const { tenantId } = tenant.parse(req.params);
     const q = z.object({ status: z.enum(['in_review', 'approved', 'promoted', 'demoted', 'rejected']).optional() }).parse(req.query);
-    return run(req, (c) => listPromotions(c, tenantId, q.status as PromotionStatus | undefined));
+    // `mine`: drawn up by the person asking, who may turn it down but not approve it. `reviewed`: the councils have been asked.
+    return run(req, async (c, u) => (await listPromotions(c, tenantId, q.status as PromotionStatus | undefined)).map((p) => ({ ...p, mine: p.created_by !== null && p.created_by === u })));
   });
   // Draw up scripts for every cluster past the threshold; optionally put them straight to the councils.
   app.post('/internal/tenants/:tenantId/learning/scan', async (req) => {

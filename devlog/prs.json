@@ -1128,19 +1128,19 @@
    },
    {
     "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
     "fixed": true
-   },
-   {
-    "severity": "Unrated",
-    "fixed": false
-   },
-   {
-    "severity": "Unrated",
-    "fixed": false
-   },
-   {
-    "severity": "Unrated",
-    "fixed": false
    }
   ],
   "head": "claude/phase-CT-email-alerts",
@@ -1155,7 +1155,7 @@
   "merged_at": "2026-10-10T20:13:11Z",
   "findings": [
    {
-    "severity": "Unrated",
+    "severity": "High",
     "fixed": true
    },
    {
@@ -1192,11 +1192,31 @@
    },
    {
     "severity": "Unrated",
-    "fixed": true
+    "fixed": false
    },
    {
     "severity": "Unrated",
-    "fixed": true
+    "fixed": false
+   },
+   {
+    "severity": "Medium",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
    }
   ],
   "head": "claude/phase-1-voice-relay",
@@ -1318,23 +1338,23 @@
     "fixed": true
    },
    {
-    "severity": "Medium",
+    "severity": "Med",
     "fixed": true
    },
    {
-    "severity": "Medium",
+    "severity": "Med",
     "fixed": true
    },
    {
-    "severity": "Medium",
+    "severity": "Med",
     "fixed": true
    },
    {
-    "severity": "Medium",
+    "severity": "Med",
     "fixed": true
    },
    {
-    "severity": "Medium",
+    "severity": "Med",
     "fixed": true
    },
    {
@@ -1358,11 +1378,11 @@
     "fixed": true
    },
    {
-    "severity": "Medium",
+    "severity": "Med",
     "fixed": true
    },
    {
-    "severity": "Medium",
+    "severity": "Med",
     "fixed": true
    },
    {
@@ -1374,12 +1394,20 @@
     "fixed": false
    },
    {
-    "severity": "Tests",
+    "severity": "Low",
     "fixed": true
    },
    {
     "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
     "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
    },
    {
     "severity": "Low",
@@ -1423,7 +1451,7 @@
    },
    {
     "severity": "Unrated",
-    "fixed": true
+    "fixed": false
    },
    {
     "severity": "Unrated",
@@ -1448,10 +1476,10 @@
  {
   "number": 37,
   "title": "Dev Control Tower: log sessions opened outside the repository (user-level fallback hook)",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/37",
   "created_at": "2026-10-10T20:54:37Z",
-  "merged_at": null,
+  "merged_at": "2026-10-11T00:37:07Z",
   "findings": [
    {
     "severity": "Medium",
@@ -1467,7 +1495,7 @@
    },
    {
     "severity": "Low",
-    "fixed": true
+    "fixed": false
    },
    {
     "severity": "Low",
@@ -1487,7 +1515,7 @@
    },
    {
     "severity": "Medium",
-    "fixed": true
+    "fixed": false
    },
    {
     "severity": "Medium-low",
@@ -1499,7 +1527,7 @@
    }
   ],
   "head": "claude/keen-bohr-z9h8p7",
-  "head_sha": "48406b5cdb10b93285082cd71ed962c82d554b96"
+  "head_sha": "d42bd0429be878346f864eb4abfe7596c0b3300a"
  },
  {
   "number": 38,
@@ -1507,7 +1535,7 @@
   "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/38",
   "created_at": "2026-10-10T21:52:49Z",
-  "merged_at": "2026-10-11T00:05:30Z",
+  "merged_at": "2026-10-11T00:05:31Z",
   "findings": [
    {
     "severity": "Medium",
@@ -1556,37 +1584,37 @@
  {
   "number": 39,
   "title": "Phase 1: callbacks after a hang-up, agent lines in the client's countries, both transfer legs costed",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/39",
   "created_at": "2026-10-10T21:55:32Z",
   "merged_at": null,
   "findings": [
    {
-    "severity": "Unrated",
+    "severity": "High",
     "fixed": true
    },
    {
-    "severity": "Unrated",
+    "severity": "Medium",
     "fixed": true
    },
    {
-    "severity": "Unrated",
+    "severity": "Medium",
     "fixed": true
    },
    {
-    "severity": "Unrated",
+    "severity": "Medium",
     "fixed": true
    },
    {
-    "severity": "Unrated",
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
     "fixed": true
    },
    {
-    "severity": "Unrated",
-    "fixed": true
-   },
-   {
-    "severity": "Unrated",
+    "severity": "Low",
     "fixed": true
    },
    {
@@ -1606,7 +1634,19 @@
   "merged_at": "2026-10-11T00:04:07Z",
   "findings": [
    {
-    "severity": "Unrated",
+    "severity": "Med",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
     "fixed": true
    },
    {
@@ -1616,18 +1656,6 @@
    {
     "severity": "Unrated",
     "fixed": false
-   },
-   {
-    "severity": "Unrated",
-    "fixed": true
-   },
-   {
-    "severity": "Unrated",
-    "fixed": true
-   },
-   {
-    "severity": "Unrated",
-    "fixed": true
    }
   ],
   "head": "claude/phase-3-workflow-outcomes",
@@ -1636,10 +1664,10 @@
  {
   "number": 41,
   "title": "Phase 1: live transfer follow-ups (callback on hang-up, +60 agent numbers, agent leg costed and counted, console)",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/41",
   "created_at": "2026-10-10T22:15:44Z",
-  "merged_at": null,
+  "merged_at": "2026-10-11T00:55:32Z",
   "findings": [
    {
     "severity": "Unrated",
@@ -1655,7 +1683,11 @@
    },
    {
     "severity": "Unrated",
-    "fixed": false
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
    },
    {
     "severity": "Unrated",
@@ -1664,6 +1696,58 @@
    {
     "severity": "Unrated",
     "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
    },
    {
     "severity": "Unrated",
@@ -1671,7 +1755,7 @@
    }
   ],
   "head": "claude/phase-1-transfer-followups",
-  "head_sha": "cbd45abb6a9f6696bdb7508fafe6b6d63e058134"
+  "head_sha": "451bebac817808e5a78078ad4770a0ce45d6bb16"
  },
  {
   "number": 42,
@@ -1732,5 +1816,732 @@
   ],
   "head": "claude/phase-0-fresh-test-setup",
   "head_sha": "a118b87d9a5d951af22d8ff656135c3e34ac74c4"
+ },
+ {
+  "number": 43,
+  "title": "Control Tower workstream: one board task id per piece of work, and PR data to #42",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/43",
+  "created_at": "2026-10-11T00:13:21Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-CT-devlog-task-ids",
+  "head_sha": "a0a06661022c7023efecb913a28bffa8d32295ef"
+ },
+ {
+  "number": 44,
+  "title": "Phase 4: draw provider funding down as calls are costed",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/44",
+  "created_at": "2026-10-11T00:14:54Z",
+  "merged_at": "2026-10-11T02:24:26Z",
+  "findings": [
+   {
+    "severity": "Med",
+    "fixed": true
+   },
+   {
+    "severity": "Med",
+    "fixed": true
+   },
+   {
+    "severity": "Med",
+    "fixed": false
+   },
+   {
+    "severity": "Low-med",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Suspicion",
+    "fixed": false
+   }
+  ],
+  "head": "claude/phase-4-funding-usage",
+  "head_sha": "863ce79ef3953efa819dab5469185e264b59b876"
+ },
+ {
+  "number": 45,
+  "title": "Phase 0: repair lesson L-001 after a bad merge resolution, and guard against it",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/45",
+  "created_at": "2026-10-11T00:18:36Z",
+  "merged_at": "2026-10-11T00:20:17Z",
+  "findings": [],
+  "head": "claude/phase-0-lessons-repair",
+  "head_sha": "07fe32e6a16d2194a1437b26cf1dae4652fa9e83"
+ },
+ {
+  "number": 46,
+  "title": "Phase 3: record the callback time a person asks for on the call",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/46",
+  "created_at": "2026-10-11T00:33:01Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "Med",
+    "fixed": true
+   },
+   {
+    "severity": "Med",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-3-callback-times",
+  "head_sha": "6f0df5340455284dd8c35ee08670a4e8e6de9def"
+ },
+ {
+  "number": 47,
+  "title": "Phase 3: a workflow captures the callback time a caller asks for",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/47",
+  "created_at": "2026-10-11T00:33:25Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low (tests)",
+    "fixed": true
+   },
+   {
+    "severity": "Info",
+    "fixed": true
+   },
+   {
+    "severity": "Info",
+    "fixed": true
+   },
+   {
+    "severity": "Info",
+    "fixed": false
+   },
+   {
+    "severity": "Info",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-3-callback-time",
+  "head_sha": "933dd7a7981de11c7e707070d55f93656642af82"
+ },
+ {
+  "number": 48,
+  "title": "Phase 1: say a short wait line to a reconnected caller left waiting",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/48",
+  "created_at": "2026-10-11T00:36:38Z",
+  "merged_at": "2026-10-11T01:01:07Z",
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low–medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Nit",
+    "fixed": false
+   },
+   {
+    "severity": "Nit",
+    "fixed": false
+   }
+  ],
+  "head": "claude/phase-1-wait-line",
+  "head_sha": "69df5b6516422290914627e33ec6e36511226ee9"
+ },
+ {
+  "number": 49,
+  "title": "Phase 1: the voice link asks again on a line that carries a call on (fixes a flaky relay test)",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/49",
+  "created_at": "2026-10-11T00:36:39Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-1-relay-reconnect-flake",
+  "head_sha": "24a72d9c58130a30b2397d49d16f39b07f0aa157"
+ },
+ {
+  "number": 50,
+  "title": "Phases 1 and 4: complete call cost records (speech relay, model tokens), with funding drawn down as calls are costed (#44)",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/50",
+  "created_at": "2026-10-11T00:43:55Z",
+  "merged_at": "2026-10-11T02:24:25Z",
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "High",
+    "fixed": false
+   },
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-1-voice-model-costs",
+  "head_sha": "19f614cdfb43c576576dee862e416e5d52e9338b"
+ },
+ {
+  "number": 51,
+  "title": "Phase 6: only real live calls are evidence, and a script's author never approves it",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/51",
+  "created_at": "2026-10-11T00:52:04Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low/Info",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Info",
+    "fixed": false
+   },
+   {
+    "severity": "Info",
+    "fixed": true
+   },
+   {
+    "severity": "Info",
+    "fixed": false
+   }
+  ],
+  "head": "claude/phase-6-evidence-live",
+  "head_sha": "436cefb4a3892736951e95570f6cfc3356bf7594"
+ },
+ {
+  "number": 52,
+  "title": "Phase 4: serve a queued inbound caller the moment a channel frees, and bill only service",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/52",
+  "created_at": "2026-10-11T00:57:33Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Med",
+    "fixed": true
+   },
+   {
+    "severity": "Med",
+    "fixed": true
+   },
+   {
+    "severity": "Low-med",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-4-queue-to-workflow",
+  "head_sha": "add1075281f47d3b03e1ea6e9fa713f2f7d0f182"
+ },
+ {
+  "number": 53,
+  "title": "DCT-6: Keep the branch audit tests clear of the machine's git config and load",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/53",
+  "created_at": "2026-10-11T01:11:39Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   }
+  ],
+  "head": "claude/dct-6-branch-audit-timeout",
+  "head_sha": "4d07b4128743e16c52091c18e46059c232bedb97"
+ },
+ {
+  "number": 54,
+  "title": "Phase 7: a workflow records a promise to pay from the call",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/54",
+  "created_at": "2026-10-11T01:21:02Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   }
+  ],
+  "head": "claude/phase-7-workflow-promises",
+  "head_sha": "b26129a0facd3c37aab6564c260e302caa5186aa"
+ },
+ {
+  "number": 55,
+  "title": "Phase 1: price a live call's voice usage (speech characters, model tokens) in its cost record",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/55",
+  "created_at": "2026-10-11T01:30:03Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low–medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low–medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Cosmetic",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-1-voice-usage-cost",
+  "head_sha": "595ca76d149b03dcef39625cdf6ed14b4743040c"
+ },
+ {
+  "number": 56,
+  "title": "Phase 5: production only through an approved change, except for the owner's named deployers",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/56",
+  "created_at": "2026-10-11T01:55:38Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": false
+   },
+   {
+    "severity": "Medium",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Info",
+    "fixed": false
+   },
+   {
+    "severity": "Info",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-5-production-approval",
+  "head_sha": "0dd2750e1bbc7f1ccb6510e4b871a736e2b51f7a"
+ },
+ {
+  "number": 57,
+  "title": "Control Tower: ask a reason for every settings change made on other screens",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/57",
+  "created_at": "2026-10-11T02:01:38Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "High",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low to medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   }
+  ],
+  "head": "claude/phase-ct-settings-reasons",
+  "head_sha": "7af4297e162be052b8b216b7509b8f9fc9a48b9b"
+ },
+ {
+  "number": 58,
+  "title": "Control Tower: clusters close to the promotion threshold on the learning panel",
+  "state": "open",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/58",
+  "created_at": "2026-10-11T02:28:24Z",
+  "merged_at": null,
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-ct-learning-near",
+  "head_sha": "27ef0d89b1f9cd8ccf430d464052f010b3e68ad9"
  }
 ]

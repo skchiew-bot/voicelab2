@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { unknownTokensOf } from './usage.js';
 import { billedSeconds, lineAmount, quantityFor, type Unit, type Usage } from '../billing.js';
 import { AppError } from '../errors.js';
 import { fromScaled, mulDiv, SCALE, toScaled } from '../money.js';
@@ -210,7 +211,8 @@ export async function getCallCost(c: pg.PoolClient, callId: string) {
   )).rows[0];
   if (!head) throw new AppError(404, 'No cost record for that call.');
   const lines = (await c.query('SELECT * FROM call_cost_lines WHERE call_cost_id = $1 ORDER BY id', [head.id])).rows;
-  return { ...head, lines };
+  // How many of the call's model calls failed or timed out with their tokens unknown: if any, this cost leaves them out.
+  return { ...head, lines, model_tokens_unknown: await unknownTokensOf(c, callId) };
 }
 
 /** Roll costs up per campaign (project), so cost maps onto client billing. */

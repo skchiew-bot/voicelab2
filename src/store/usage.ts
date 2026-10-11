@@ -56,6 +56,17 @@ const ON_THE_CALL = ['speak_dynamic', 'interpret_reply'];
 const AFTER_THE_CALL_MS = 2 * 60_000;
 
 /**
+ * A call's model calls whose tokens are not known: the model failed or timed out, so it may have used tokens nobody
+ * reported. Such a call is costed from the tokens that are known and flagged, so its cost is never taken as complete
+ * (owner's decision, 2026-10-11). The one definition of the flag: the cost view and the Control Tower both read it here.
+ */
+export const UNKNOWN_TOKENS = `(SELECT count(*)::int FROM ai_decisions d WHERE d.call_id = calls.id AND d.task = ANY('{${ON_THE_CALL.join(',')}}'::text[])
+                                 AND (d.input_tokens IS NULL OR d.output_tokens IS NULL))`;
+export async function unknownTokensOf(c: pg.PoolClient, callId: string): Promise<number> {
+  return (await c.query(`SELECT ${UNKNOWN_TOKENS} AS n FROM calls WHERE id = $1`, [callId])).rows[0]?.n ?? 0;
+}
+
+/**
  * The tokens the call's own decisions used (while it was on, or a reply landing just after it ended), by model, each
  * priced by the model provider for that model, whatever its status now: its dated rates decide the price.
  */

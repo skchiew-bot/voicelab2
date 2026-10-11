@@ -113,6 +113,32 @@ describe('a call\'s cost record holds everything the call used', () => {
     expect((await lines(call.id)).filter((l) => l.provider_id === reader).map((l) => [l.line, l.amount]).sort()).toEqual([['llm:input', '0.00100000'], ['llm:output', '0.00100000']]);
   });
 
+  it('costs a call whose model failed or timed out from the tokens that are known, and flags it on its cost and in the Control Tower', async () => {
+    const reader = await modelProvider('test-model-flaky', '1.00', '5.00');
+    const call = await finishedCall(60);
+    const ctAlert = async () => ((await env.call(env.staffToken, 'GET', '/internal/control-tower')).json().alerts as { code: string; message: string }[]).find((x) => x.code === 'cost_tokens_unknown');
+    const before = await ctAlert();
+    await decision(call.id, 'test-model-flaky', 1000, 200, { task: 'interpret_reply' });
+    // a tier up that timed out: how many tokens it used is not known
+    await env.pool.query(
+      `INSERT INTO ai_decisions (tenant_id, task, subject_type, subject_id, decision, reason, model, tier, input_tokens, output_tokens, call_id)
+       VALUES ($1,'interpret_reply','run_step',$2::text,'rejected','The model did not answer in time.','test-model-flaky','sonnet',NULL,NULL,$2::uuid)`, [tenantId, call.id]);
+    expect(await cost(call.id)).toBe('recorded');                                  // costed, not refused (owner's decision, 2026-10-11)
+    const head = (await must(env.call(env.staffToken, 'GET', `/internal/calls/${call.id}/cost`))).json();
+    expect(head.model_tokens_unknown).toBe(1);
+    // priced from the known tokens only, worked out by hand: 1000 input at 1.00 per million, 200 output at 5.00
+    expect((await lines(call.id)).filter((l) => l.provider_id === reader).map((l) => [l.line, l.amount]).sort()).toEqual([['llm:input', '0.00100000'], ['llm:output', '0.00100000']]);
+    const after = await ctAlert();
+    const count = (x?: { message: string }) => Number(x?.message.match(/^(\d+)/)?.[1] ?? 0);
+    expect(count(after)).toBe(count(before) + 1);
+    // a call whose model tokens are all known is not flagged
+    const fine = await finishedCall(60);
+    await decision(fine.id, 'test-model-flaky', 10, 1, { task: 'interpret_reply' });
+    expect(await cost(fine.id)).toBe('recorded');
+    expect((await must(env.call(env.staffToken, 'GET', `/internal/calls/${fine.id}/cost`))).json().model_tokens_unknown).toBe(0);
+    expect(count(await ctAlert())).toBe(count(after));
+  });
+
   it('refuses to cost a call whose model nothing prices, or prices only in part, saying which, and costs them all again on one request', async () => {
     const unpriced = await finishedCall(60);
     await decision(unpriced.id, 'test-model-later', 100, 10);

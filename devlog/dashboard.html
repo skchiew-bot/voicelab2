@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <title>Voice Lab dev Control Tower</title>
 <meta name="description" content="How Claude Code builds Voice Lab: the work, what it costs, what went wrong, and a playback of every recorded step.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -97,6 +98,7 @@ td { padding: 9px 12px; border-top: 1px solid var(--rule); vertical-align: top; 
 tbody tr:first-child td { border-top: 0; }
 td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 td .sub { display: block; }
+.tag { display: inline-block; margin-left: 6px; padding: 0 6px; border: 1px solid var(--rule-2); border-radius: 4px; font-size: 11px; font-weight: 600; color: var(--ink-muted); vertical-align: middle; white-space: nowrap; }
 .empty { padding: 16px; color: var(--ink-muted); }
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 0 16px; border-radius: 6px; border: 1px solid var(--rule-2); background: var(--surface); color: var(--ink); font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; white-space: nowrap; }
 .btn:hover { border-color: var(--ink-2); }
@@ -206,8 +208,19 @@ footer { font-size: 13px; color: var(--ink-muted); }
       <section class="card" aria-labelledby="sv-h"><div class="head"><h2 id="sv-h">Saving from model routing</h2></div><div id="saving"></div><h3>Routing policy and which model led each session</h3><div class="tbox" style="box-shadow: none" id="routing"></div></section>
     </div>
     <section aria-labelledby="rg-h"><div class="head"><h2 id="rg-h">Model performance registry</h2></div><div class="tbox" id="registry"></div></section>
+    <section class="card" aria-labelledby="pr-h"><div class="head"><h2 id="pr-h">By process and model</h2></div><p class="note" id="pc-note"></p><div class="tbox" id="proc-cost"></div></section>
+  </div>
+
+  <div class="view" id="v-routing" hidden>
+    <section class="card" aria-labelledby="rl-h"><div class="head"><h2 id="rl-h">Routing and escalation</h2><span id="rt-state"></span></div><p class="sub" id="rt-legend"></p><div id="rt-off"></div></section>
+    <section aria-labelledby="ld-h"><div class="head"><h2 id="ld-h">Ladder by process</h2><span class="note" id="rt-since"></span></div><div class="tbox" id="ladder"></div></section>
+    <section aria-labelledby="el-h"><div class="head"><h2 id="el-h">Escalation log</h2><span class="note">The last 50 climbs up a tier</span></div><div class="tbox" id="esc-log"></div></section>
     <div class="g2">
-      <section class="card" aria-labelledby="pr-h"><div class="head"><h2 id="pr-h">By process and model</h2></div><p>Unavailable (not recorded). The activity log records sessions, not processes such as building, reviewing or fixing; nothing is backfilled or guessed. Recording starts once each helper agent is started with its process and item.</p></section>
+      <section class="card" aria-labelledby="dv-h"><div class="head"><h2 id="dv-h">Declared versus recorded</h2></div><div id="consistency"></div></section>
+      <section class="card" aria-labelledby="sh-h"><div class="head"><h2 id="sh-h">Review shadow audit</h2><span id="sh-pill"></span></div><div id="shadow"></div></section>
+    </div>
+    <div class="g2">
+      <section class="card" aria-labelledby="da-h"><div class="head"><h2 id="da-h">Distillation audit</h2><span class="pill t-neutral">Not built</span></div><p>Voice Lab has no distilled briefs or playbook, and prompts are never recorded.</p></section>
       <section class="card" aria-labelledby="ta-h"><div class="head"><h2 id="ta-h">Tier audit</h2><span class="pill t-warn">Not started</span></div><p>Whether building can move from Sonnet to Haiku while quality holds: every fourth eligible build on the cheaper tier, compared over at least 20 items. It needs your criteria first, and routing changes only on your decision.</p></section>
     </div>
   </div>
@@ -235,10 +248,20 @@ footer { font-size: 13px; color: var(--ink-muted); }
   <div class="view" id="v-runner" hidden>
     <section class="card" aria-labelledby="rn-h">
       <div class="head"><h2 id="rn-h">Runner and pacing</h2><span class="pill t-neutral">Not built</span></div>
-      <p>The D3ngineering blueprint adds a scheduled runner that wakes every 15 minutes, takes the next ready item within budget gates (5-hour window, 40% of the weekly limit a day, an even weekly pace, an 80% weekly ceiling), and a mode switch (normal, accelerate, auto, paused), Run next and Assign an agent on this page. None of it is built here yet: it waits on three decisions.</p>
+      <p>The D3ngineering blueprint adds a scheduled runner that wakes every 15 minutes, takes the next ready item within budget gates (5-hour window, 40% of the weekly limit a day, an even weekly pace, an 80% weekly ceiling; ADR-0014 proposes slowing down in bands, Full, Normal, Low, Crawl and Stopped, instead of stopping), and a mode switch (normal, accelerate, auto, paused), Run next and Assign an agent on this page. None of it is built here yet: it waits on three decisions.</p>
       <div class="decide"><h3>Should the runner merge its own PRs?</h3><p class="sub">The blueprint merges a reviewed commit when CI is green and the tip has not moved. Voice Lab's rule today is that the owner merges every PR.</p></div>
       <div class="decide"><h3>Where should it run?</h3><p class="sub">The blueprint's runner is a Claude app task on a PC. Here it would be a Routine starting a cloud session. Whether a cloud session can read the usage windows the gates depend on is unverified; a probe run comes first.</p></div>
       <div class="decide"><h3>Its ceiling mode and permissions</h3><p class="sub">The highest mode allowed from the repository, and a signed list of what an unattended run may do.</p></div>
+    </section>
+    <section class="card" aria-labelledby="tb-h">
+      <div class="head"><h2 id="tb-h">Throttle bands (proposed)</h2><span class="pill t-neutral">Not in use</span></div>
+      <p class="sub" id="tb-note"></p>
+      <div class="tbox" id="bands"></div>
+      <p class="sub">No runner reads usage; interactive sessions are not bound.</p>
+    </section>
+    <section class="card" aria-labelledby="ut-h">
+      <div class="head"><h2 id="ut-h">Utilisation</h2><span class="pill t-neutral">Not in use</span></div>
+      <p class="sub" id="ut-reason"></p>
     </section>
   </div>
 
@@ -299,7 +322,7 @@ const table = (heads, rows, empty = 'Nothing recorded yet.') => (rows.length
   : h('p', { class: 'empty' }, empty));
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch { /* not kept */ } } };
 
-const VIEWS = [['overview', 'Overview'], ['playback', 'Playback'], ['board', 'Board'], ['cost', 'Cost'], ['quality', 'Quality and learning'], ['governance', 'Governance and audit'], ['runner', 'Runner and pacing']];
+const VIEWS = [['overview', 'Overview'], ['playback', 'Playback'], ['board', 'Board'], ['cost', 'Cost'], ['routing', 'Routing and escalation'], ['quality', 'Quality and learning'], ['governance', 'Governance and audit'], ['runner', 'Runner and pacing']];
 function route() {
   const want = (location.hash || '#overview').slice(1);
   const id = VIEWS.some(([v]) => v === want) ? want : 'overview';
@@ -395,13 +418,25 @@ function render(r) {
   fill('saving', s ? h('div', { class: 'estimate' },
     h('span', { class: 'sub' }, `Estimated saving versus all ${s.baseline.replace('claude-', '')}`),
     h('span', { class: 'big' }, fmtMoney(s.saving.usd), h('span', { class: 'sub', style: 'font-size: 16px' }, ` (${s.share}% of the ${fmtMoney(s.allBaseline.usd)} it would have cost)`)),
-    h('p', { class: 'sub' }, `Estimate only: every model's tokens priced again at ${s.baseline.replace('claude-', '')} prices, assuming it would use the same tokens. Cost not attributed to a model is left out. Not billed cost.`))
+    h('p', { class: 'sub' }, `Estimate only: every model's tokens priced again at ${s.baseline.replace('claude-', '')} prices, assuming it would use the same tokens. Cost not attributed to a model is left out. Not billed cost.`),
+    s.agents ? h('p', null, `Helper agents only: ${fmtMoney(s.agents.saving.usd)} (${s.agents.share}% of the ${fmtMoney(s.agents.allBaseline.usd)} they would have cost at ${s.agents.baseline.replace('claude-', '')} prices).`) : null)
     : h('p', { class: 'sub' }, 'Unavailable: a model has no price, or no baseline model is set in devlog/control-tower.json.'));
   const led = Object.entries(e.ledBy ?? {}).sort((a, b) => b[1] - a[1]);
-  fill('routing', table(['Work', 'Policy (CLAUDE.md)'], [['Building and fixing', 'Sonnet'], ['Independent reviews and hard judgement', 'Opus'], ['Routine checks and logs', 'Haiku']].map(([w, p]) => h('tr', null, h('td', null, w), h('td', null, p)))),
+  const rt = r.routing; const tierName = (t) => (t ? t[0].toUpperCase() + t.slice(1) : '—');
+  fill('routing', rt.processes.length ? table(['Work', 'Floor', 'Ceiling', 'Laddered'], rt.processes.map((p) => h('tr', null, h('td', null, p.label), h('td', null, tierName(p.floor)), h('td', null, tierName(p.ceiling)), h('td', null, p.laddered ? 'Yes' : 'No'))))
+    : h('p', { class: 'empty' }, `Unavailable: ${rt.error ?? 'the routing policy in devlog/control-tower.json could not be read'}.`),
     h('p', { class: 'sub', style: 'padding: 10px 12px' }, led.length ? `Sessions led by each model: ${led.map(([m, n]) => `${m.replace('claude-', '')} ${n}`).join(', ')}.` : 'No session has been priced yet.'));
+  const UNREC = 'Unavailable (not recorded)';
+  fill('pc-note', rt.since ? `Recorded since ${day(rt.since)}; ${num(rt.agentsBefore)} helper agents before that: ${UNREC.toLowerCase()}` : UNREC);
+  fill('proc-cost', table(['Process', 'Model', { t: 'Helper agents', cls: 'num' }, { t: 'Tokens', cls: 'num' }, { t: 'Median per agent', cls: 'num' }, { t: 'Cost', cls: 'num' }],
+    (r.processCost ?? []).map((x) => h('tr', null, h('td', null, x.process), h('td', null, String(x.model ?? '').replace('claude-', '')),
+      h('td', { class: 'num' }, x.agents === null ? UNREC : num(x.agents)), h('td', { class: 'num' }, x.tokens === null ? UNREC : num(x.tokens)),
+      h('td', { class: 'num' }, x.medianTokens === null ? UNREC : num(x.medianTokens)), h('td', { class: 'num' }, x.cost === null ? UNREC : fmtMoney(x.cost.usd)))), UNREC));
   fill('registry', table(['Model', 'Tier', { t: 'Sessions', cls: 'num' }, { t: 'Output tokens', cls: 'num' }, { t: 'Cache read', cls: 'num' }, { t: 'Cost', cls: 'num' }, { t: 'Per session', cls: 'num' }, { t: 'Tool failures', cls: 'num' }, { t: 'Tests passing', cls: 'num' }],
     r.registry.map((m) => h('tr', null, h('td', null, m.model), h('td', null, m.tier), h('td', { class: 'num' }, num(m.sessions)), h('td', { class: 'num' }, num(m.output)), h('td', { class: 'num' }, num(m.cacheRead)), h('td', { class: 'num' }, fmtMoney(m.cost.usd)), h('td', { class: 'num' }, fmtMoney(m.costPerSession.usd)), h('td', { class: 'num' }, pctText(m.toolFailureRate)), h('td', { class: 'num' }, pctText(m.testPassRate))))));
+
+  // ----------------------------------------------------------------- routing
+  routingView(r);
 
   // ----------------------------------------------------------------- quality
   fill('q-kpis',
@@ -468,6 +503,58 @@ function render(r) {
   fill('commits', table(['When', 'Commit', 'Subject', 'Session'], r.commits.map((c) => h('tr', null, h('td', { class: 'mono' }, when(c.date)), h('td', { class: 'mono' }, c.sha), h('td', null, c.subject), h('td', { class: 'mono' }, c.session ? short(c.session) : '—')))));
 
   fill('foot', `Built from git, devlog/ and the activity spool, with no model call. Repository ${r.repo}. Every figure on this page comes from those records; nothing is typed in.`);
+}
+
+// ------------------------------------------------------------------ routing and runner
+const declared = () => h('span', { class: 'tag' }, 'Declared');
+const dh = (t, cls) => ({ t: [t, declared()], cls });
+function escalationPill(es) {
+  if (es.state === 'collecting') return pill('active', `Collecting ${es.window} of ${es.need}`);
+  if (es.state === 'green') return pill('good', 'Green');
+  if (es.state === 'amber') return pill('warn', 'Amber');
+  if (es.state === 'not_laddered') return pill('none', 'Not laddered');
+  return pill('none', 'Unavailable');
+}
+function routingView(r) {
+  const rt = r.routing; const UNREC = 'Unavailable (not recorded)';
+  const tierName = (t) => (t ? t[0].toUpperCase() + t.slice(1) : '—');
+  fill('rt-state', healthPill(rt.state));
+  fill('rt-legend', 'Recorded by Claude Code: model, tokens, times, test runs. Declared by the session: process, task, trigger, review verdict, for you to confirm.');
+  fill('rt-off', rt.state === 'off' ? h('p', null, 'No helper agent has been tagged yet, so the figures below are unavailable (not recorded). To tag one, start the agent with ', h('span', { class: 'mono' }, '[<process> <task-id>]'), ' at the start of its description, for example ', h('span', { class: 'mono' }, '[build P3-B]'), '. Nothing earlier is backfilled or guessed.')
+    : rt.error ? h('p', null, `Unavailable: ${rt.error}`) : null);
+  fill('rt-since', rt.since ? `Recorded since ${day(rt.since)}` : UNREC);
+  const trig = (p) => (p.topTriggers === null ? UNREC : p.topTriggers.length ? p.topTriggers.map((x) => `${String(x.trigger).replace(/_/g, ' ')} ${x.n}`).join(', ') : 'None');
+  const tiers = (p) => (p.tokensByTier === null ? UNREC : ['high', 'mid', 'low', 'other', 'unknown'].filter((k) => p.tokensByTier[k]).map((k) => `${k} ${num(p.tokensByTier[k])}`).join(', ') || 'No tokens');
+  fill('ladder', table(['Process', 'Floor', 'Ceiling', dh('Items', 'num'), dh('Finished at floor', 'num'), dh('Escalation from floor'), dh('Top triggers'), { t: 'Tokens by tier' }],
+    rt.processes.map((p) => h('tr', null, h('td', null, p.label), h('td', null, tierName(p.floor)), h('td', null, tierName(p.ceiling)),
+      h('td', { class: 'num' }, p.items === null ? UNREC : num(p.items)),
+      h('td', { class: 'num' }, p.finishedAtFloor === null ? UNREC : `${p.finishedAtFloor.n} of ${p.finishedAtFloor.of}`),
+      h('td', null, escalationPill(p.escalation)), h('td', null, trig(p)), h('td', null, tiers(p)))),
+    rt.error ? `Unavailable: ${rt.error}` : 'Unavailable (not recorded)'));
+  const SUPPORT = { recorded: ['good', 'Recorded'], declared: ['warn', 'Declared only'], none: ['none', 'No record'] };
+  fill('esc-log', table(['When', dh('Task'), dh('Process'), { t: 'Round', cls: 'num' }, 'From', 'To', dh('Trigger'), 'Support'],
+    rt.log.map((x) => h('tr', null, h('td', { class: 'mono' }, when(x.ts)), h('td', { class: 'mono' }, x.task), h('td', null, x.process), h('td', { class: 'num' }, String(x.round)),
+      h('td', null, `${String(x.fromModel ?? '').replace('claude-', '')} (${x.fromTier})`), h('td', null, `${String(x.toModel ?? '').replace('claude-', '')} (${x.toTier})`),
+      h('td', null, x.trigger ? String(x.trigger).replace(/_/g, ' ') : 'Not declared'), h('td', null, pill(...(SUPPORT[x.support] ?? SUPPORT.none))))),
+    'No climb recorded yet.'));
+  const c = rt.consistency;
+  fill('consistency', c ? [
+    h('p', { class: 'sub' }, 'What the session declared, set against what Claude Code recorded.'),
+    ...[['Agents tagged', c.tagged], ['Agents without a tag', c.untagged], ['Climbs with no trigger declared', c.climbsWithoutTrigger], ['Triggers declared with no climb', c.triggersWithoutClimb], ['Triggers the record does not support', c.unsupported], ['Tags naming a task not on the board', c.unknownTasks], ['Agents with no Claude Code metadata', c.noMetadata]]
+      .map(([k, v]) => h('div', { class: 'check' }, h('span', null, k), h('span', { class: 'mono' }, rt.state === 'off' ? '—' : num(v)))),
+  ] : h('p', { class: 'sub' }, 'Unavailable: the routing configuration could not be read.'));
+  const sh = rt.shadow;
+  fill('sh-pill', sh.enabled ? pill('active', 'On') : pill('warn', 'Not started'));
+  fill('shadow', sh.error ? h('p', null, `Unavailable: ${sh.error}`) : sh.enabled ? [
+    h('p', { class: 'sub' }, `One review in ${sh.every} is repeated on a cheaper tier and compared.`),
+    ...[['Pairs compared', sh.sample], ['Agree', sh.agree], ['Misses (stronger failed, cheaper passed)', sh.misses], ['False alarms (stronger passed, cheaper failed)', sh.falseAlarms], ['Due', sh.due], ['Done', sh.done], ['Tokens', sh.tokens]]
+      .map(([k, v]) => h('div', { class: 'check' }, h('span', null, k), h('span', { class: 'mono' }, num(v)))),
+  ] : h('p', null, 'Not started: needs your decision. Repeating reviews on a cheaper tier costs tokens, so it stays off until you turn it on.'));
+
+  const th = r.throttle; const ut = r.utilisation;
+  fill('tb-note', th.error ? `Unavailable: ${th.error}` : 'The bands ADR-0014 proposes, as configured. There is no reading to place against them.');
+  fill('bands', th.bands ? table(['Band', 'When'], th.bands.map((b) => h('tr', null, h('td', null, b.band), h('td', null, b.when)))) : h('p', { class: 'empty' }, `Unavailable: ${th.error ?? 'the bands could not be read'}`));
+  fill('ut-reason', ut.reason);
 }
 
 // ------------------------------------------------------------------ playback

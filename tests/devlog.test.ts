@@ -1388,7 +1388,7 @@ describe('branch and fork audit', () => {
       expect(branches[i]).toContain('[redacted]');
       expect(branches[i]).not.toContain(s.replace(/^fix-/, ''));
     }
-  });
+  }, REPO_TIMEOUT);
 });
 
 // ---------------------------------------------------------------------------------------------

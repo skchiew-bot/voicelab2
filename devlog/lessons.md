@@ -30,6 +30,10 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/portal.test.ts` › "holds when staff disable a client admin while that admin disables another: the client is not left with no admin by the race"
   - `tests/transfer.test.ts` › "is either placed or cancelled, never both, when the dispatcher and the call that reached them land at the same moment"
   - `tests/transfer.test.ts` › "checks again just before the dial: reached while their number was being looked up, the callback is cancelled, not dialled"
+  - `tests/control-actions.test.ts` › "drains a provider once when two operators drain it at the same moment: one is refused and one audit row is written"
+  - `tests/control-actions.test.ts` › "never leaves a client with no usable voice provider when its last two are drained at the same moment"
+  - `tests/control-actions.test.ts` › "waits for a dial already deciding on the provider: the drain cannot commit between that dial reading the provider as usable and placing its call"
+  - `tests/control-actions.test.ts` › "decides each dial on one side of a drain: those queued before it go to the provider, those queued after it do not"
 
 ### L-002: Never repeat an action whose outcome is unknown
 - **Seen:** 2 times. The dial retry re-dialled after a timeout, risking two calls to one person ([#10](https://github.com/skchiew-bot/voicelab2/pull/10)). A live call that fell back while a reply was being applied ended the run with no sign that the reply was cut off, so whether it had reached a client's system could not be told from the record (live call voice link hardening review, 2026-10-10).

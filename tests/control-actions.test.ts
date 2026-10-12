@@ -216,3 +216,258 @@ describe('who may act', () => {
     void withActor; void createUser;
   });
 });
+
+// ------------------------------------------------------------------------------------------------------------------
+// A drain and the dial decision, together. Providers of their own for each test, so one test's ceilings, load and drain
+// never reach another's: A is Twilio and dearer, B is Telnyx and cheaper, so the pool prefers B until it is drained.
+// ------------------------------------------------------------------------------------------------------------------
+let made = 0;
+async function telephony(adapter: 'twilio' | 'telnyx', ceiling: number, rate: string) {
+  const n = ++made;
+  const params = adapter === 'twilio'
+    ? { accountSid: `ACrace${n}`, authToken: 'tok', twimlAppVoiceUrl: `${BASE}/v` }
+    : { apiKey: 'KEY', webhookUrl: `${BASE}/h`, connectionId: `race${n}`, webhookPublicKey: 'AAAA' };
+  const id = (await must(post('/internal/providers', { adapterKey: adapter, name: `${adapter}-race-${n}`, params }))).json().id as string;
+  await must(post(`/internal/providers/${id}/charging`, { reason: 'Set up for this test.',
+    effectiveFrom: '2026-01-01T00:00:00Z', billingIncrementSeconds: 1, concurrencyLimit: ceiling,
+    components: [{ component: 'telephony_leg', unit: 'per_minute', rate, currency: 'USD' }],
+  }));
+  return { id, sid: `ACrace${n}` };
+}
+let numbered = 0;
+const e164 = () => `+60300009${String(++numbered).padStart(3, '0')}`;
+/** A client with a caller ID at each of two providers; `ceilings` are A's and B's concurrency ceilings. */
+async function pair(ceilings: [number, number], premium?: string) {
+  const a = await telephony('twilio', ceilings[0], '0.0120'); const b = await telephony('telnyx', ceilings[1], '0.0060');
+  const numA = e164(); const numB = e164();
+  const t = await freshTenant(`Race Co ${made}`, [[a.id, numA], [b.id, numB]]);
+  await must(env.call(st(), 'PUT', `/internal/tenants/${t}/entitlement`, { reason: 'Set up for this test.', inboundChannels: 5, ...(premium ? { overburstMultiplier: premium } : {}) }));
+  return { a, b, t, numA, numB };
+}
+/** n calls under way at a provider, as if other dials had filled it. */
+const occupy = (providerId: string, tenant: string, n: number) => env.pool.query(
+  `INSERT INTO calls (id, tenant_id, provider_id, direction, status) SELECT gen_random_uuid(), $1, $2, 'outbound', 'dialing' FROM generate_series(1, $3)`, [tenant, providerId, n]);
+const callRow = async (callId: string) => (await env.pool.query('SELECT provider_id, burst, credit_multiplier, status, end_reason FROM calls WHERE id = $1', [callId])).rows[0] as
+  { provider_id: string; burst: boolean; credit_multiplier: string | null; status: string; end_reason: string | null };
+const eventTypes = async (tenant: string) => (await env.pool.query('SELECT type FROM call_events WHERE tenant_id = $1 ORDER BY id', [tenant])).rows.map((r) => r.type as string);
+const lastDeferral = async (tenant: string) => (await env.pool.query(`SELECT detail->>'reason' AS reason FROM failover_events WHERE tenant_id = $1 AND trigger = 'capacity' ORDER BY id DESC LIMIT 1`, [tenant])).rows[0]?.reason as string | undefined;
+const callCount = async (tenant: string) => (await env.pool.query('SELECT count(*)::int AS n FROM calls WHERE tenant_id = $1', [tenant])).rows[0].n as number;
+const load = async (providerId: string) => (await must(env.call(st(), 'GET', '/internal/capacity'))).json().find((c: { providerId: string }) => c.providerId === providerId) as { active: number; ceiling: number };
+const drain = (providerId: string, why = 'Resting it for this test.') => must(act({ action: 'drain', providerId, reason: why }));
+const restore = (providerId: string) => must(act({ action: 'restore', providerId, reason: 'Done resting it.' }));
+
+describe('the premium for going over a ceiling, with a provider drained', () => {
+  it('takes the call over the ceiling of the provider that is up, at the premium the client agreed to, and never sends it to a drained provider that has room', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t } = await pair([1, 2], '1.5');
+    await occupy(a.id, t, 1);                                                        // A is at its ceiling of 1; B has both channels free
+    expect([await load(a.id), await load(b.id)]).toMatchObject([{ active: 1, ceiling: 1 }, { active: 0, ceiling: 2 }]);
+    await drain(b.id); env.provider.calls.length = 0;
+    const ids: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const r = await dial(t); expect(r.statusCode).toBe(201);
+      ids.push(r.json().callId);
+    }
+    for (const id of ids) expect(await callRow(id)).toMatchObject({ provider_id: a.id, burst: true, credit_multiplier: '1.500', status: 'dialing' });
+    for (const id of ids) {
+      const ev = (await must(env.call(st(), 'GET', `/internal/calls/${id}/events`))).json().filter((e: { type: string }) => e.type === 'call.burst');
+      expect(ev).toHaveLength(1); expect(ev[0].payload).toEqual({ providerId: a.id, creditMultiplier: '1.500' });
+    }
+    expect(dials()).toHaveLength(2);
+    expect(dials().every((c) => c.url.includes(`/Accounts/${a.sid}/Calls.json`))).toBe(true);   // both to A; Telnyx was not contacted
+    expect((await load(b.id)).active).toBe(0);                                         // B took nothing
+    await clearActive();
+  });
+
+  it('holds the dial back, rather than failing it or sending it to the drained provider, for a client that did not agree to a premium', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t } = await pair([1, 2]);                                           // an entitlement, but no overburst multiplier
+    await occupy(a.id, t, 1); await drain(b.id);
+    const before = await callCount(t); env.provider.calls.length = 0;
+    const r = await dial(t);
+    expect(r.statusCode).toBe(429); expect(r.json()).toMatchObject({ deferred: true, status: 'deferred' });
+    expect(dials()).toHaveLength(0);                                                  // nobody was contacted
+    expect(await callCount(t)).toBe(before);                                          // and no call row, so nothing failed
+    expect(await lastDeferral(t)).toBe('at_capacity');                                // A is full: that is the reason, not the drain
+    const types = await eventTypes(t);
+    expect(types).toContain('dial.deferred'); expect(types).not.toContain('call.failed'); expect(types).not.toContain('call.burst');
+    // The same client, once it agrees to the premium, goes over A's ceiling and still not to B.
+    await must(env.call(st(), 'PUT', `/internal/tenants/${t}/entitlement`, { reason: 'Premium agreed after all.', inboundChannels: 5, overburstMultiplier: '2' }));
+    const paid = await dial(t); expect(paid.statusCode).toBe(201);
+    expect(await callRow(paid.json().callId)).toMatchObject({ provider_id: a.id, burst: true, credit_multiplier: '2.000' });
+    expect(dials().every((c) => c.url.includes(`/Accounts/${a.sid}/Calls.json`))).toBe(true);
+    await clearActive();
+  });
+
+  it('defers a dial that names the caller ID of a provider that is both drained and full, for a client that agreed to a premium, instead of placing it as burst there', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t, numA, numB } = await pair([1, 2], '1.5');
+    await occupy(a.id, t, 1); await occupy(b.id, t, 2);                                // both at their ceilings
+    await drain(b.id);
+    const before = await callCount(t); env.provider.calls.length = 0;
+    const named = await dial(t, { from: numB });
+    expect(named.statusCode).toBe(429); expect(named.json()).toMatchObject({ deferred: true });
+    expect(dials()).toHaveLength(0); expect(await callCount(t)).toBe(before);
+    expect(await lastDeferral(t)).toBe('drained');                                     // resting, not full
+    expect(await eventTypes(t)).not.toContain('call.burst');
+    expect((await load(b.id)).active).toBe(2);
+    // Naming the caller ID of the provider that is up still goes over its ceiling at the premium.
+    const up = await dial(t, { from: numA }); expect(up.statusCode).toBe(201);
+    expect(await callRow(up.json().callId)).toMatchObject({ provider_id: a.id, burst: true, credit_multiplier: '1.500' });
+    await clearActive();
+  });
+
+  it('sends the next dial to the provider once it is restored, with no premium', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t } = await pair([1, 2], '1.5');
+    await occupy(a.id, t, 1); await drain(b.id);
+    const over = await dial(t); expect(await callRow(over.json().callId)).toMatchObject({ provider_id: a.id, burst: true });
+    await restore(b.id); env.provider.calls.length = 0;
+    const back = await must(dial(t));
+    expect(await callRow(back.json().callId)).toMatchObject({ provider_id: b.id, burst: false, credit_multiplier: null, status: 'dialing' });
+    expect((await eventTypes(t)).filter((x) => x === 'call.burst')).toHaveLength(1);   // only the first call was over a ceiling
+    expect(dials()).toHaveLength(1); expect(dials()[0]!.url.endsWith('/v2/calls')).toBe(true);
+    await clearActive();
+  });
+
+  it('does not move a call over the ceiling to a drained provider when the provider refuses it; one restored meanwhile takes it, without the premium', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t } = await pair([1, 2], '1.5');
+    await occupy(a.id, t, 1); await drain(b.id);
+    const before = env.provider.state.respond;
+    const refuse = () => new Response('{"message":"number not allowed"}', { status: 403 });
+    env.provider.state.respond = (url, init) => (url.includes('/Calls.json') ? refuse() : before(url, init));
+    env.provider.calls.length = 0;
+    try {
+      const refused = await dial(t);
+      expect(refused.statusCode).toBe(502);
+      expect(dials().map((c) => c.url.includes('/Calls.json'))).toEqual([true]);       // A only; the drained B has room and was still not tried
+      const failed = (await env.pool.query(`SELECT provider_id, status, end_reason FROM calls WHERE tenant_id = $1 AND status = 'failed'`, [t])).rows;
+      expect(failed).toEqual([{ provider_id: a.id, status: 'failed', end_reason: 'provider_error' }]);
+      // B is restored while A is still answering the next dial: the retry finds B up, with room, so the premium decided for A is dropped.
+      env.provider.state.respond = async (url, init) => { if (url.includes('/Calls.json')) { await restore(b.id); return refuse(); } return before(url, init); };
+      env.provider.calls.length = 0;
+      const moved = await dial(t); expect(moved.statusCode).toBe(201);
+      expect(dials().map((c) => c.url.includes('/Calls.json'))).toEqual([true, false]);
+      expect(await callRow(moved.json().callId)).toMatchObject({ provider_id: b.id, burst: false, credit_multiplier: null, status: 'dialing' });
+    } finally { env.provider.state.respond = before; }
+    await clearActive();
+  });
+});
+
+// ------------------------------------------------------------------------------------------------------------------
+// Racing requests. Each test forces the interleaving it is about from a side connection, so it does not rely on timing:
+// the requests are held at a known point, the test waits until the database shows them there, then lets them go.
+// ------------------------------------------------------------------------------------------------------------------
+/** Sessions of this database waiting for a heavyweight lock: a row being written, or an advisory lock. */
+const waiting = async () => (await env.pool.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`)).rows[0].n as number;
+async function until(what: string, ok: () => boolean | Promise<boolean>, ms = 10_000) {
+  const end = Date.now() + ms;
+  while (!(await ok())) {
+    if (Date.now() > end) throw new Error(`gave up waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+/** A request in flight, and whether it has finished. */
+function track<T>(p: Promise<T>) { const t = { settled: false, p: p.then((r) => { t.settled = true; return r; }) }; return t; }
+/** Holds something in a transaction of its own until released (always release it, in a finally, or the requests wait for ever). */
+async function hold(sql: string, params: unknown[] = []) {
+  const side = await env.pool.connect(); let open = true;
+  try { await side.query('BEGIN'); await side.query(sql, params); } catch (err) { await side.query('ROLLBACK').catch(() => {}); side.release(); throw err; }
+  return { release: async () => { if (!open) return; open = false; try { await side.query('ROLLBACK'); } finally { side.release(); } } };
+}
+const auditedDrains = async (providerId: string) => (await env.pool.query(`SELECT count(*)::int AS n FROM audit_log WHERE action = 'control.drain' AND entity_id = $1`, [providerId])).rows[0].n as number;
+type Reply = Awaited<ReturnType<typeof act>>;
+
+describe('a drain racing other requests', () => {
+  it('drains a provider once when two operators drain it at the same moment: one is refused and one audit row is written', async () => {
+    const p = await telephony('telnyx', 50, '0.0060');
+    // An uncommitted row in the provider's controls holds both drains after they have read "not drained" and before either writes.
+    const h = await hold('INSERT INTO provider_controls (provider_id) VALUES ($1)', [p.id]);
+    let results: Reply[];
+    try {
+      const both = [track(act({ action: 'drain', providerId: p.id, reason: 'First operator.' })), track(act({ action: 'drain', providerId: p.id, reason: 'Second operator.' }))];
+      await until('both drains to be waiting', async () => (await waiting()) === 2);
+      await h.release();
+      results = await Promise.all(both.map((x) => x.p));
+    } finally { await h.release(); }
+    expect(results.map((r) => r.statusCode).sort()).toEqual([200, 409]);
+    expect(results.find((r) => r.statusCode === 409)!.json().error).toContain('already drained');
+    expect(await auditedDrains(p.id)).toBe(1);
+    expect((await env.pool.query('SELECT drained_at FROM provider_controls WHERE provider_id = $1', [p.id])).rows[0].drained_at).not.toBeNull();
+  });
+
+  it('never leaves a client with no usable voice provider when its last two are drained at the same moment', async () => {
+    const mk = async (name: string) => (await must(post('/internal/providers', { adapterKey: 'elevenlabs', name, params: { apiKey: 'k' } }))).json().id as string;
+    const v1 = await mk('el-race-1'); const v2 = await mk('el-race-2');
+    const t = (await must(post('/internal/tenants', { name: 'Voice Race Co' }))).json().id as string;
+    await must(env.call(st(), 'PUT', `/internal/tenants/${t}/routes/voice`, { reason: 'Set up for this test.', providerIds: [v1, v2] }));
+    // Each drain finds the other provider usable when it reads, then waits for its write; only the lock makes the second look again.
+    const h = await hold('INSERT INTO provider_controls (provider_id) VALUES ($1), ($2)', [v1, v2]);
+    let results: Reply[];
+    try {
+      const both = [track(act({ action: 'drain', providerId: v1, reason: 'Maintenance on the first.' })), track(act({ action: 'drain', providerId: v2, reason: 'Maintenance on the second.' }))];
+      await until('both drains to be waiting', async () => (await waiting()) === 2);
+      await h.release();
+      results = await Promise.all(both.map((x) => x.p));
+    } finally { await h.release(); }
+    expect(results.map((r) => r.statusCode).sort()).toEqual([200, 409]);
+    expect(results.find((r) => r.statusCode === 409)!.json().error).toContain('only usable voice provider for 1 client');
+    expect((await auditedDrains(v1)) + (await auditedDrains(v2))).toBe(1);
+    const usable = (await env.pool.query(
+      `SELECT count(*)::int AS n FROM provider_routes r WHERE r.tenant_id = $1 AND r.role = 'voice'
+          AND NOT EXISTS (SELECT 1 FROM provider_controls k WHERE k.provider_id = r.provider_id AND k.drained_at IS NOT NULL)`, [t])).rows[0].n;
+    expect(usable).toBe(1);
+  });
+
+  it('waits for a dial already deciding on the provider: the drain cannot commit between that dial reading the provider as usable and placing its call', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t } = await pair([50, 50]);
+    // The dial takes the capacity lock, reads that B is not drained, then waits for the caller-ID lock this holds.
+    const h = await hold('SELECT pg_advisory_xact_lock(hashtext($1))', [`did:${t}:MY`]);
+    let dialResult: Reply; let drainResult: Reply;
+    try {
+      const d = track(dial(t));
+      await until('the dial to be deciding', async () => (await waiting()) === 1);
+      const dr = track(act({ action: 'drain', providerId: b.id, reason: 'Drained while a dial was deciding.' }));
+      await until('the drain to be queued behind the dial, or to have finished', async () => dr.settled || (await waiting()) === 2);
+      expect(dr.settled).toBe(false);                // it must not finish while a dial that read B as usable is about to put a call on it
+      expect(await waiting()).toBe(2);
+      await h.release();
+      [dialResult, drainResult] = await Promise.all([d.p, dr.p]);
+    } finally { await h.release(); }
+    expect(drainResult.statusCode).toBe(200);
+    expect(dialResult.statusCode).toBe(201);
+    expect((await callRow(dialResult.json().callId)).provider_id).toBe(b.id);       // decided before the drain
+    const after = await must(dial(t));
+    expect((await callRow(after.json().callId)).provider_id).toBe(a.id);            // decided after it
+    await clearActive();
+  });
+
+  it('decides each dial on one side of a drain: those queued before it go to the provider, those queued after it do not', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t } = await pair([50, 50]);
+    // The capacity lock is held, so every request queues for it; each is queued in turn, so the order they get it in is known.
+    const h = await hold(`SELECT pg_advisory_xact_lock(hashtext('capacity'))`);
+    const sent: { settled: boolean; p: Promise<Reply> }[] = [];
+    const send = async (what: string, p: Promise<Reply>) => {
+      const x = track(p); sent.push(x);
+      await until(`${what} to be queued for the capacity lock`, async () => (await waiting()) === sent.filter((s) => !s.settled).length);
+    };
+    let results: Reply[];
+    try {
+      await send('dial 1', dial(t)); await send('dial 2', dial(t));
+      await send('the drain', act({ action: 'drain', providerId: b.id, reason: 'Drained between two pairs of dials.' }));
+      await send('dial 3', dial(t)); await send('dial 4', dial(t));
+      await h.release();
+      results = await Promise.all(sent.map((s) => s.p));
+    } finally { await h.release(); }
+    expect(results[2]!.statusCode).toBe(200);                                         // the drain itself
+    const ids = [results[0], results[1], results[3], results[4]].map((r) => { expect(r!.statusCode).toBe(201); return r!.json().callId as string; });
+    // In the order the database decided them (the start is stamped under the lock): the first two on B, the last two not.
+    const decided = (await env.pool.query('SELECT id, provider_id FROM calls WHERE id = ANY($1) ORDER BY started_at, id', [ids])).rows;
+    expect(decided.map((r) => r.id)).toEqual(ids);
+    expect(decided.map((r) => r.provider_id)).toEqual([b.id, b.id, a.id, a.id]);
+    await clearActive();
+  });
+});

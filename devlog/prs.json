@@ -2939,5 +2939,151 @@
   "findings": [],
   "head": "claude/phase-CT-dashboard-refresh-5",
   "head_sha": "631441b9a5c8d2f00b817df206046e05dd40b9fe"
+ },
+ {
+  "number": 73,
+  "title": "Phase CT: dev Control Tower on blueprint v2 (tier ladder audit, routing and escalation, throttle bands)",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/73",
+  "created_at": "2026-10-11T14:19:31Z",
+  "merged_at": "2026-10-11T17:28:26Z",
+  "findings": [
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low–Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": false
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Medium",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low",
+    "fixed": true
+   },
+   {
+    "severity": "Low–Medium",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-CT-dev-tower-v2",
+  "head_sha": "18046dcf14eed1755671896aa1630f6c9efe4d49"
+ },
+ {
+  "number": 74,
+  "title": "Phase CT: record the owner's routing, runner and integrity decisions",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/74",
+  "created_at": "2026-10-11T18:04:12Z",
+  "merged_at": "2026-10-11T19:28:56Z",
+  "findings": [],
+  "head": "claude/phase-CT-owner-decisions",
+  "head_sha": "7862cde44f8175b9b983d9a3bdc2dac247689be9"
+ },
+ {
+  "number": 75,
+  "title": "CI: typecheck and the whole suite on every pull request to main (DCT-13)",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/75",
+  "created_at": "2026-10-11T19:52:51Z",
+  "merged_at": "2026-10-12T19:54:41Z",
+  "findings": [
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   },
+   {
+    "severity": "Unrated",
+    "fixed": false
+   },
+   {
+    "severity": "Unrated",
+    "fixed": true
+   }
+  ],
+  "head": "claude/phase-CT-ci",
+  "head_sha": "2f8f31dfc97fd87cea607c821da9958517babd3d"
+ },
+ {
+  "number": 76,
+  "title": "Throwaway: prove CI goes red on a failing test (do not merge)",
+  "state": "closed",
+  "html_url": "https://github.com/skchiew-bot/voicelab2/pull/76",
+  "created_at": "2026-10-11T19:53:04Z",
+  "merged_at": null,
+  "findings": [],
+  "head": "claude/ci-red-proof",
+  "head_sha": "4a5e92a29eb801fa393be9d2f7340dc42e241d99"
  }
 ]

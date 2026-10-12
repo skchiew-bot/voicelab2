@@ -1,0 +1,2 @@
+{"ts":"2026-10-12T06:19:35.232Z","session":"session_01QFXzWw9CrorEJKm5c1rbEB","event":"PostToolUseFailure","local_session":"ecea54f0-708a-5bfc-8113-c6289054c0df","tool":"Bash","target":"Close the task, flush the log and commit","ok":false,"kind":"test","ms":35897,"failure":"exit 1"}
+{"ts":"2026-10-12T06:20:16.681Z","session":"session_01QFXzWw9CrorEJKm5c1rbEB","event":"PostToolUse","local_session":"ecea54f0-708a-5bfc-8113-c6289054c0df","tool":"Bash","target":"Run the devlog tests and keep the output","ok":true,"kind":"test","ms":36562}

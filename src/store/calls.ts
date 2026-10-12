@@ -91,8 +91,9 @@ const MAX_DIAL_TRIES = 2;
  * client has agreed to pay a premium for overburst. A provider an operator has drained, and that has room, counts as
  * the reason the call cannot go out: the dial waits for it (`drained`), whether or not the client agreed to the premium,
  * and a premium is paid only when the drain is not what is in the way. A drained provider counts only if it holds a caller
- * ID this contact may be shown; one whose every number is locked for them could never take the call, so it is not waited for. If the chosen provider fails to place the call,
- * the next one is tried. The customer's number is passed to the provider and not kept; only a keyed hash of it is.
+ * ID this contact may be shown; one whose every number is locked for them could never take the call, so it is not waited
+ * for. If the chosen provider fails to place the call, the next one is tried. The customer's number is passed to the
+ * provider and not kept; only a keyed hash of it is.
  */
 export async function placeOutboundCall(d: CallDeps, actorId: string | null, input: PlaceInput) {
   if (!d.baseUrl) throw new AppError(503, 'PUBLIC_BASE_URL is not set, so providers cannot reach this server. Set it to place calls.');

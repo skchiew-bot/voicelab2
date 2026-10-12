@@ -316,6 +316,8 @@ export function buildBoard(events = activity(), now = new Date()) {
     if (e.title && e.action === 'start') t.starts = [...(t.starts ?? []), e.title];
     else if (e.title && t.starts?.length) t.starts = [...t.starts.slice(0, -1), e.title];
     if (t.starts) t.starts = t.starts.filter((x, i, all) => all.findIndex((y) => sameWork(x, y)) === i);
+    // When the task last said where it stands (its status, next step, PR or blocker), not a branch link or a progress figure.
+    if (['start', 'done'].includes(e.action) || ['status', 'next', 'pr', 'blocker'].some((k) => e[k] !== undefined)) t.stated = e.ts;
     if (e.action === 'done') { t.finished = e.ts; t.blocker = ''; }
     else if (e.status && !['done', 'abandoned'].includes(e.status)) delete t.finished; // reopened
     if (!t.sessions.includes(e.session)) t.sessions.push(e.session);
@@ -906,12 +908,13 @@ export function build(opts = {}) {
   for (const a of alerts.filter((x) => x.kind === 'stop-loss' && x.ts >= since(2))) attention.push({ level: 'critical', text: `Stop-loss in ${a.session.slice(-8)}: ${a.rule} (${a.key}).` });
   for (const t of board.filter((x) => x.blocker && x.status !== 'done')) attention.push({ level: 'warning', text: `${t.id} is blocked: ${t.blocker}` });
   // An open task whose work merged with nothing said since: its own PR (the one it names, or else the latest from its
-  // branch) merged after the task's last update. Reopening or updating the task clears it; so does a branch name reused
-  // after an earlier merge, or a branch whose latest PR is still open.
+  // branch) merged after the task last said where it stands. Reopening it or giving its status, next step or PR clears
+  // it; a branch link or a progress figure does not. A branch name reused after an earlier merge, or a branch whose
+  // latest PR is still open, is not flagged.
   for (const t of board.filter((x) => !['done', 'abandoned'].includes(x.status))) {
     const own = t.pr ? prs.find((p) => p.number === t.pr)
       : t.branch ? prs.filter((p) => p.head === t.branch).sort((a, b) => b.number - a.number)[0] : undefined;
-    if (own?.merged && at(own.merged) > at(t.updated)) attention.push({ level: 'warning', text: `${t.id} is still marked ${t.status.replace('_', ' ')}, but its work merged as #${own.number} on ${new Date(own.merged).toISOString().slice(0, 10)}: record it as done, or update it with what is left.` });
+    if (own?.merged && at(own.merged) > at(t.stated ?? t.started)) attention.push({ level: 'warning', text: `${t.id} is still marked ${t.status.replace('_', ' ')}, but its work merged as #${own.number} on ${new Date(own.merged).toISOString().slice(0, 10)}: record it as done, or update it with its status or what is left.` });
   }
   // Still shown once done: the record mixes the two pieces of work whatever its status.
   for (const t of board.filter((x) => (x.starts?.length ?? 0) > 1)) attention.push({ level: t.status === 'done' ? 'info' : 'warning', text: `${t.id} was started for ${t.starts.length} different pieces of work (${t.starts.join('; ')}): its record mixes them. Give each its own id.` });

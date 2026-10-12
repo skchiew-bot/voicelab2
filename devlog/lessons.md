@@ -185,13 +185,14 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/devlog.test.ts` › "records a helper agent's id in Claude Code's real shape, so its start and end pair up"
 
 ### L-017: Record logs by allowlist; anything logged may be published
-- **Seen:** 2 times. The dev Control Tower hook scrubbed by blocklist and still let through credentials in URLs, `key=value` secrets, tokens split by digit runs, emails, and other tools' raw error text with a customer's name and email, all bound for git (independent review, 2026-10-10). The first CI record kept a GitHub run id, a run of digits shaped like a phone number, and a short commit id that could be all digits (CI independent review, 2026-10-11).
+- **Seen:** 3 times. The dev Control Tower hook scrubbed by blocklist and still let through credentials in URLs, `key=value` secrets, tokens split by digit runs, emails, and other tools' raw error text with a customer's name and email, all bound for git (independent review, 2026-10-10). The first CI record kept a GitHub run id, a run of digits shaped like a phone number, and a short commit id that could be all digits (CI independent review, 2026-10-11). To keep phase branch names such as `claude/phase-CT-dev-tower-v2`, the flush was first made to keep any branch name with upper case in it, so a branch named like a Twilio account SID or an AWS key id would have been committed in clear; a branch name holding a number written with separators was already kept (DCT-15 re-check, 2026-10-12).
 - **Rule:** Decide what a log may hold and record only that: fixed fields, categories instead of free text, scrubbed paths, nothing from outside the project. Treat every log, report and dashboard as published.
 - **Guards:**
   - `tests/devlog.test.ts` › "records another tool's failure as a category, never its error text"
   - `tests/devlog.test.ts` › "scrubs credentials, emails and phone numbers from what it does record"
   - `tests/devlog.test.ts` › "moves only new lines into new files, rebuilt from known fields with no error text"
   - `tests/devlog.test.ts` › "keeps a CI run only in its fixed form: a known task, a pull request, a full commit id, a result, and no run id, so no run of digits reaches the log"
+  - `tests/devlog.test.ts` › "keeps a phase branch with upper case in its phase id, but never one holding a token or a number written with separators"
 
 ### L-018: Untrusted text placed into code or markup must stay inert
 - **Seen:** A `$'` in a PR title, passed as a `String.replace` replacement, pasted part of the dashboard template into its own data and broke the page (independent review, 2026-10-10).

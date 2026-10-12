@@ -24,9 +24,9 @@ const decimal = (v) => (typeof v === 'string' && /^\d{1,12}\.\d{1,8}$/.test(v) ?
 const nat = (v, max = Number.MAX_SAFE_INTEGER) => (Number.isInteger(v) && v >= 0 && v <= max ? v : undefined);
 const text = (v, max) => (typeof v === 'string' ? scrub(v, max) : undefined);
 const model = (k) => /^[\w.:-]{1,80}$/.test(k);
-// This project's own branch names (claude/phase-CT-ci, upper case included) as they are; any other name is scrubbed,
-// since it could hold a number or a token.
-const branchName = (b) => (/^(main|claude\/[A-Za-z0-9.-]{1,80})$/.test(b) && !/\d{7,}/.test(b) ? b : scrub(b, 100));
+// This project's own branch names as they are: lower case, with upper case only in a phase id (claude/phase-CT-ci).
+// Any other name is scrubbed, since it could hold a token (AC…, AKIA…) or a number, separators and all.
+const branchName = (b) => (/^(main|claude\/(?:phase-[A-Za-z0-9]{1,8}-)?[a-z0-9.-]{1,80})$/.test(b) && !/\d(?:[\s().\/-]*\d){6,}/.test(b) ? b : scrub(b, 100));
 
 function tokensOf(raw) {
   if (!raw || typeof raw !== 'object') return undefined;

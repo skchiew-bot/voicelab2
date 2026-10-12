@@ -215,6 +215,7 @@ describe('activity hook', () => {
       ['[review T-1] check', { process: 'review', task: 'T-1' }],
       ['[security-review DCT-12.a] x', { process: 'security-review', task: 'DCT-12.a' }],
       ['[fix T-1 esc:review_failed]', { process: 'fix', task: 'T-1', trigger: 'review_failed' }],
+      ['[fix T-1 esc:ci_red]', { process: 'fix', task: 'T-1', trigger: 'ci_red' }],
       ['[review T-1 shadow] second opinion', { process: 'review', task: 'T-1', shadow: true }],
       ['[Build T-1]', null], // case-sensitive
       ['[build]', null], // no task
@@ -238,7 +239,7 @@ describe('activity hook', () => {
     expect(mod.parseTag(undefined)).toBeNull();
     expect(mod.parseTag({ toString: () => '[build T-1]' })).toBeNull();
     expect(mod.PROCESSES).toEqual(['plan', 'review', 'security-review', 'build', 'fix', 'check']);
-    expect(mod.TRIGGERS).toEqual(['review_failed', 'suite_failed', 'builder_blocked', 'deny_path_touched']);
+    expect(mod.TRIGGERS).toEqual(['review_failed', 'suite_failed', 'builder_blocked', 'deny_path_touched', 'ci_red']);
 
     // End to end: a malformed tag leaves the agent with no process, and none of the description reaches the spool.
     const { dir } = makeRepo();
@@ -756,6 +757,38 @@ describe('flushing the log for a commit', () => {
       { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'Outcome', task: 'T-1', process: 'build', result: 'failed', agent: id },
       { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'Outcome', task: 'T-1', process: 'review', result: 'failed', agent: id, shadowOf: id, round: 2 },
       { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'Outcome', task: 'T-1', process: 'review', result: 'passed' },
+    ]);
+  });
+
+  it('keeps a CI run only in its fixed form: a known task, a pull request, a full commit id, a result, and no run id, so no run of digits reaches the log', () => {
+    const dir = freshDir();
+    mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
+    const base = { ts: '2026-10-10T00:00:00Z', session: 'session_01X' };
+    const sha = 'abc1234def'.repeat(4);
+    const rows = [
+      { ...base, event: 'CiRun', task: 'T-1', pr: 7, sha, result: 'failed', run: '60123456789', note: 'free text', log: 'https://example.test/x' }, // a phone-shaped run is dropped, the record kept
+      { ...base, event: 'CiRun', task: 'T-1', pr: 7, sha, result: 'passed', run: 'not digits' }, // no run field is ever kept
+      { ...base, event: 'CiRun', task: 'T-1', pr: 7, sha, result: 'passed' },
+      { ...base, event: 'CiRun', task: 'T-1', pr: 7, sha, result: 'maybe' }, // not a result
+      { ...base, event: 'CiRun', task: 'T-1', pr: 0, sha, result: 'passed' }, // not a pull request
+      { ...base, event: 'CiRun', task: 'T-1', pr: '7', sha, result: 'passed' },
+      { ...base, event: 'CiRun', task: 'T-1', pr: 7, sha: sha.toUpperCase(), result: 'passed' }, // not lowercase hex
+      { ...base, event: 'CiRun', task: 'T-1', pr: 7, sha: 'abc12', result: 'passed' }, // too short
+      { ...base, event: 'CiRun', task: 'T-1', pr: 7, sha: 'abc1234def', result: 'passed' }, // not the full commit id
+      { ...base, event: 'CiRun', task: 'T-1', pr: 7, sha: '60123456789', result: 'passed' }, // all digits, shaped like a phone number
+      { ...base, event: 'CiRun', task: 'T-1', pr: 1_000_001, sha, result: 'passed' }, // past the CLI's bound
+      { ...base, event: 'CiRun', task: 'not a task!', pr: 7, sha, result: 'passed' },
+      { ...base, event: 'CiRun', pr: 7, sha, result: 'passed' }, // no task
+    ];
+    writeFileSync(path.join(dir, 'devlog/.spool/s1.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    expect(runFlush(dir).status).toBe(0);
+    const out = readdirSync(path.join(dir, 'devlog/activity'));
+    const got = readFileSync(path.join(dir, 'devlog/activity', out[0]!), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const at = { ts: '2026-10-10T00:00:00.000Z', session: 'session_01X', event: 'CiRun', task: 'T-1', pr: 7, sha };
+    expect(got).toEqual([
+      { ...at, result: 'failed' },
+      { ...at, result: 'passed' },
+      { ...at, result: 'passed' },
     ]);
   });
 });
@@ -1764,6 +1797,81 @@ describe('routing and escalation', () => {
       expect.objectContaining({ task: 'T-1', process: 'review', result: 'failed', agent: 's1', shadowOf: 'a1' }),
     ]);
   }, 30_000);
+
+  it('records a CI run only for a known task, a pull request, a commit and a result, and refuses anything else', () => {
+    const { dir } = makeRepo();
+    const task = (...a: string[]) => run(dir, 'scripts/devlog-task.mjs', a);
+    const ci = () => spoolLines(dir).filter((l) => l.event === 'CiRun');
+    const refused = (args: string[], message: string) => {
+      const r = task(...args);
+      expect([r.status, r.stderr]).toEqual([1, expect.stringContaining(message)]);
+    };
+    const full = 'abc1234def'.repeat(4);
+    const ok = ['--pr', '7', '--sha', full, '--result', 'failed'];
+    refused(['ci', 'T-1', ...ok], "T-1 is not on this branch's board. Start it first");
+    expect(task('start', 'T-1', '--title', 'CI work').status).toBe(0);
+    refused(['ci', ...ok], 'Give a task id');
+    refused(['ci', 'T-1', '--sha', full, '--result', 'failed'], 'ci needs --pr.');
+    refused(['ci', 'T-1', '--pr', '7', '--result', 'failed'], 'ci needs --sha.');
+    refused(['ci', 'T-1', '--pr', '7', '--sha', full], 'ci needs --result.');
+    refused(['ci', 'T-1', '--pr', '0', '--sha', full, '--result', 'failed'], '--pr must be a whole number from 1 to 1000000.');
+    refused(['ci', 'T-1', '--pr', 'seven', '--sha', full, '--result', 'failed'], '--pr must be a whole number');
+    refused(['ci', 'T-1', '--pr', '7', '--sha', full.toUpperCase(), '--result', 'failed'], '--sha must be the full 40-character commit id in lowercase hex.');
+    refused(['ci', 'T-1', '--pr', '7', '--sha', 'abc1234', '--result', 'failed'], '--sha must be the full 40-character commit id in lowercase hex.');
+    refused(['ci', 'T-1', '--pr', '7', '--sha', 'a'.repeat(41), '--result', 'failed'], '--sha must be the full 40-character commit id in lowercase hex.');
+    refused(['ci', 'T-1', '--pr', '7', '--sha', '60123456789', '--result', 'failed'], '--sha must be the full 40-character commit id in lowercase hex.');
+    refused(['ci', 'T-1', '--pr', '7', '--sha', full, '--result', 'green'], '--result must be one of: passed, failed.');
+    refused(['ci', 'T-1', ...ok, '--run', '60123456789'], 'Unknown option: --run.');
+    refused(['ci', 'T-1', ...ok, '--url', 'https://example.test'], 'Unknown option: --url.');
+    expect(ci()).toEqual([]); // every refusal recorded nothing
+    const first = task('ci', 'T-1', ...ok);
+    expect([first.status, first.stdout]).toEqual([0, expect.stringContaining('CI run for T-1 (PR #7: failed) recorded.')]);
+    expect(task('ci', 'T-1', '--pr', '7', '--sha', 'f'.repeat(40), '--result', 'passed').status).toBe(0);
+    expect(ci()).toEqual([
+      expect.objectContaining({ task: 'T-1', pr: 7, sha: full, result: 'failed' }),
+      expect.objectContaining({ task: 'T-1', pr: 7, sha: 'f'.repeat(40), result: 'passed' }),
+    ]);
+    for (const e of ci()) expect(e).not.toHaveProperty('run');
+  }, 30_000);
+
+  it('supports an esc:ci_red agent by a failed CI run declared before it started, and not without one', () => {
+    const { dir } = makeRepo();
+    const climb = (id: string, base: number, trigger: string) => [
+      ...task(id, base, base + 90), agent(`${id}-1`, 'build', id, SONNET, base + 1), agent(`${id}-2`, 'fix', id, OPUS, base + 20, { trigger }),
+    ];
+    const ci = (min: number, id: string, result: string): Line => ({ ts: iso(min), event: 'CiRun', task: id, pr: 1, sha: 'a'.repeat(40), result });
+    seed(dir, [
+      ...climb('T-F', 0, 'ci_red'), ci(10, 'T-F', 'failed'), // failed before the fix started
+      ...climb('T-P', 100, 'ci_red'), ci(110, 'T-P', 'passed'), // a passing run is no red
+      ...climb('T-L', 200, 'ci_red'), ci(260, 'T-L', 'failed'), // failed only after the fix started (min 220)
+      ...climb('T-O', 300, 'ci_red'), ci(310, 'T-F', 'failed'), // another task's red
+      ...climb('T-N', 400, 'ci_red'),
+    ]);
+    const r = reportOf(dir);
+    expect(Object.fromEntries(r.routing.log.map((c: any) => [c.task, [c.trigger, c.support]]))).toEqual({
+      'T-F': ['ci_red', 'declared'], 'T-P': ['ci_red', 'none'], 'T-L': ['ci_red', 'none'], 'T-O': ['ci_red', 'none'], 'T-N': ['ci_red', 'none'],
+    });
+    expect(r.routing.consistency).toMatchObject({ unsupported: 4 });
+  }, REPO_TIMEOUT);
+
+  it('works the CI first-pass rate out from each pull request\'s earliest recorded run, and says not recorded, not 0, with none', () => {
+    const { dir } = makeRepo();
+    const ci = (min: number, id: string, pr: number, result: string): Line => ({ ts: iso(min), event: 'CiRun', task: id, pr, sha: 'a'.repeat(40), result });
+    expect(reportOf(dir).areas.quality).toMatchObject({ ciFirstPassRate: null, ciRuns: 0 });
+    seed(dir, [testRun(1, true)]); // the Tests line names the CI run only when a test run is recorded
+    expect(reportOf(dir).health.checks.find((c: any) => c.name === 'Tests').detail).toContain('No CI run declared yet.');
+    // PR 1 passed first, then failed and passed again; PR 2 passed; PR 3 of another task passed, then failed;
+    // PR 4 failed. A later failure does not undo a first pass: 3 of 4 first runs passed.
+    seed(dir, [
+      ...task('T-A', 0), testRun(1, true), ci(5, 'T-A', 1, 'failed'), ci(8, 'T-A', 1, 'passed'),
+      ci(10, 'T-A', 2, 'passed'), ci(12, 'T-B', 3, 'passed'), ci(14, 'T-B', 3, 'failed'), ci(16, 'T-B', 4, 'failed'),
+      ci(3, 'T-A', 1, 'passed'), // out of order in the file: the earliest by time still decides, so PR 1 first passed
+    ]);
+    expect(reportOf(dir).areas.quality).toMatchObject({ ciFirstPassRate: 75, ciRuns: 7 });
+    const detail = reportOf(dir).health.checks.find((c: any) => c.name === 'Tests').detail;
+    expect(detail).toContain('Last CI run the session declared: PR #4 failed at');
+    expect(detail).not.toContain('No CI run declared yet.');
+  }, REPO_TIMEOUT);
 
   it('reads the ladder and thresholds from control-tower.json, every process and trigger in the code\'s lists, and calls a malformed threshold unavailable', async () => {
     // @ts-expect-error a plain ES module with no type declarations

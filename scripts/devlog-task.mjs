@@ -14,6 +14,9 @@
 //                                         [--agent <agentId>] [--shadow-of <agentId>] [--round N]
 //                                         (a verdict the session declares for a helper agent's work on a task, for the routing view;
 //                                          the task must already be on this branch's board; --shadow-of needs --process review and --agent)
+//   node scripts/devlog-task.mjs ci <task> --pr N --sha <40 lowercase hex> --result passed|failed
+//                                         (a CI run on the task's pull request, declared by the session, for the routing view's
+//                                          ci_red trigger and CI first-pass rate; the task must already be on this branch's board)
 //   node scripts/devlog-task.mjs board     (prints the current board)
 //
 // Each command appends an event to this session's spool, like the activity hook, so the board
@@ -134,7 +137,20 @@ export function eventFor(argv, now = new Date(), env = process.env) {
       result: oneOf('result', opts.result, ['passed', 'failed']), agent: opts.agent, shadowOf: opts['shadow-of'], round: int('round', opts.round, 1, 99),
     });
   }
-  throw new UsageError('Commands: start, update, done, incident, decision, outcome, board.');
+  if (command === 'ci') {
+    known(['pr', 'sha', 'result']);
+    const task = pos[0];
+    if (!task || !isTaskId(task)) throw new UsageError('Give a task id: letters, digits, "-", "_" or ".", starting with a letter, fewer than 7 digits (e.g. DCT-2).');
+    if (!opts.pr) throw new UsageError('ci needs --pr.');
+    if (!opts.sha) throw new UsageError('ci needs --sha.');
+    if (!opts.result) throw new UsageError('ci needs --result.');
+    if (!/^[0-9a-f]{40}$/.test(opts.sha)) throw new UsageError('--sha must be the full 40-character commit id in lowercase hex.');
+    return strip({
+      ...base, event: 'CiRun', task, pr: int('pr', opts.pr, 1, 1_000_000), sha: opts.sha,
+      result: oneOf('result', opts.result, ['passed', 'failed']),
+    });
+  }
+  throw new UsageError('Commands: start, update, done, incident, decision, outcome, ci, board.');
 }
 
 function append(event) {
@@ -161,13 +177,13 @@ if (invoked && invoked === pathToFileURL(realpathSync(fileURLToPath(import.meta.
         const had = buildBoard().find((t) => t.id === event.id);
         if (had?.title && !sameWork(had.title, event.title)) throw new UsageError(`${event.id} is already "${had.title}". Choose a new id.`);
       }
-      if (event.event === 'Outcome') {
+      if (event.event === 'Outcome' || event.event === 'CiRun') {
         // A verdict for a task nobody started would fill the routing view with work the board does not know.
         const { buildBoard } = await import('./devlog-report.mjs');
         if (!buildBoard().some((t) => t.id === event.task)) throw new UsageError(`${event.task} is not on this branch's board. Start it first (start ${event.task} --title …).`);
       }
       append(event);
-      console.log(event.event === 'Task' ? `Task ${event.id}: ${event.action} recorded.` : event.event === 'Outcome' ? `Outcome for ${event.task} (${event.process}: ${event.result}) recorded.` : `Recorded ${event.id}.`);
+      console.log(event.event === 'Task' ? `Task ${event.id}: ${event.action} recorded.` : event.event === 'Outcome' ? `Outcome for ${event.task} (${event.process}: ${event.result}) recorded.` : event.event === 'CiRun' ? `CI run for ${event.task} (PR #${event.pr}: ${event.result}) recorded.` : `Recorded ${event.id}.`);
       const max = readConfig().stopLoss?.maxTaskAttempts;
       if (event.event === 'Task' && max && event.attempt > max) {
         // One alert per task and attempt, however often the attempt is updated.

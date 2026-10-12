@@ -451,6 +451,7 @@ function render(r) {
   // ----------------------------------------------------------------- quality
   fill('q-kpis',
     kpi('Test runs passing', pctText(q.testPassRate), `${num(q.testRuns)} runs logged`),
+    kpi('CI first pass (declared)', q.ciFirstPassRate === null || q.ciFirstPassRate === undefined ? 'Not recorded' : `${q.ciFirstPassRate}%`, `${num(q.ciRuns)} CI runs declared, first recorded run per PR`),
     kpi('Review findings per PR', q.findingsPerPr ?? '—', `${num(t.findings)} findings across ${num(t.prsMerged)} merged PRs`),
     kpi('Lessons seen more than once', String(q.repeatedLessons), `Of ${t.lessons} lessons`),
     kpi('Stop-loss alerts', String(e.stopLossAlerts), `${e.wasteAlerts} wasted-effort warnings`));

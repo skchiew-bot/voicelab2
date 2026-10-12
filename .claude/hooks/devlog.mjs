@@ -122,7 +122,7 @@ export function decimalAtLeast(a, b) {
 
 /** The processes a helper agent can declare in its tag, and the reasons it can give for starting above its floor. */
 export const PROCESSES = ['plan', 'review', 'security-review', 'build', 'fix', 'check'];
-export const TRIGGERS = ['review_failed', 'suite_failed', 'builder_blocked', 'deny_path_touched'];
+export const TRIGGERS = ['review_failed', 'suite_failed', 'builder_blocked', 'deny_path_touched', 'ci_red'];
 
 /** A helper agent's id as Claude Code writes it. Anything else is left out, never scrubbed into a lookalike. */
 export const isAgentId = (v) => typeof v === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(v);
@@ -134,7 +134,7 @@ export const isAgentId = (v) => typeof v === 'string' && /^[A-Za-z0-9_-]{1,40}$/
  */
 export const isTaskId = (v) => typeof v === 'string' && /^[A-Za-z][\w.-]{0,39}$/.test(v) && scrub(v, 40) === v && (v.match(/\d/g) ?? []).length < 7;
 
-const TAG = /^\[(plan|review|security-review|build|fix|check) ([A-Za-z][\w.-]{0,39})(?: (esc:(review_failed|suite_failed|builder_blocked|deny_path_touched)|shadow))?\](?:\s|$)/;
+const TAG = /^\[(plan|review|security-review|build|fix|check) ([A-Za-z][\w.-]{0,39})(?: (esc:(review_failed|suite_failed|builder_blocked|deny_path_touched|ci_red)|shadow))?\](?:\s|$)/;
 
 /**
  * What a session declares about a helper agent, by a tag at the start of the Agent description:

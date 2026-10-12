@@ -1,13 +1,12 @@
 import { execSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
 // Playwright's expect gives the web-first locator assertions (auto-waiting); it also does plain values.
 import { chromium, expect, type Browser, type Locator, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, it } from 'vitest';
+import { chromiumOrSkip } from './browser.js';
 
 // Drives the real admin UI in a real browser against a throwaway database.
-// Skipped where no Chromium is available (set CHROMIUM_PATH to point at one).
-const CHROMIUM = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium';
-const run = existsSync(CHROMIUM);
+// Skipped where no Chromium is available (set CHROMIUM_PATH to point at one); in CI a missing Chromium fails.
+const { path: CHROMIUM, run } = chromiumOrSkip();
 
 type Env = Awaited<ReturnType<typeof import('./helpers.js').setupDb>>;
 let env: Env; let browser: Browser; let base: string;

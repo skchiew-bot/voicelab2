@@ -286,7 +286,7 @@ export function overallHealth(checks) {
 }
 
 // Events a person or Claude records by hand, which say nothing about when a session was active.
-const BY_HAND = new Set(['Task', 'Incident', 'Decision', 'Outcome']);
+const BY_HAND = new Set(['Task', 'Incident', 'Decision', 'Outcome', 'CiRun']);
 const sum = (xs) => xs.reduce((a, b) => a + b, 0n);
 const pct = (n, d) => (d > 0 ? Math.round((n / d) * 1000) / 10 : null); // a ratio of counts, for display only
 const tierOf = (model, tiers = {}) => Object.entries(tiers).find(([k, v]) => !k.startsWith('_') && Array.isArray(v) && v.some((w) => model.includes(w)))?.[0] ?? 'other';
@@ -456,7 +456,7 @@ export function processCost(runs, sessionRows, cfg, unrecordedSessions = new Set
  * process, by an agent above the floor, judged by the model Claude Code served. Items that started above or below the
  * floor are counted apart, never as escalations. The amber rule is the owner's, read from the config.
  */
-export function routingAudit({ runs, outcomes, toolEvents, subagentStarts, board, cfg, now, isActive = () => false }) {
+export function routingAudit({ runs, outcomes, ciRuns = [], toolEvents, subagentStarts, board, cfg, now, isActive = () => false }) {
   const conf = routingConfig(cfg);
   // `since` is for display only: the time of the first AgentRun, which is when a Stop wrote it, not when its agents
   // began. A helper agent is "unrecorded" only when it has no AgentRun of its own, whatever the dates say.
@@ -486,6 +486,7 @@ export function routingAudit({ runs, outcomes, toolEvents, subagentStarts, board
       case 'deny_path_touched': return spanHas(a, prev, (e) => /^(Edit|Write|NotebookEdit)$/.test(e.tool) && highRisk.some((r) => r.test(e.target ?? ''))) ? 'recorded' : 'none';
       case 'review_failed': return failedBefore(a, ['review', 'security-review']) ? 'declared' : 'none';
       case 'builder_blocked': return failedBefore(a, ['build', 'fix']) ? 'declared' : 'none';
+      case 'ci_red': return ciRuns.some((c) => c.task === a.task && c.result === 'failed' && at(c.ts) <= at(startOf(a))) ? 'declared' : 'none';
       default: return 'none';
     }
   };
@@ -793,9 +794,18 @@ export function build(opts = {}) {
     currency: cfg.currency?.myrPerUsd ? { myrPerUsd: cfg.currency.myrPerUsd, asOf: cfg.currency.asOf, source: cfg.currency.source } : null,
   };
 
+  // CI runs the session declared. A pull request's first pass is its earliest recorded run (key: task and PR).
+  const ciRuns = events.filter((e) => e.event === 'CiRun');
+  const ciFirst = [...ciRuns.reduce((m, c) => {
+    const k = `${c.task}#${c.pr}`;
+    if (!m.has(k) || at(c.ts) < at(m.get(k).ts)) m.set(k, c);
+    return m;
+  }, new Map()).values()];
+  const lastCi = [...ciRuns].sort((a, b) => at(b.ts) - at(a.ts))[0];
+
   // ------------------------------------------------------- routing and escalation
   const routing = routingAudit({
-    runs, outcomes: events.filter((e) => e.event === 'Outcome'), toolEvents: events.filter((e) => e.tool),
+    runs, outcomes: events.filter((e) => e.event === 'Outcome'), ciRuns, toolEvents: events.filter((e) => e.tool),
     subagentStarts: events.filter((e) => e.event === 'SubagentStart'), board, cfg, now,
     isActive: (id) => sessionRows.find((x) => x.id === id)?.active ?? false,
   });
@@ -852,6 +862,8 @@ export function build(opts = {}) {
     }),
     quality: {
       firstPassRate: pct(done.filter((t) => (t.attempt ?? 1) === 1).length, done.length),
+      ciFirstPassRate: ciFirst.length ? pct(ciFirst.filter((c) => c.result === 'passed').length, ciFirst.length) : null,
+      ciRuns: ciRuns.length,
       testPassRate: tests.runs ? pct(tests.runs - tests.failed, tests.runs) : null,
       testRuns: tests.runs,
       repeatedLessons: lessons.filter((l) => l.times >= 2).length,
@@ -958,7 +970,7 @@ export function build(opts = {}) {
     { name: 'Lesson guards', state: guardsBroken ? 'red' : 'green', detail: guardsBroken ? `${guardsBroken} of ${guardsTotal} guards are missing` : `${guardsTotal} of ${guardsTotal} guards in place` },
     { name: 'Activity log integrity', state: integrity.state, detail: integrity.state === 'unavailable' ? (integrity.unknown?.length ? `${integrity.unknown.length} committed file(s) whose first commit cannot be found (a shallow clone?)` : 'Git history could not be read') : integrity.state === 'red' ? `${integrity.changed.length} changed and ${integrity.deleted.length} deleted after being committed, not accepted` : `${integrity.checked} files as committed${integrity.accepted.length ? `, ${integrity.accepted.length} earlier change(s) accepted by the owner` : ''}${integrity.pending ? `, ${integrity.pending} not committed yet` : ''}` },
     { name: 'Secret scan', state: secrets === null ? 'unavailable' : secrets.length ? 'red' : 'green', detail: secrets === null ? 'Files could not be listed' : secrets.length ? `${secrets.length} file(s) hold a real provider's key format` : "No file holds a real provider's key format (L-015)" },
-    { name: 'Tests', state: !testFresh ? 'unavailable' : lastTest.ok ? 'green' : 'amber', detail: !lastTest ? 'No test run recorded' : `Last recorded test run, of any scope, ${lastTest.ok ? 'passed' : 'failed'} at ${lastTest.ts.slice(0, 16).replace('T', ' ')} UTC${testFresh ? '' : ', more than a day ago'}. No CI runs the suite.` },
+    { name: 'Tests', state: !testFresh ? 'unavailable' : lastTest.ok ? 'green' : 'amber', detail: !lastTest ? 'No test run recorded' : `Last recorded test run, of any scope, ${lastTest.ok ? 'passed' : 'failed'} at ${lastTest.ts.slice(0, 16).replace('T', ' ')} UTC${testFresh ? '' : ', more than a day ago'}. ${lastCi ? `Last CI run the session declared: PR #${lastCi.pr} ${lastCi.result} at ${new Date(lastCi.ts).toISOString().slice(0, 16).replace('T', ' ')} UTC.` : 'No CI run declared yet.'}` },
     { name: 'Stalled agents', state: stalled.length ? 'amber' : 'green', detail: `${stalled.length ? `${stalled.length} helper agent(s) active for more than 6 hours` : 'None active for more than 6 hours'}${unpaired ? `; ${unpaired} older start(s) cannot be judged (no id, or their session went quiet)` : ''}` },
     { name: 'Stop-loss', state: recentStop.length ? 'amber' : 'green', detail: recentStop.length ? `${recentStop.length} in the last 24 hours` : `None in the last 24 hours (${alerts.filter((a) => a.kind === 'stop-loss').length} on record)` },
     { name: 'Logging', state: gaps.length || checked?.fallback === 'missing' ? 'amber' : 'green', detail: [gaps.length ? `${gaps.length} session(s) committed while not logged` : '', checked?.fallback === 'missing' ? 'fallback hook not installed' : ''].filter(Boolean).join('; ') || 'Every committing session was logged' },

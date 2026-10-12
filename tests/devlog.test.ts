@@ -1149,34 +1149,48 @@ describe('control tower report', () => {
     expect(later).toEqual([expect.objectContaining({ level: 'info', text: expect.stringContaining('(sion_01E, 2026-10-10) found the installed fallback hook differs') })]);
   }, REPO_TIMEOUT);
 
-  it('flags an open task whose work already merged, but not one on a branch name reused after an earlier merge', () => {
+  it('flags an open task whose work merged with nothing said since, by its own PR, and not after a reopen or on a reused branch', () => {
     const { dir } = makeRepo();
     mkdirSync(path.join(dir, 'devlog/.spool'), { recursive: true });
     const task = (ts: string, id: string, extra: object) => ({ ts, session: 'session_01A', event: 'Task', id, ...extra });
     writeFileSync(path.join(dir, 'devlog/.spool/a.jsonl'), [
       task('2026-10-10T08:00:00Z', 'T-1', { action: 'start', title: 'Merged by branch', status: 'in_progress', branch: 'claude/b-1' }),
       task('2026-10-10T08:00:00Z', 'T-2', { action: 'start', title: 'Merged by number', status: 'review', pr: 6 }),
+      // A phase branch named as CLAUDE.md asks, upper case included, is kept as it is, so it can be matched.
+      task('2026-10-10T08:00:00Z', 'T-10', { action: 'start', title: 'Phase branch', status: 'in_progress', branch: 'claude/phase-CT-dev-tower-v2' }),
       // Normal work: a branch name reused after its earlier PR merged, a finished or dropped task, and a PR still open.
       task('2026-10-12T08:00:00Z', 'T-3', { action: 'start', title: 'Reused branch', status: 'in_progress', branch: 'claude/b-3' }),
       task('2026-10-10T08:00:00Z', 'T-4', { action: 'start', title: 'Done', status: 'in_progress', branch: 'claude/b-4' }),
       task('2026-10-10T09:00:00Z', 'T-4', { action: 'done', status: 'done' }),
       task('2026-10-10T08:00:00Z', 'T-5', { action: 'start', title: 'Dropped', status: 'abandoned', branch: 'claude/b-5' }),
       task('2026-10-10T08:00:00Z', 'T-6', { action: 'start', title: 'Still open', status: 'in_progress', branch: 'claude/b-6' }),
+      // Reopened for follow-up work after its PR merged: what is left has been said.
+      task('2026-10-10T08:00:00Z', 'T-7', { action: 'start', title: 'Reopened', status: 'in_progress', pr: 11 }),
+      task('2026-10-10T14:00:00Z', 'T-7', { action: 'done', status: 'done' }),
+      task('2026-10-11T08:00:00Z', 'T-7', { action: 'update', status: 'in_progress', next: 'follow-up' }),
+      // Its own PR is still open, though other PRs from its branch merged, a later one included: the PR it names wins.
+      task('2026-10-10T08:00:00Z', 'T-8', { action: 'start', title: 'Own PR open', status: 'review', branch: 'claude/b-8', pr: 14 }),
+      // A branch carrying several PRs: only its latest counts, and that one is still open.
+      task('2026-10-10T08:00:00Z', 'T-9', { action: 'start', title: 'Branch of several', status: 'in_progress', branch: 'claude/b-9' }),
     ].map((e) => JSON.stringify(e)).join('\n') + '\n');
     const pr = (number: number, head: string, merged_at: string | null) => ({ number, title: `PR ${number}`, state: merged_at ? 'closed' : 'open', html_url: `https://github.com/o/r/pull/${number}`, created_at: '2026-10-09T00:00:00Z', merged_at, findings: [], head });
     const prs = path.join(dir, 'prs.json');
     writeFileSync(prs, JSON.stringify([
       pr(5, 'claude/b-1', '2026-10-10T13:47:13Z'), pr(6, 'claude/other', '2026-10-11T01:00:00Z'), pr(7, 'claude/b-3', '2026-10-11T00:00:00Z'),
       pr(8, 'claude/b-4', '2026-10-10T10:00:00Z'), pr(9, 'claude/b-5', '2026-10-10T10:00:00Z'), pr(10, 'claude/b-6', null),
+      pr(11, 'claude/b-7', '2026-10-10T13:00:00Z'), pr(12, 'claude/b-8', '2026-10-10T10:00:00Z'), pr(14, 'claude/b-8', null),
+      pr(15, 'claude/b-9', '2026-10-10T10:00:00Z'), pr(16, 'claude/b-9', null), pr(17, 'claude/phase-CT-dev-tower-v2', '2026-10-10T12:00:00Z'),
+      pr(18, 'claude/b-8', '2026-10-10T12:00:00Z'),
     ]));
     const out = path.join(dir, 'r.json');
     expect(run(dir, 'scripts/devlog-report.mjs', ['--prs', prs, '--json', out]).status).toBe(0);
     const attention = JSON.parse(readFileSync(out, 'utf8')).attention.filter((a: { text: string }) => a.text.includes('its work merged'));
     expect(attention).toEqual([
-      { level: 'warning', text: 'T-1 is still marked in progress, but its work merged as #5 on 2026-10-10: record it as done, or say what is left.' },
-      { level: 'warning', text: 'T-2 is still marked review, but its work merged as #6 on 2026-10-11: record it as done, or say what is left.' },
+      { level: 'warning', text: 'T-1 is still marked in progress, but its work merged as #5 on 2026-10-10: record it as done, or update it with what is left.' },
+      { level: 'warning', text: 'T-2 is still marked review, but its work merged as #6 on 2026-10-11: record it as done, or update it with what is left.' },
+      { level: 'warning', text: 'T-10 is still marked in progress, but its work merged as #17 on 2026-10-10: record it as done, or update it with what is left.' },
     ]);
-  });
+  }, REPO_TIMEOUT);
 
   it('flags a task id started for two pieces of work, and refuses to start a known id for something else', () => {
     const { dir } = makeRepo();

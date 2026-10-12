@@ -905,11 +905,13 @@ export function build(opts = {}) {
   for (const l of lessons) for (const g of l.guards) if (!g.ok) attention.push({ level: 'critical', text: `${l.id} lost its guard: "${g.text}" is no longer in ${g.file}.` });
   for (const a of alerts.filter((x) => x.kind === 'stop-loss' && x.ts >= since(2))) attention.push({ level: 'critical', text: `Stop-loss in ${a.session.slice(-8)}: ${a.rule} (${a.key}).` });
   for (const t of board.filter((x) => x.blocker && x.status !== 'done')) attention.push({ level: 'warning', text: `${t.id} is blocked: ${t.blocker}` });
-  // An open task whose work already merged: its PR (by number, or by branch) merged after the task was started. A branch
-  // name reused for later work does not count, since that PR merged before the task began.
+  // An open task whose work merged with nothing said since: its own PR (the one it names, or else the latest from its
+  // branch) merged after the task's last update. Reopening or updating the task clears it; so does a branch name reused
+  // after an earlier merge, or a branch whose latest PR is still open.
   for (const t of board.filter((x) => !['done', 'abandoned'].includes(x.status))) {
-    const merged = prs.find((p) => p.merged && at(p.merged) > at(t.started) && (p.number === t.pr || (t.branch && p.head === t.branch)));
-    if (merged) attention.push({ level: 'warning', text: `${t.id} is still marked ${t.status.replace('_', ' ')}, but its work merged as #${merged.number} on ${merged.merged.slice(0, 10)}: record it as done, or say what is left.` });
+    const own = t.pr ? prs.find((p) => p.number === t.pr)
+      : t.branch ? prs.filter((p) => p.head === t.branch).sort((a, b) => b.number - a.number)[0] : undefined;
+    if (own?.merged && at(own.merged) > at(t.updated)) attention.push({ level: 'warning', text: `${t.id} is still marked ${t.status.replace('_', ' ')}, but its work merged as #${own.number} on ${new Date(own.merged).toISOString().slice(0, 10)}: record it as done, or update it with what is left.` });
   }
   // Still shown once done: the record mixes the two pieces of work whatever its status.
   for (const t of board.filter((x) => (x.starts?.length ?? 0) > 1)) attention.push({ level: t.status === 'done' ? 'info' : 'warning', text: `${t.id} was started for ${t.starts.length} different pieces of work (${t.starts.join('; ')}): its record mixes them. Give each its own id.` });

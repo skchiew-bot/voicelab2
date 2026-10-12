@@ -24,6 +24,9 @@ const decimal = (v) => (typeof v === 'string' && /^\d{1,12}\.\d{1,8}$/.test(v) ?
 const nat = (v, max = Number.MAX_SAFE_INTEGER) => (Number.isInteger(v) && v >= 0 && v <= max ? v : undefined);
 const text = (v, max) => (typeof v === 'string' ? scrub(v, max) : undefined);
 const model = (k) => /^[\w.:-]{1,80}$/.test(k);
+// This project's own branch names (claude/phase-CT-ci, upper case included) as they are; any other name is scrubbed,
+// since it could hold a number or a token.
+const branchName = (b) => (/^(main|claude\/[A-Za-z0-9.-]{1,80})$/.test(b) && !/\d{7,}/.test(b) ? b : scrub(b, 100));
 
 function tokensOf(raw) {
   if (!raw || typeof raw !== 'object') return undefined;
@@ -65,9 +68,7 @@ export function clean(raw) {
 
   if (raw.event === 'SessionStart') {
     set('source', id(raw.source));
-    // This project's own branch names look like tokens to the scrubber, so keep those as they are;
-    // any other branch name is scrubbed (it could hold a number or a token).
-    if (typeof raw.branch === 'string') out.branch = /^(main|claude\/[a-z0-9.-]{1,80})$/.test(raw.branch) && !/\d{7,}/.test(raw.branch) ? raw.branch : scrub(raw.branch, 100);
+    if (typeof raw.branch === 'string') out.branch = branchName(raw.branch);
     if (/^[0-9a-f]{4,40}$/.test(raw.head ?? '')) out.head = raw.head;
     set('behind_main', nat(raw.behind_main));
     // Lesson L-020: opened outside the repository, and whether the fallback hook was in place.
@@ -150,8 +151,7 @@ export function clean(raw) {
     set('attempt', nat(raw.attempt, 99));
     if (typeof raw.tests === 'string' && /^\d{1,6}\/\d{1,6}$/.test(raw.tests)) out.tests = raw.tests;
     set('pr', nat(raw.pr));
-    // A branch linked to a task: this project's branch names as they are, anything else scrubbed.
-    if (typeof raw.branch === 'string') out.branch = /^(main|claude\/[a-z0-9.-]{1,80})$/.test(raw.branch) && !/\d{7,}/.test(raw.branch) ? raw.branch : scrub(raw.branch, 100);
+    if (typeof raw.branch === 'string') out.branch = branchName(raw.branch);
   }
   if (raw.event === 'Incident') {
     if (typeof raw.id !== 'string' || !/^INC-\d{8}-[0-9a-f]{4}$/.test(raw.id)) return null;

@@ -262,48 +262,65 @@ const drain = (providerId: string, why = 'Resting it for this test.') => must(ac
 const restore = (providerId: string) => must(act({ action: 'restore', providerId, reason: 'Done resting it.' }));
 /** The dialling pace is off for these tests, whatever an earlier test left it at: a dial held back by it would look like a drain doing so. */
 const noPace = async () => { await must(act({ action: 'set_pace', perMinute: null, reason: 'No pace for this test.' })); };
+/** Sets whether a client has agreed to the premium for going over a ceiling (no multiplier: it has not). */
+const setPremium = (tenant: string, why: string, multiplier?: string) =>
+  must(env.call(st(), 'PUT', `/internal/tenants/${tenant}/entitlement`, { reason: why, inboundChannels: 5, ...(multiplier ? { overburstMultiplier: multiplier } : {}) }));
+/** The Control Tower's "dials held back because every provider was at its limit" alert as it reads now (undefined: none). */
+const heldBackAlert = async () => ((await must(env.call(st(), 'GET', '/internal/control-tower'))).json().alerts as { code: string; message: string }[]).find((a) => a.code === 'dials_deferred')?.message;
+/** Frees the channels that `occupy` took at a provider, as if its other calls had ended. */
+const vacate = (providerId: string) => env.pool.query(`UPDATE calls SET status = 'completed', ended_at = now() WHERE provider_id = $1 AND status = 'dialing'`, [providerId]);
 
 describe('the premium for going over a ceiling, with a provider drained', () => {
   beforeEach(noPace);
-  it('takes the call over the ceiling of the provider that is up, at the premium the client agreed to, and never sends it to a drained provider that has room', async () => {
+  it('holds the dial back as drained, for a client that agreed to a premium, when the provider that is up is full and the drained one has room: no premium is paid and nobody is contacted', async () => {
     await clearActive(); await forgetDials();
     const { a, b, t } = await pair([1, 2], '1.5');
     await occupy(a.id, t, 1);                                                        // A is at its ceiling of 1; B has both channels free
     expect([await load(a.id), await load(b.id)]).toMatchObject([{ active: 1, ceiling: 1 }, { active: 0, ceiling: 2 }]);
     await drain(b.id); env.provider.calls.length = 0;
-    const ids: string[] = [];
+    const before = await callCount(t);
     for (let i = 0; i < 2; i++) {
-      const r = await dial(t); expect(r.statusCode).toBe(201);
-      ids.push(r.json().callId);
+      const r = await dial(t);
+      expect(r.statusCode).toBe(429); expect(r.json()).toMatchObject({ deferred: true, status: 'deferred' });
+      expect(await lastDeferral(t)).toBe('drained');                                 // the drain is what is in the way, not a ceiling to pay to go over
     }
-    for (const id of ids) expect(await callRow(id)).toMatchObject({ provider_id: a.id, burst: true, credit_multiplier: '1.500', status: 'dialing' });
-    for (const id of ids) {
-      const ev = (await must(env.call(st(), 'GET', `/internal/calls/${id}/events`))).json().filter((e: { type: string }) => e.type === 'call.burst');
-      expect(ev).toHaveLength(1); expect(ev[0].payload).toEqual({ providerId: a.id, creditMultiplier: '1.500' });
-    }
-    expect(dials()).toHaveLength(2);
-    expect(dials().every((c) => c.url.includes(`/Accounts/${a.sid}/Calls.json`))).toBe(true);   // both to A; Telnyx was not contacted
-    expect((await load(b.id)).active).toBe(0);                                         // B took nothing
+    expect(dials()).toHaveLength(0);                                                 // neither provider was contacted
+    expect(await callCount(t)).toBe(before);                                         // and no call row, so nothing is billed or failed
+    const types = await eventTypes(t);
+    expect(types).toContain('dial.deferred'); expect(types).not.toContain('call.burst'); expect(types).not.toContain('call.failed');
+    expect([await load(a.id), await load(b.id)]).toMatchObject([{ active: 1 }, { active: 0 }]);   // A went over nothing, and B took nothing
     await clearActive();
   });
 
-  it('holds the dial back, rather than failing it or sending it to the drained provider, for a client that did not agree to a premium', async () => {
+  it('holds the dial back as drained, not as at capacity, for a client that did not agree to a premium: the dials-held-back alert does not count it, and a client that agrees to one waits the same way', async () => {
     await clearActive(); await forgetDials();
     const { a, b, t } = await pair([1, 2]);                                           // an entitlement, but no overburst multiplier
     await occupy(a.id, t, 1); await drain(b.id);
+    const alertBefore = await heldBackAlert();
     const before = await callCount(t); env.provider.calls.length = 0;
     const r = await dial(t);
     expect(r.statusCode).toBe(429); expect(r.json()).toMatchObject({ deferred: true, status: 'deferred' });
     expect(dials()).toHaveLength(0);                                                  // nobody was contacted
     expect(await callCount(t)).toBe(before);                                          // and no call row, so nothing failed
-    expect(await lastDeferral(t)).toBe('at_capacity');                                // A is full: that is the reason, not the drain
+    expect(await lastDeferral(t)).toBe('drained');                                    // A is full, but B has room and is only resting: that is the reason
     const types = await eventTypes(t);
     expect(types).toContain('dial.deferred'); expect(types).not.toContain('call.failed'); expect(types).not.toContain('call.burst');
-    // The same client, once it agrees to the premium, goes over A's ceiling and still not to B.
-    await must(env.call(st(), 'PUT', `/internal/tenants/${t}/entitlement`, { reason: 'Premium agreed after all.', inboundChannels: 5, overburstMultiplier: '2' }));
-    const paid = await dial(t); expect(paid.statusCode).toBe(201);
-    expect(await callRow(paid.json().callId)).toMatchObject({ provider_id: a.id, burst: true, credit_multiplier: '2.000' });
-    expect(dials().every((c) => c.url.includes(`/Accounts/${a.sid}/Calls.json`))).toBe(true);
+    expect(await heldBackAlert()).toBe(alertBefore);                                  // "every provider was at its limit" is false here, so it is not counted
+    // The same client, once it agrees to the premium, waits for the drained provider too, instead of going over A's ceiling.
+    await setPremium(t, 'Premium agreed after all.', '2');
+    const paid = await dial(t);
+    expect(paid.statusCode).toBe(429); expect(paid.json()).toMatchObject({ deferred: true });
+    expect(await lastDeferral(t)).toBe('drained');
+    expect(dials()).toHaveLength(0); expect(await callCount(t)).toBe(before);
+    expect(await eventTypes(t)).not.toContain('call.burst');
+    expect(await heldBackAlert()).toBe(alertBefore);
+    // The alert still counts what it says: with B restored and full too, nothing is resting, every provider is at its limit, and the dial is held back for that.
+    await setPremium(t, 'No premium for this check.');
+    await restore(b.id); await occupy(b.id, t, 2);
+    const full = await dial(t); expect(full.statusCode).toBe(429);
+    expect(await lastDeferral(t)).toBe('at_capacity');
+    const alertAfter = await heldBackAlert();
+    expect(alertAfter).toBeDefined(); expect(alertAfter).not.toBe(alertBefore);
     await clearActive();
   });
 
@@ -329,35 +346,43 @@ describe('the premium for going over a ceiling, with a provider drained', () => 
     await clearActive(); await forgetDials();
     const { a, b, t } = await pair([1, 2], '1.5');
     await occupy(a.id, t, 1); await drain(b.id);
-    const over = await dial(t); expect(await callRow(over.json().callId)).toMatchObject({ provider_id: a.id, burst: true });
+    const held = await dial(t); expect(held.statusCode).toBe(429);                      // waits for the restore, instead of going over A's ceiling
+    expect(await lastDeferral(t)).toBe('drained');
     await restore(b.id); env.provider.calls.length = 0;
     const back = await must(dial(t));
     expect(await callRow(back.json().callId)).toMatchObject({ provider_id: b.id, burst: false, credit_multiplier: null, status: 'dialing' });
-    expect((await eventTypes(t)).filter((x) => x === 'call.burst')).toHaveLength(1);   // only the first call was over a ceiling
+    expect(await eventTypes(t)).not.toContain('call.burst');                            // no call of this client was ever over a ceiling
     expect(dials()).toHaveLength(1); expect(dials()[0]!.url.endsWith('/v2/calls')).toBe(true);
     await clearActive();
   });
 
-  it('does not move a call over the ceiling to a drained provider when the provider refuses it; one restored meanwhile takes it, without the premium', async () => {
+  it('does not move a refused over-ceiling call to a provider drained since it was decided; one whose failover ended meanwhile takes it, without the premium', async () => {
     await clearActive(); await forgetDials();
-    const { a, b, t } = await pair([1, 2], '1.5');
-    await occupy(a.id, t, 1); await drain(b.id);
     const before = env.provider.state.respond;
-    const refuse = () => new Response('{"message":"number not allowed"}', { status: 403 });
-    env.provider.state.respond = (url, init) => (url.includes('/Calls.json') ? refuse() : before(url, init));
-    env.provider.calls.length = 0;
+    const refuse = () => new Response('{"errors":[{"detail":"number not allowed"}]}', { status: 403 });
     try {
-      const refused = await dial(t);
-      expect(refused.statusCode).toBe(502);
-      expect(dials().map((c) => c.url.includes('/Calls.json'))).toEqual([true]);       // A only; the drained B has room and was still not tried
-      const failed = (await env.pool.query(`SELECT provider_id, status, end_reason FROM calls WHERE tenant_id = $1 AND status = 'failed'`, [t])).rows;
-      expect(failed).toEqual([{ provider_id: a.id, status: 'failed', end_reason: 'provider_error' }]);
-      // B is restored while A is still answering the next dial: the retry finds B up, with room, so the premium decided for A is dropped.
-      env.provider.state.respond = async (url, init) => { if (url.includes('/Calls.json')) { await restore(b.id); return refuse(); } return before(url, init); };
+      // Both providers are full and nothing is drained, so the premium is the client's way through: the call is decided over B's ceiling.
+      const one = await pair([1, 1], '1.5');
+      await occupy(one.a.id, one.t, 1); await occupy(one.b.id, one.t, 1);
+      // B refuses it. While it does, A frees up and is drained: the retry must not go to a provider drained after the decision.
+      env.provider.state.respond = async (url, init) => { if (url.endsWith('/v2/calls')) { await vacate(one.a.id); await drain(one.a.id); return refuse(); } return before(url, init); };
       env.provider.calls.length = 0;
-      const moved = await dial(t); expect(moved.statusCode).toBe(201);
-      expect(dials().map((c) => c.url.includes('/Calls.json'))).toEqual([true, false]);
-      expect(await callRow(moved.json().callId)).toMatchObject({ provider_id: b.id, burst: false, credit_multiplier: null, status: 'dialing' });
+      expect((await dial(one.t)).statusCode).toBe(502);
+      expect(dials().map((c) => c.url.includes('/Calls.json'))).toEqual([false]);       // B only; the drained A has room and was still not tried
+      expect((await env.pool.query(`SELECT provider_id, status, end_reason FROM calls WHERE tenant_id = $1 AND status = 'failed'`, [one.t])).rows)
+        .toEqual([{ provider_id: one.b.id, status: 'failed', end_reason: 'provider_error' }]);
+
+      // A has really failed (a failover, not a drain) and B is full: the call is decided over B's ceiling at the premium.
+      const two = await pair([1, 1], '1.5');
+      await must(act({ action: 'force_failover', providerId: two.a.id, reason: 'Twilio is failing for real, say the team.' }));
+      await occupy(two.b.id, two.t, 1);
+      // B refuses it. While it does, A's failover ends: the retry finds A up, with room, so the premium decided for B is dropped.
+      env.provider.state.respond = async (url, init) => { if (url.endsWith('/v2/calls')) { await must(act({ action: 'end_failover', providerId: two.a.id, reason: 'Twilio confirmed the fix.' })); return refuse(); } return before(url, init); };
+      env.provider.calls.length = 0;
+      const moved = await dial(two.t); expect(moved.statusCode).toBe(201);
+      expect(dials().map((c) => c.url.includes('/Calls.json'))).toEqual([false, true]);   // B refused, then A
+      expect(await callRow(moved.json().callId)).toMatchObject({ provider_id: two.a.id, burst: false, credit_multiplier: null, status: 'dialing' });
+      expect((await eventTypes(two.t)).filter((x) => x === 'call.burst')).toHaveLength(1);    // what was first decided stays in the log
     } finally { env.provider.state.respond = before; }
     await clearActive();
   });
@@ -365,7 +390,8 @@ describe('the premium for going over a ceiling, with a provider drained', () => 
   it('records a premium call that failed with nowhere else to go as never over a ceiling: no premium on the call or in the Control Tower count, and the burst event stays in the log', async () => {
     await clearActive(); await forgetDials();
     const { a, b, t } = await pair([1, 2], '1.5');
-    await occupy(a.id, t, 1); await drain(b.id);                                       // A is full and B drained: the call is decided over A's ceiling, at the premium
+    await occupy(a.id, t, 1); await occupy(b.id, t, 2);                                // both at their ceilings,
+    await drain(b.id);                                                                 // and B drained: its drain is not what is in the way, so the call is decided over A's ceiling, at the premium
     const overCeiling = async () => ((await must(env.call(st(), 'GET', '/internal/control-tower/panels'))).json().concurrency.providers as { providerId: string; burst24h: number }[]).find((p) => p.providerId === a.id)!.burst24h;
     const before = env.provider.state.respond;
     env.provider.state.respond = (url, init) => (url.includes('/Calls.json') ? new Response('{"message":"number not allowed"}', { status: 403 }) : before(url, init));
@@ -382,6 +408,106 @@ describe('the premium for going over a ceiling, with a provider drained', () => 
     const placed = await dial(t); expect(placed.statusCode).toBe(201);
     expect(await callRow(placed.json().callId)).toMatchObject({ provider_id: a.id, burst: true, credit_multiplier: '1.500' });
     expect(await overCeiling()).toBe(1);
+    await clearActive();
+  });
+
+  it('still goes over the ceiling at the premium when the drained provider is full too, since the drain is not what is in the way; a channel free on the drained provider makes the dial wait instead', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t } = await pair([1, 2], '1.5');
+    await occupy(a.id, t, 1); await occupy(b.id, t, 2);                                // both at their ceilings
+    await drain(b.id); env.provider.calls.length = 0;
+    const over = await dial(t); expect(over.statusCode).toBe(201);
+    expect(await callRow(over.json().callId)).toMatchObject({ provider_id: a.id, burst: true, credit_multiplier: '1.500', status: 'dialing' });
+    expect(dials()).toHaveLength(1); expect(dials()[0]!.url).toContain(`/Accounts/${a.sid}/Calls.json`);   // A only; the drained B was not contacted
+    expect((await load(b.id)).active).toBe(2);
+    // One channel of the drained provider is freed: now the drain is what is in the way, and the dial waits for the restore.
+    await env.pool.query(`UPDATE calls SET status = 'completed', ended_at = now() WHERE id = (SELECT id FROM calls WHERE provider_id = $1 AND status = 'dialing' LIMIT 1)`, [b.id]);
+    expect((await load(b.id)).active).toBe(1);
+    const before = await callCount(t); env.provider.calls.length = 0;
+    const held = await dial(t);
+    expect(held.statusCode).toBe(429); expect(held.json()).toMatchObject({ deferred: true });
+    expect(await lastDeferral(t)).toBe('drained');
+    expect(dials()).toHaveLength(0); expect(await callCount(t)).toBe(before);
+    expect((await eventTypes(t)).filter((x) => x === 'call.burst')).toHaveLength(1);   // only the first dial was over a ceiling
+    await clearActive();
+  });
+
+  it('goes over the ceiling at the premium, and does not wait, when the drained provider with room has also really failed: restoring it would not make it usable', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t } = await pair([1, 2], '1.5');
+    await occupy(a.id, t, 1);                                                          // A is full; B has room
+    await drain(b.id);
+    await must(act({ action: 'force_failover', providerId: b.id, reason: 'Telnyx is failing for real as well, say the team.' }));
+    env.provider.calls.length = 0;
+    try {
+      const r = await dial(t); expect(r.statusCode).toBe(201);
+      expect(await callRow(r.json().callId)).toMatchObject({ provider_id: a.id, burst: true, credit_multiplier: '1.500', status: 'dialing' });
+      expect(dials()).toHaveLength(1); expect(dials()[0]!.url).toContain(`/Accounts/${a.sid}/Calls.json`);
+    } finally { await must(act({ action: 'end_failover', providerId: b.id, reason: 'Telnyx confirmed the fix.' })); }
+    await clearActive();
+  });
+
+  it('is not held back by the drain of a provider the dial was not allowed to use: restricted to the provider that is up and full, it goes over that ceiling at the premium', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t } = await pair([1, 2], '1.5');
+    await occupy(a.id, t, 1); await drain(b.id);                                       // B has room, but is resting
+    env.provider.calls.length = 0;
+    const r = await dial(t, { providerId: a.id }); expect(r.statusCode).toBe(201);
+    expect(await callRow(r.json().callId)).toMatchObject({ provider_id: a.id, burst: true, credit_multiplier: '1.500', status: 'dialing' });
+    expect(dials()).toHaveLength(1); expect(dials()[0]!.url).toContain(`/Accounts/${a.sid}/Calls.json`);
+    // Not restricted, the same dial waits for B.
+    const held = await dial(t); expect(held.statusCode).toBe(429);
+    expect(await lastDeferral(t)).toBe('drained');
+    await clearActive();
+  });
+
+  it('does not wait for a drained provider that has no active caller ID of the client in the dial\'s country: its number retired, or in another country', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t, numB } = await pair([1, 2], '1.5');
+    await occupy(a.id, t, 1);                                                          // A is full; B has room but is drained
+    const numberB = (await env.pool.query('SELECT id FROM phone_numbers WHERE e164 = $1', [numB])).rows[0].id as string;
+    await must(act({ action: 'retire_number', phoneNumberId: numberB, reason: 'Flagged as spam by carriers.' }));
+    await drain(b.id); env.provider.calls.length = 0;
+    const retired = await dial(t); expect(retired.statusCode).toBe(201);               // B has no number to dial from, so its drain is not what is in the way
+    expect(await callRow(retired.json().callId)).toMatchObject({ provider_id: a.id, burst: true, credit_multiplier: '1.500' });
+    // With the number back, B could take the call once restored, so the dial waits for it.
+    await must(act({ action: 'reactivate_number', phoneNumberId: numberB, reason: 'Carrier cleared the flag.' }));
+    const back = await dial(t); expect(back.statusCode).toBe(429);
+    expect(await lastDeferral(t)).toBe('drained');
+    // The same number in another country is no caller ID for a dial to this one.
+    await env.pool.query(`UPDATE phone_numbers SET country = 'SG' WHERE id = $1`, [numberB]);
+    const abroad = await dial(t); expect(abroad.statusCode).toBe(201);
+    expect(await callRow(abroad.json().callId)).toMatchObject({ provider_id: a.id, burst: true, credit_multiplier: '1.500' });
+    expect(dials().every((c) => c.url.includes(`/Accounts/${a.sid}/Calls.json`))).toBe(true);   // never the drained B
+    await clearActive();
+  });
+
+  it('keeps the premium on a call whose outcome is unknown, and takes it off one the provider refused: a timeout or an unreadable reply may mean the call went out over the ceiling', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t } = await pair([1, 1], '1.5');
+    await occupy(a.id, t, 1); await occupy(b.id, t, 1);                                // both full, nothing drained: over a ceiling at the premium, on B (the cheaper)
+    const overCeiling = async () => ((await must(env.call(st(), 'GET', '/internal/control-tower/panels'))).json().concurrency.providers as { providerId: string; burst24h: number }[]).find((p) => p.providerId === b.id)!.burst24h;
+    const before = env.provider.state.respond;
+    const cases: { what: string; reply: () => Response; kept: boolean }[] = [
+      { what: 'a timeout', reply: () => { throw new Error('socket hang up'); }, kept: true },
+      { what: 'an unreadable reply', reply: () => new Response('{"data":{}}', { status: 200 }), kept: true },
+      { what: 'a refusal', reply: () => new Response('{"errors":[{"detail":"number not allowed"}]}', { status: 403 }), kept: false },
+    ];
+    try {
+      for (const { what, reply, kept } of cases) {
+        env.provider.state.respond = (url, init) => (url.endsWith('/v2/calls') ? reply() : before(url, init));
+        env.provider.calls.length = 0;
+        const known = (await env.pool.query(`SELECT id FROM calls WHERE tenant_id = $1 AND status = 'failed'`, [t])).rows.map((r) => r.id as string);
+        expect((await dial(t)).statusCode, what).toBe(502);
+        expect(dials(), what).toHaveLength(1);                                         // one attempt: even a refusal has nowhere else to go, and an unknown outcome is never tried again
+        const fresh = (await env.pool.query(`SELECT id, provider_id, end_reason, cost_status FROM calls WHERE tenant_id = $1 AND status = 'failed' AND NOT (id = ANY($2))`, [t, known])).rows;
+        expect(fresh, what).toHaveLength(1);
+        expect(fresh[0], what).toMatchObject({ provider_id: b.id, end_reason: 'provider_error', cost_status: 'not_applicable' });
+        expect(await callRow(fresh[0].id), what).toMatchObject(kept ? { burst: true, credit_multiplier: '1.500' } : { burst: false, credit_multiplier: null });
+      }
+    } finally { env.provider.state.respond = before; }
+    expect((await eventTypes(t)).filter((x) => x === 'call.burst')).toHaveLength(3);  // each decision is in the append-only log, whatever came of it
+    expect(await overCeiling()).toBe(2);                                               // and only the two that may have gone out over the ceiling are counted
     await clearActive();
   });
 

@@ -79,6 +79,17 @@ export interface PlaceInput {
   workflowId?: string;
 }
 
+/**
+ * The providers that could take a client's dial: active telephony providers holding an active number of the client's in the
+ * country, or only the one named when the dial names one. The contact's own locks are judged by `chooseDid`, not here.
+ */
+async function candidateProviders(c: pg.PoolClient, tenantId: string, country: string, providerId?: string): Promise<string[]> {
+  return (await c.query(
+    `SELECT DISTINCT n.provider_id FROM phone_numbers n JOIN providers p ON p.id = n.provider_id
+      WHERE n.tenant_id = $1 AND n.country = $2 AND n.status = 'active' AND p.kind = 'telephony' AND p.status = 'active' AND ($3::uuid IS NULL OR n.provider_id = $3)`,
+    [tenantId, country, providerId ?? null])).rows.map((r) => r.provider_id as string);
+}
+
 /** How long a held-back dial is told to wait before trying again. */
 export const RETRY_AFTER_SECONDS = 10;
 const MAX_DIAL_TRIES = 2;
@@ -88,8 +99,10 @@ const MAX_DIAL_TRIES = 2;
  * Then the DID check picks the caller ID (or checks the one named): a DID that has ever failed for this contact is
  * never used for them again, and a provider that is failed, out of funding or at its concurrency ceiling is passed
  * over for one that can take the call. If every provider is full, the dial is held back (the caller retries) unless the
- * client has agreed to pay a premium for overburst. If the chosen provider fails to place the call, the next one is
- * tried. The customer's number is passed to the provider and not kept; only a keyed hash of it is.
+ * client has agreed to pay a premium for overburst. A provider an operator has drained, and that has room, counts as
+ * the reason the call cannot go out: the dial waits for it (`drained`), whether or not the client agreed to the premium,
+ * and a premium is paid only when the drain is not what is in the way. If the chosen provider fails to place the call,
+ * the next one is tried. The customer's number is passed to the provider and not kept; only a keyed hash of it is.
  */
 export async function placeOutboundCall(d: CallDeps, actorId: string | null, input: PlaceInput) {
   if (!d.baseUrl) throw new AppError(503, 'PUBLIC_BASE_URL is not set, so providers cannot reach this server. Set it to place calls.');
@@ -179,21 +192,21 @@ export async function placeOutboundCall(d: CallDeps, actorId: string | null, inp
       }
     } else {
       const base = { tenantId: input.tenantId, projectId: input.projectId, callId, country: input.country, contactHash: chash, providerId: input.providerId, unhealthy };
+      // Providers an operator is resting that could take the dial, and have not really failed: the drain, not a failure, keeps them out.
+      const resting = async () => (await candidateProviders(c, input.tenantId, input.country, input.providerId)).filter((pid) => drained.has(pid) && !reallyUnhealthy.has(pid));
       let choice = await chooseDid(c, { ...base, full });
       if (!choice.ok && choice.reason === 'at_capacity') {
+        // Every provider that is up is full, but one an operator is resting has room: the drain is what is in the way, so the dial
+        // waits for the restore. It does not go over another provider's ceiling at the premium, and it is not "every provider was
+        // at its limit". (When the drained provider is full too, the drain is not the reason, and the dial goes on as below.)
+        if ((await resting()).some((pid) => !full.has(pid))) return await defer(c, 'drained');
         const ent = await getEntitlement(c, input.tenantId);
         if (!ent?.overburst_multiplier) return await defer(c, 'at_capacity');
         choice = await chooseDid(c, base);                 // the client has agreed to the premium: use capacity beyond the ceiling
         burst = true; creditMultiplier = ent.overburst_multiplier;
       }
       // Every provider that could take it is drained (none actually failed): wait for one to be restored.
-      if (!choice.ok && choice.reason === 'providers_unhealthy') {
-        const candidates = (await c.query(
-          `SELECT DISTINCT n.provider_id FROM phone_numbers n JOIN providers p ON p.id = n.provider_id
-            WHERE n.tenant_id = $1 AND n.country = $2 AND n.status = 'active' AND p.kind = 'telephony' AND p.status = 'active' AND ($3::uuid IS NULL OR n.provider_id = $3)`,
-          [input.tenantId, input.country, input.providerId ?? null])).rows.map((r) => r.provider_id as string);
-        if (candidates.some((pid) => drained.has(pid) && !reallyUnhealthy.has(pid))) return await defer(c, 'drained');
-      }
+      if (!choice.ok && choice.reason === 'providers_unhealthy' && (await resting()).length > 0) return await defer(c, 'drained');
       if (choice.ok) { from = choice.e164; fromId = choice.phoneNumberId; providerId = choice.providerId; }
       else refusal = {
         reason: choice.reason, status: choice.reason === 'providers_unhealthy' ? 503 : 409,
@@ -279,9 +292,14 @@ export async function placeOutboundCall(d: CallDeps, actorId: string | null, inp
       });
       if (next) { p = next.provider; from = next.from; continue; }
       await asInternal(d, async (c) => {
-        // A call that failed outright was never over a ceiling and is never priced, so the premium decided for it goes too (the
-        // `call.burst` event already written stays: the log is append-only, and says what was decided).
-        await c.query(`UPDATE calls SET status = 'failed', ended_at = now(), end_reason = 'provider_error', cost_status = 'not_applicable', burst = false, credit_multiplier = NULL WHERE id = $1`, [callId]);
+        // A definite refusal means the call was never placed, so it was never over a ceiling and is never priced: the premium decided
+        // for it goes too (the `call.burst` event already written stays: the log is append-only, and says what was decided). A
+        // timeout or an unreadable reply leaves the outcome unknown (the call may have gone out over the ceiling), so its premium
+        // markers stay, as the record of what was decided and may have happened.
+        await c.query(
+          `UPDATE calls SET status = 'failed', ended_at = now(), end_reason = 'provider_error', cost_status = 'not_applicable',
+                  burst = burst AND NOT $2, credit_multiplier = CASE WHEN $2 THEN NULL ELSE credit_multiplier END WHERE id = $1`,
+          [callId, err instanceof ProviderRefused]);
         await recordEvent(c, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'call.failed', payload: { reason } });
       });
       throw new AppError(502, reason);

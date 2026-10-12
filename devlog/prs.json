@@ -3034,10 +3034,10 @@
  {
   "number": 75,
   "title": "CI: typecheck and the whole suite on every pull request to main (DCT-13)",
-  "state": "open",
+  "state": "closed",
   "html_url": "https://github.com/skchiew-bot/voicelab2/pull/75",
   "created_at": "2026-10-11T19:52:51Z",
-  "merged_at": null,
+  "merged_at": "2026-10-12T19:54:41Z",
   "findings": [
    {
     "severity": "Unrated",

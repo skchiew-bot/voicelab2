@@ -519,6 +519,23 @@ describe('the premium for going over a ceiling, with a provider drained', () => 
     await clearActive();
   });
 
+  it('waits for a drained provider that still holds a caller ID this contact may be shown, though another of its numbers is locked for them', async () => {
+    await clearActive(); await forgetDials();
+    const { a, b, t } = await pair([1, 2], '1.5');
+    const locked = contact();
+    await lockFor(t, b.id, locked);                                                    // B's first caller ID has failed for this contact
+    expect(await locksOf(t)).toBe(1);
+    await must(post('/internal/numbers', { providerId: b.id, e164: e164(), tenantId: t, country: 'MY' }));   // a second one at B, not locked for them
+    await occupy(a.id, t, 1); await drain(b.id);                                       // A is full; B has room but is resting
+    env.provider.calls.length = 0; const before = await callCount(t);
+    // B could show this contact its second caller ID once restored, so the drain is what is in the way: the dial waits, at no premium.
+    const waits = await dial(t, { to: locked }); expect(waits.statusCode).toBe(429); expect(waits.json()).toMatchObject({ deferred: true, status: 'deferred' });
+    expect(await lastDeferral(t)).toBe('drained');
+    expect(dials()).toHaveLength(0); expect(await callCount(t)).toBe(before);
+    expect(await eventTypes(t)).not.toContain('call.burst');
+    await clearActive();
+  });
+
   it('refuses the dial, and does not hold it back, when the provider that is up has really failed and the drained one holds only caller IDs locked for this contact', async () => {
     await clearActive(); await forgetDials();
     const { a, b, t } = await pair([1, 2]);

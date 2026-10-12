@@ -572,7 +572,6 @@ describe('a callback met by a drained provider', () => {
     let drained = false;
     try {
       await must(act({ action: 'drain', providerId: telnyxId, reason: 'Resting it for this test.' })); drained = true;
-      const before = dials().length;
       let now = mins(T, 1);
       // More held-back runs than the case has retries (3): were each to spend one, the case would be waiting for a person by the end.
       for (let i = 0; i < 5; i++) {
@@ -583,7 +582,7 @@ describe('a callback met by a drained provider', () => {
         expect(new Date(cb!.scheduled_for).toISOString(), `run ${i}`).toBe(new Date(now.getTime() + RETRY_AFTER_SECONDS * 1000).toISOString());   // held for the pause, from the moment it was reached
         now = new Date(new Date(cb!.scheduled_for).getTime() + 1000);                                     // and the next run comes just after the hold
       }
-      expect(dials()).toHaveLength(before);                                                              // nobody was dialled
+      expect(mine()).toBe(0);                                                                            // nobody was dialled for it
       expect(await actionsOf(c.id, 'retry')).toHaveLength(0);                                            // and no retry was scheduled or used
       expect(await attempts()).toBe(0);
       expect((await view(c.id)).status).toBe('open');                                                    // not waiting for a person

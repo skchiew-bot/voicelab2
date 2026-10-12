@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { addDays, localParts, localToInstant } from '../src/cases/policy.js';
 import { withActor } from '../src/db.js';
 import { parseKey } from '../src/secrets.js';
-import { loadProvider, placeOutboundCall, processWebhook, type CallDeps } from '../src/store/calls.js';
+import { loadProvider, placeOutboundCall, processWebhook, RETRY_AFTER_SECONDS, type CallDeps } from '../src/store/calls.js';
 import { checkPayments, decideCase, dispatchDue, sweepAgeing, type CaseDeps } from '../src/store/cases.js';
 import { contactHash, contactKeyFrom, dncKeyFrom } from '../src/store/dnc.js';
 import type { NormalizedEvent } from '../src/telephony/types.js';
@@ -556,5 +556,52 @@ describe('what the independent review found', () => {
     expect(await listed()).toBe(false);
     await must(post(`/internal/cases/${c.id}/decision`, { decision: 'continue', note: 'Carry on.' }));
     expect((await actionsOf(c.id, 'callback')).filter((a) => a.status === 'pending')).toHaveLength(1);              // not left with nothing scheduled
+  });
+});
+
+describe('a callback met by a drained provider', () => {
+  const act = (body: object) => post('/internal/control-tower/actions', body);
+
+  it('goes back to waiting each time the drain holds its dial back, with its attempt and the retries unchanged, and dials once the provider is restored and the hold has passed', async () => {
+    const c = await mkCase('drained-cb'); const T = nextLocal('11:00');
+    await must(callbackAt(c.id, T));
+    const [first] = await actionsOf(c.id, 'callback');
+    expect(first).toMatchObject({ status: 'pending' });
+    const mine = () => dials().filter((d) => String(d.body).includes(c.phone)).length;
+    const attempts = async () => (await env.pool.query('SELECT count(*)::int AS n FROM case_attempts WHERE case_id = $1', [c.id])).rows[0].n as number;
+    let drained = false;
+    try {
+      await must(act({ action: 'drain', providerId: telnyxId, reason: 'Resting it for this test.' })); drained = true;
+      const before = dials().length;
+      let now = mins(T, 1);
+      // More held-back runs than the case has retries (3): were each to spend one, the case would be waiting for a person by the end.
+      for (let i = 0; i < 5; i++) {
+        const out = await dispatchDue(deps, now, 1000);
+        expect(out.deferred, `run ${i}`).toContain(first!.id);
+        const [cb] = await actionsOf(c.id, 'callback');
+        expect(cb, `run ${i}`).toMatchObject({ id: first!.id, status: 'pending', attempt: first!.attempt, call_id: null });
+        expect(new Date(cb!.scheduled_for).toISOString(), `run ${i}`).toBe(new Date(now.getTime() + RETRY_AFTER_SECONDS * 1000).toISOString());   // held for the pause, from the moment it was reached
+        now = new Date(new Date(cb!.scheduled_for).getTime() + 1000);                                     // and the next run comes just after the hold
+      }
+      expect(dials()).toHaveLength(before);                                                              // nobody was dialled
+      expect(await actionsOf(c.id, 'retry')).toHaveLength(0);                                            // and no retry was scheduled or used
+      expect(await attempts()).toBe(0);
+      expect((await view(c.id)).status).toBe('open');                                                    // not waiting for a person
+      expect(await eventsOf(c.id)).not.toEqual(expect.arrayContaining(['retries_exhausted']));
+      // Restored, it still waits out its hold: the run just before it is due places nothing.
+      await must(act({ action: 'restore', providerId: telnyxId, reason: 'Done resting it.' })); drained = false;
+      const [held] = await actionsOf(c.id, 'callback');
+      const early = await dispatchDue(deps, new Date(new Date(held!.scheduled_for).getTime() - 5000), 1000);
+      expect(early.placed).not.toContain(first!.id); expect(mine()).toBe(0);
+      // Once the hold has passed it dials, as the same attempt of the same callback.
+      const out = await dispatchDue(deps, new Date(new Date(held!.scheduled_for).getTime() + 1000), 1000);
+      expect(out.placed).toContain(first!.id);
+      expect(mine()).toBe(1);
+      expect((await actionsOf(c.id, 'callback'))[0]).toMatchObject({ id: first!.id, status: 'placed', attempt: first!.attempt });
+      expect(await actionsOf(c.id, 'retry')).toHaveLength(0);
+      expect(await eventsOf(c.id)).toContain('callback.placed');
+    } finally {
+      if (drained) await act({ action: 'restore', providerId: telnyxId, reason: 'Done resting it.' });
+    }
   });
 });

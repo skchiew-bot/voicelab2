@@ -279,7 +279,9 @@ export async function placeOutboundCall(d: CallDeps, actorId: string | null, inp
       });
       if (next) { p = next.provider; from = next.from; continue; }
       await asInternal(d, async (c) => {
-        await c.query(`UPDATE calls SET status = 'failed', ended_at = now(), end_reason = 'provider_error', cost_status = 'not_applicable' WHERE id = $1`, [callId]);
+        // A call that failed outright was never over a ceiling and is never priced, so the premium decided for it goes too (the
+        // `call.burst` event already written stays: the log is append-only, and says what was decided).
+        await c.query(`UPDATE calls SET status = 'failed', ended_at = now(), end_reason = 'provider_error', cost_status = 'not_applicable', burst = false, credit_multiplier = NULL WHERE id = $1`, [callId]);
         await recordEvent(c, { tenantId: input.tenantId, projectId: input.projectId, callId, type: 'call.failed', payload: { reason } });
       });
       throw new AppError(502, reason);

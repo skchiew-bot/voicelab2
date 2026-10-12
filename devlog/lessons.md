@@ -155,11 +155,12 @@ Format, checked by `tests/devlog.test.ts`:
   - `tests/failover.test.ts` › "does not switch back on the first sign of recovery"
   - `tests/failover.test.ts` › "only what happened since counts"
 
-### L-013: Start from the latest main before reporting or building
-- **Seen:** A session branch was cut from a commit before PRs #5–#10 merged. A Control Tower status report was then given against that stale code and reported built features as missing (session on 2026-10-09).
-- **Rule:** At session start, check how far the branch is behind `origin/main`. If it is behind, bring `main` in before saying anything about the state of the project.
+### L-013: Check the latest state, not one stale record, before reporting or building
+- **Seen:** 2 times. A session branch was cut from a commit before PRs #5–#10 merged. A Control Tower status report was then given against that stale code and reported built features as missing (session on 2026-10-09). A board task still marked in progress (CT-3), whose branch had merged as [#25](https://github.com/skchiew-bot/voicelab2/pull/25) two days before, was put to the owner as work with nothing recorded, and the owner chose to start it again; the board alone was read, not the PR that carried it (dev Control Tower refresh, 2026-10-12).
+- **Rule:** At session start, check how far the branch is behind `origin/main`. If it is behind, bring `main` in before saying anything about the state of the project. Before saying that work is missing or not started, check the branches and PRs that would carry it, not one record alone; the dev Control Tower flags an open task whose work already merged.
 - **Guards:**
   - `tests/devlog.test.ts` › "warns at session start when the branch is behind origin/main"
+  - `tests/devlog.test.ts` › "flags an open task whose work already merged, but not one on a branch name reused after an earlier merge"
 
 ### L-014: When a request could mean two things, ask which
 - **Seen:** 2 times. "Control Tower" names both the product's operations console (`BUILD_PLAN.md`) and the owner's dashboard for monitoring development. A request for the second was built as the first (session on 2026-10-09). The dev Control Tower was then designed without asking whether a reference existed; the owner already had one in `skchiew-bot/d3ngineering` (session on 2026-10-10).

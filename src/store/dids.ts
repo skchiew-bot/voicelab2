@@ -38,7 +38,16 @@ export async function outboundPerMinuteUsd(c: pg.PoolClient, providerId: string,
 
 export type DidChoice =
   | { ok: true; phoneNumberId: string; e164: string; providerId: string; priceKnown: boolean; perMinuteUsd: string | null; candidates: number; locked: number }
-  | { ok: false; reason: 'no_numbers' | 'all_locked_for_contact' | 'providers_unhealthy' | 'at_capacity'; candidates: number; locked: number };
+  | {
+    ok: false; reason: 'no_numbers' | 'all_locked_for_contact' | 'providers_unhealthy' | 'at_capacity'; candidates: number; locked: number;
+    /**
+     * The providers holding at least one number this contact may be shown: the client's active numbers in the country, on active
+     * telephony providers (only the one named, when the dial names one), not locked for this contact. Whether the provider is
+     * failed, drained or full does not matter here. A dial that cannot go now may wait for one of these to come back; a provider
+     * whose every number is locked for this contact could never take the call, so waiting for it would be waiting for ever.
+     */
+    unlockedProviders: string[];
+  };
 
 /**
  * The DID check, run before every dial. A DID that has ever failed for this contact is out for good. Of the rest,
@@ -84,7 +93,7 @@ export async function chooseDid(
   };
   if (eligible.length === 0) {
     const reason = pool.length === 0 ? 'no_numbers' : notLocked.length === 0 ? 'all_locked_for_contact' : healthy.length === 0 ? 'providers_unhealthy' : 'at_capacity';
-    return finish({ ok: false, reason, candidates: pool.length, locked });
+    return finish({ ok: false, reason, candidates: pool.length, locked, unlockedProviders: [...new Set(notLocked.map((n) => n.provider_id))] });
   }
 
   const price = new Map<string, bigint | null>();

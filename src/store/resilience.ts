@@ -139,8 +139,18 @@ export async function providerHealthViews(c: pg.PoolClient) {
 export async function setRoutes(c: pg.PoolClient, actorId: string | null, tenantId: string, role: 'voice', providerIds: string[]) {
   if (new Set(providerIds).size !== providerIds.length) throw new AppError(400, 'A provider can be listed once.');
   if (providerIds.length) {
+    // The lock a drain takes, taken first: a drain decides whether it strands a client from the routes as they are, so it
+    // must see this change whole or not at all, and this change must see the drains the same way. Without it a drain of
+    // the one provider and a route to just that provider, arriving together, would each pass and leave only a drained one.
+    await c.query(`SELECT pg_advisory_xact_lock(hashtext('capacity'))`);
     const found = (await c.query(`SELECT id FROM providers WHERE id = ANY($1) AND kind = 'voice' AND status = 'active'`, [providerIds])).rowCount;
     if (found !== providerIds.length) throw new AppError(400, 'Every provider in a voice route must be an active voice provider.');
+    // The route must keep at least one provider that can take a call, the state a drain is refused for.
+    const drained = (await c.query(
+      `SELECT p.name FROM providers p JOIN provider_controls k ON k.provider_id = p.id WHERE p.id = ANY($1) AND k.drained_at IS NOT NULL ORDER BY p.name`, [providerIds])).rows.map((r) => r.name as string);
+    if (drained.length === providerIds.length) {
+      throw new AppError(409, `${drained.join(', ')} ${drained.length === 1 ? 'is' : 'are'} drained, so this route would leave the client with no usable voice provider. Restore ${drained.length === 1 ? 'it' : 'one'} on the Control Tower, or add another provider to the route.`);
+    }
   }
   await c.query('DELETE FROM provider_routes WHERE tenant_id = $1 AND role = $2', [tenantId, role]);
   for (const [i, id] of providerIds.entries()) await c.query('INSERT INTO provider_routes (tenant_id, role, provider_id, priority) VALUES ($1,$2,$3,$4)', [tenantId, role, id, i]);
